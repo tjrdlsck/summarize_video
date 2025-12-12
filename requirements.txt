@@ -1,0 +1,6 @@
+mlx-whisper 
+torch 
+torchaudio 
+numpy
+huggingface_hub
+soundfile
