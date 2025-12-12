@@ -4,3 +4,5 @@ torchaudio
 numpy
 huggingface_hub
 soundfile
+google-genai 
+python-dotenv

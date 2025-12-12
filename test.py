@@ -121,53 +121,69 @@ def get_speech_timestamps_silero(audio_path, threshold=0.5):
         return [] # 에러나면 빈 리스트 반환 (검증 포기)
 
 # --- [Module 2.5] VAD Overlap Filter (The Logical Cutter) ---
-def filter_hallucinations_by_vad(whisper_segments, vad_segments, threshold_sec=2.0):
+# --- [Module 2.5] VAD Overlap Filter (Smart Ratio Version) ---
+def filter_hallucinations_by_vad(whisper_segments, vad_segments, min_speech_ratio=0.2, min_speech_duration=0.5):
     """
-    Whisper가 생성한 세그먼트와 실제 VAD 음성 구간을 비교하여,
-    '소리는 없는데 텍스트만 긴' 환각 구간을 제거합니다.
+    Whisper 세그먼트와 VAD 구간을 비교하여 환각을 제거합니다. (비율 기반 개선판)
     
     Args:
-        whisper_segments (list): Whisper 결과의 'segments' 리스트
-        vad_segments (list): VAD가 감지한 [(start, end), ...] 리스트
-        threshold_sec (float): 허용 오차 (초). (기본 2초)
-                               Whisper 구간이 실제 음성보다 2초 이상 길면 환각으로 간주.
+        min_speech_ratio (float): 세그먼트 전체 길이 중 실제 음성이 차지해야 하는 최소 비율 (0.0 ~ 1.0).
+                                  예: 0.2 -> 전체 길이의 20% 이상이 음성이면 통과.
+        min_speech_duration (float): 비율과 상관없이, 최소 이 시간 이상의 음성이 있으면 살려줌 (초 단위).
     """
     if not vad_segments:
-        return whisper_segments # VAD 정보 없으면 필터링 스킵
+        return whisper_segments
 
     valid_segments = []
     dropped_count = 0
     
-    print(f"\n--- [Filter] Checking {len(whisper_segments)} segments against VAD ---")
+    print(f"\n--- [Filter] Checking {len(whisper_segments)} segments (Ratio Method) ---")
 
     for seg in whisper_segments:
         w_start = seg['start']
         w_end = seg['end']
         w_dur = w_end - w_start
-        w_text = seg['text']
-
-        # 해당 Whisper 구간 내에 존재하는 '실제 음성 시간'의 합을 계산
-        actual_speech_dur = 0.0
         
+        # 0초짜리 세그먼트 방어
+        if w_dur <= 0:
+            continue
+
+        # 해당 Whisper 구간 내에 존재하는 '실제 음성 시간'의 합 계산
+        actual_speech_dur = 0.0
         for v_start, v_end in vad_segments:
-            # 두 구간의 교집합(Overlap) 구하기
             overlap_start = max(w_start, v_start)
             overlap_end = min(w_end, v_end)
-            
             if overlap_end > overlap_start:
                 actual_speech_dur += (overlap_end - overlap_start)
         
-        # [핵심 판별 로직]
-        # "생성된 텍스트 시간" > "실제 음성 시간" + "임계값(2초)"
-        # 예: Whisper는 30초라고 주장하는데, 실제 음성은 1초밖에 없다? -> 탈락
-        if w_dur > (actual_speech_dur + threshold_sec):
-            print(f" -> Dropped Hallucination: [{w_start:.2f}~{w_end:.2f}] (Speech: {actual_speech_dur:.2f}s) '{w_text.strip()[:20]}...'")
+        # [핵심 로직 개선]
+        # 1. 비율 계산 (Speech Ratio)
+        speech_ratio = actual_speech_dur / w_dur
+        
+        # 2. 판별 로직
+        # 조건 A: 실제 음성이 너무 짧으면(예: 0.5초 미만) -> 잡음일 확률 높음 -> Drop 후보
+        # 조건 B: 전체 길이 대비 음성 비율이 너무 낮으면(예: 20% 미만) -> 침묵 속 환각 -> Drop 후보
+        
+        is_valid = False
+        
+        # [Pass 조건 1] 음성 비율이 기준치(20%)를 넘으면 통과 (긴 문장에서 숨쉬는 구간 허용)
+        if speech_ratio >= min_speech_ratio:
+            is_valid = True
+            
+        # [Pass 조건 2] 비율이 좀 낮아도, 절대적인 말하기 양이 충분히 길면(예: 2초 이상) 통과
+        # VAD가 가끔 앞뒤를 잘라먹어도, 핵심 음성이 길게 잡혔으면 살려야 함
+        elif actual_speech_dur >= 2.0: 
+            is_valid = True
+            
+        # [Fail] 위 조건에 부합하지 않으면 삭제
+        if not is_valid:
+            print(f" -> Dropped Hallucination: [{w_start:.2f}~{w_end:.2f}] (Speech: {actual_speech_dur:.2f}s, Ratio: {speech_ratio:.2f}) '{seg['text'].strip()[:20]}...'")
             dropped_count += 1
-            continue # 리스트에 추가하지 않음 (삭제)
+            continue
             
         valid_segments.append(seg)
 
-    print(f"-> Removed {dropped_count} segments based on VAD duration check.")
+    print(f"-> Removed {dropped_count} segments based on Speech Ratio Check.")
     return valid_segments
 
 # --- [Module 2.5] 텍스트 후처리 (청소부) ---
@@ -222,11 +238,25 @@ def clean_repetitive_text(text):
 
     return text.strip()
 
-# --- [Module 3] Whisper Inference (Final Integration) ---
-# --- [Module 3] Whisper Inference (Final Integration) - 주석 해제 수정본 ---
+# --- [Module 2.6] SRT 유틸리티 (추가됨) ---
+def format_timestamp_srt(seconds):
+    """
+    초(float) 단위를 SRT 시간 포맷인 'HH:MM:SS,mmm'으로 변환합니다.
+    수식: H = t // 3600, M = (t % 3600) // 60, S = t % 60, ms = (t - int(t)) * 1000
+    """
+    if seconds < 0: seconds = 0
+    
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    seconds_rem = int(seconds % 60)
+    milliseconds = int((seconds - int(seconds)) * 1000)
+    
+    return f"{hours:02}:{minutes:02}:{seconds_rem:02},{milliseconds:03}"
+
+# --- [Module 3] Whisper Inference & SRT Generation (Modified) ---
 def transcribe_video(video_path, initial_prompt):
     
-    # 1. FFmpeg 변환
+    # 1. FFmpeg 변환 (기존 유지)
     if not check_ffmpeg(): return
     wav_path = convert_to_16k_wav(video_path)
     if not wav_path: return
@@ -236,7 +266,7 @@ def transcribe_video(video_path, initial_prompt):
     
     if not vad_segments:
         print("[Info] No speech detected by VAD. Skipping.")
-        return ""
+        return
 
     MODEL_PATH = "mlx-community/whisper-large-v3-mlx-4bit"
     print(f"--- [Step 2] Transcribing with {MODEL_PATH} ---")
@@ -251,47 +281,67 @@ def transcribe_video(video_path, initial_prompt):
             verbose=True, 
             temperature=0.0,
             condition_on_previous_text=False, 
-            no_speech_threshold=0.6,          
+            no_speech_threshold=0.4,          
         )
         
         raw_segments = output.get('segments', [])
         
         # 4. [1차 필터] VAD 기반 시간 대조 (소리 없는 환각 제거)
-        clean_segments = filter_hallucinations_by_vad(raw_segments, vad_segments, threshold_sec=2.0)
+        # 소리가 없는데 자막만 생성된 구간을 삭제합니다.
+        clean_segments = filter_hallucinations_by_vad(raw_segments, vad_segments)
         
-        # 5. [2차 필터] 텍스트 기반 패턴 제거 (웃음소리 반복 제거) - 핵심!
-        final_text_parts = []
+        # 5. [2차 필터] 텍스트 기반 패턴 제거 & SRT 데이터 준비
+        final_srt_segments = []
+        
+        print("\n--- [Step 3] Post-processing Text & Generating SRT ---")
+        
         for seg in clean_segments:
             raw_text = seg['text'].strip()
             
-            # [수정됨] 주석(#)을 제거하고 함수를 확실히 호출합니다.
+            # 정규표현식으로 반복어구/환각 텍스트 제거
             cleaned_text = clean_repetitive_text(raw_text)
             
-            # 정제 후 내용이 빈 문자열이 아니면 추가
+            # 정제 후 텍스트가 비어있지 않은 경우에만 SRT 리스트에 추가
             if cleaned_text:
-                final_text_parts.append(cleaned_text)
+                # 원본 세그먼트의 시간 정보를 그대로 유지하되, 텍스트만 교체
+                seg['text'] = cleaned_text
+                final_srt_segments.append(seg)
             else:
-                print(f" -> Removed purely repetitive segment: '{raw_text[:20]}...'")
-            
-        final_text = "\n".join(final_text_parts)
+                # 텍스트 정제 결과가 공백이면(예: "ㅋㅋㅋㅋ"만 있던 경우), 자막에서 제외
+                print(f" -> Removed empty text segment after cleaning: [{seg['start']:.2f}~{seg['end']:.2f}]")
+
+        # 6. SRT 파일 쓰기
+        # 영상 파일명과 동일하게 .srt 확장자로 저장
+        srt_filename = os.path.splitext(video_path)[0] + ".srt"
+        
+        with open(srt_filename, "w", encoding="utf-8") as srt_file:
+            for idx, segment in enumerate(final_srt_segments, start=1):
+                start_time = format_timestamp_srt(segment["start"])
+                end_time = format_timestamp_srt(segment["end"])
+                text = segment["text"]
+
+                # SRT 포맷 작성
+                srt_file.write(f"{idx}\n")
+                srt_file.write(f"{start_time} --> {end_time}\n")
+                srt_file.write(f"{text}\n\n")
 
         print("\n" + "="*50)
-        print(" [Verified Result] ")
+        print(f" [SRT Generation Completed] ")
+        print(f" Saved to: {srt_filename}")
         print("="*50)
-        print(final_text)
         
-        return final_text
+        return srt_filename
 
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error during transcription: {e}")
         import traceback
         traceback.print_exc()
+        return None
 
 # --- [Main Execution] ---
 if __name__ == "__main__":
-    # 1. 입력 파일 설정 (여기에 MP4 파일 경로를 넣으세요)
-    # 예: "lecture_video.mp4"
-    INPUT_VIDEO = "video/test_video1.mp4" 
+    # 1. 입력 파일 설정
+    INPUT_VIDEO = "video/test3.mp4" 
     
     # 2. 문맥 프롬프트 설정
     CONTEXT_PROMPT = (
@@ -299,11 +349,8 @@ if __name__ == "__main__":
     )
 
     if os.path.exists(INPUT_VIDEO):
-        transcribe_video(INPUT_VIDEO, CONTEXT_PROMPT)
+        result_srt = transcribe_video(INPUT_VIDEO, CONTEXT_PROMPT)
+        if result_srt:
+            print(f"Subtitle file is ready: {result_srt}")
     else:
-        print(f"File '{INPUT_VIDEO}' not found. Please provide a valid video file.")
-        
-        # 테스트용 파일 생성 (없을 경우를 대비한 더미 코드)
-        # 실제 사용 시에는 무시하셔도 됩니다.
-        print("\n[Tip] 테스트할 MP4 파일이 없다면, 아래 명령어로 샘플을 다운로드해 보세요:")
-        print(f"curl -o {INPUT_VIDEO} https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4")
+        print(f"File '{INPUT_VIDEO}' not found.")
