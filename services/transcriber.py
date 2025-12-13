@@ -6,6 +6,7 @@ import torch
 import mlx_whisper
 import soundfile as sf
 import numpy as np
+import stable_whisper
 
 class VideoTranscriber:
     """
@@ -103,35 +104,9 @@ class VideoTranscriber:
         text = re.sub(r'(\S+)(?:\s+\1){3,}', r'\1 \1', text)
         return text.strip()
 
-    def _format_srt_time(self, seconds):
-        """초 -> HH:MM:SS,mmm 포맷 변환"""
-        ms = int((seconds - int(seconds)) * 1000)
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
-
-    def _format_srt_time(self, seconds):
-        """초 -> HH:MM:SS,mmm 포맷 변환 (SRT용)"""
-        ms = int((seconds - int(seconds)) * 1000)
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        return f"{h:02}:{m:02}:{s:02},{ms:03}"
-
-    # [New] WebVTT용 시간 포맷팅 메서드 추가 (위치는 _format_srt_time 바로 아래 권장)
-    def _format_vtt_time(self, seconds):
-        """초 -> HH:MM:SS.mmm 포맷 변환 (WebVTT 표준, 마침표 사용)"""
-        ms = int((seconds - int(seconds)) * 1000)
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        return f"{h:02}:{m:02}:{s:02}.{ms:03}"
-
     def transcribe(self, video_path, status_callback=None):
         """
-        [Main Pipeline] 영상 -> 오디오 -> VAD -> Whisper -> Filter -> Clean -> Save & Return
-        
-        Args:
-            video_path (str): 분석할 영상 파일 경로
-            status_callback (func, optional): (message: str) -> None 형태의 상태 보고 콜백
+        [Main Pipeline] 영상 -> 오디오 -> VAD -> Whisper(Word-Level) -> Filter -> Regroup(Stable-Whisper) -> Save
         """
         print(f"--- [Transcriber] Start processing: {video_path} ---")
         
@@ -148,73 +123,80 @@ class VideoTranscriber:
             
         vad_segments = self._get_vad_timestamps(wav_path)
         
-        # 3. Whisper 실행
-        print(" -> Running Whisper Inference...")
+        # 3. Whisper 실행 (Word Timestamps 활성화)
+        print(" -> Running Whisper Inference (with word timestamps)...")
         if status_callback:
             status_callback("AI가 스크립트를 작성하는 중... (시간이 걸립니다)")
             
+        # [Modified] word_timestamps=True 추가
         output = mlx_whisper.transcribe(
             wav_path,
             path_or_hf_repo=self.model_path,
             language="ko",
-            verbose=True
+            verbose=True,
+            word_timestamps=True 
         )
         
-        # 4. 필터링 및 정제
+        # 4. 필터링 (VAD 기반 환각 제거)
         if status_callback:
             status_callback("환각 필터링 및 데이터 정제 중...")
             
         raw_segments = output.get('segments', [])
         clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
-        
-        final_data = []
-        srt_content = []
-        vtt_content = ["WEBVTT\n"]  # [New] VTT 헤더 추가
-        
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
-        
-        for idx, seg in enumerate(clean_segments, 1):
-            text = self._clean_text(seg['text'])
-            if not text: continue
-            
-            start = seg['start']
-            end = seg['end']
-            
-            # JSON용 데이터 구조
-            final_data.append({
-                "id": idx,
-                "start": start,
-                "end": end,
-                "text": text
-            })
-            
-            # SRT용 포맷팅
-            s_time_srt = self._format_srt_time(start)
-            e_time_srt = self._format_srt_time(end)
-            srt_content.append(f"{idx}\n{s_time_srt} --> {e_time_srt}\n{text}\n")
 
-            # [New] VTT용 포맷팅
-            s_time_vtt = self._format_vtt_time(start)
-            e_time_vtt = self._format_vtt_time(end)
-            vtt_content.append(f"{idx}\n{s_time_vtt} --> {e_time_vtt}\n{text}\n")
+        # [New] Stable-Whisper 후처리 파이프라인 시작
+        if status_callback:
+            status_callback("자막 가독성 최적화(Regrouping) 중...")
+
+        # 4-1. 텍스트 1차 정제 (특수문자/반복 제거)
+        # Stable-Whisper에 넣기 전에 텍스트를 깨끗하게 만듭니다.
+        for seg in clean_segments:
+            if 'text' in seg:
+                seg['text'] = self._clean_text(seg['text'])
+
+        # 4-2. MLX 결과를 Stable-Whisper 객체로 변환
+        # Stable-Whisper는 text, segments, language 키가 있는 dict를 받습니다.
+        composition = {
+            "text": " ".join([s['text'] for s in clean_segments]),
+            "segments": clean_segments,
+            "language": output.get("language", "ko")
+        }
+        result = stable_whisper.WhisperResult(composition)
+
+        # 4-3. 스마트 분할 (Split) 적용
+        # max_chars: 한 줄당 최대 글자 수 (25자 내외 추천)
+        # max_words: 한 줄당 최대 단어 수 (무제한=None)
+        # split_by_gap: 0.5초 이상 침묵이 있으면 줄바꿈
+        result.split_by_length(max_chars=25, max_words=None)
+        result.split_by_gap(0.5)
 
         # 5. 파일 저장
         if status_callback:
             status_callback("결과 파일 저장 중...")
 
-        # (1) SRT 저장
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        
+        # (1) SRT 저장 (Stable-Whisper 내장 함수 사용)
         srt_filename = f"{base_name}.srt"
         srt_path = os.path.join(self.output_dir, srt_filename)
-        with open(srt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(srt_content))
+        result.to_srt_vtt(srt_path, word_level=False) # word_level=False여야 문장 단위 자막이 됨
         
-        # (2) [New] VTT 저장 (웹 플레이어 자막용)
+        # (2) VTT 저장
         vtt_filename = f"{base_name}.vtt"
         vtt_path = os.path.join(self.output_dir, vtt_filename)
-        with open(vtt_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(vtt_content))
+        result.to_srt_vtt(vtt_path, word_level=False)
 
-        # (3) JSON 저장 (프론트엔드 로딩 최적화용)
+        # (3) JSON 저장 및 반환 데이터 구성
+        # Stable-Whisper 객체를 다시 리스트 형태로 변환
+        final_data = []
+        for idx, seg in enumerate(result.segments, 1):
+            final_data.append({
+                "id": idx,
+                "start": seg.start,
+                "end": seg.end,
+                "text": seg.text.strip()
+            })
+
         json_filename = f"{base_name}_transcript.json"
         json_path = os.path.join(self.output_dir, json_filename)
         with open(json_path, "w", encoding="utf-8") as f:
@@ -224,12 +206,12 @@ class VideoTranscriber:
         if os.path.exists(wav_path):
             os.remove(wav_path)
 
-        print(f"--- [Transcriber] Done. Saved SRT & VTT to {self.output_dir} ---")
+        print(f"--- [Transcriber] Done. Processed with Stable-Whisper. Saved to {self.output_dir} ---")
         
         return {
             "status": "success",
             "srt_path": srt_path,
-            "vtt_path": vtt_path,       # [New] 결과에 VTT 경로 포함
+            "vtt_path": vtt_path,
             "json_path": json_path,
             "segments": final_data 
         }
