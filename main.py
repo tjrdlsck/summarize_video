@@ -16,6 +16,7 @@ from services.downloader import VideoDownloader
 from services.transcriber import VideoTranscriber
 from services.summarizer import VideoSummarizer
 from services.task_manager import TaskManager
+from services.clipper import VideoClipper
 
 # --- [App Initialization] ---
 app = FastAPI(title="AI Video Analyst API", version="2.0")
@@ -31,6 +32,8 @@ app.add_middleware(
 # --- [Directory & Static Files] ---
 os.makedirs("static/videos", exist_ok=True)
 os.makedirs("static/results", exist_ok=True)
+os.makedirs("static/temp", exist_ok=True)
+os.makedirs("static/clips", exist_ok=True)  # [New] 영구 클립 저장소 생성
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # --- [Service Instances] ---
@@ -38,6 +41,7 @@ downloader = VideoDownloader(download_dir="static/videos")
 transcriber = VideoTranscriber(output_dir="static/results")
 summarizer = VideoSummarizer(output_dir="static/results")
 task_manager = TaskManager()  # [New] Task Manager Instance
+clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 생성
 
 # --- [Pydantic Models] ---
 class AnalyzeRequest(BaseModel):
@@ -47,6 +51,13 @@ class AnalyzeRequest(BaseModel):
 
 class UpdateTitleRequest(BaseModel): # [New] 제목 수정 요청용 모델
     title: str
+
+class ClipRequest(BaseModel):
+    filename: str       # 대상 파일명
+    start_time: float   # 시작 시간 (초)
+    end_time: float     # 종료 시간 (초)
+    title: Optional[str] = "Untitled Clip" # [New] 사용자가 지정한 클립 제목
+
 
 # --- [Helper: Progress Simulator] ---
 async def simulate_progress(task_id: str, start: int, end: int, duration_sec: int, stop_event: asyncio.Event):
@@ -68,106 +79,227 @@ async def simulate_progress(task_id: str, start: int, end: int, duration_sec: in
         task_manager.update_progress(task_id, int(current_progress))
         await asyncio.sleep(step_time)
 
-# --- [Background Pipeline] ---
+def remove_temp_files(file_paths: list):
+    """
+    BackgroundTasks에 의해 호출되어 전송이 끝난 임시 파일들을 삭제합니다.
+    """
+    for path in file_paths:
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"[Cleanup] Deleted temp file: {path}")
+            except Exception as e:
+                print(f"[Cleanup Error] Failed to delete {path}: {e}")
+
 async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
     """
-    [Integration Pipeline]
-    1. Download (Video URL provided) -> 0~30%
-    2. Transcribe (Whisper) -> 30~90% (Generates SRT & VTT)
-    3. Summarize (Gemini) -> 90~99% (Saves Metadata)
-    4. Finish -> 100%
+    [Background] 영상 분석 통합 파이프라인
+    1. Download (URL일 경우) -> 2. Transcribe (Whisper) -> 3. Summarize (Gemini)
     """
     try:
-        task_manager.update_progress(task_id, 0, "작업 시작 대기 중...")
+        task_manager.update_progress(task_id, 0, "작업 시작...")
         
-        # --- Phase 1: File Preparation (0~30%) ---
+        # --- Phase 1: Video Preparation (0% ~ 20%) ---
         video_filename = req.filename
-        video_path = ""
-
-        # A. URL 다운로드 모드
+        
         if req.url:
-            def download_progress_hook(percent, msg):
-                scaled_progress = int(percent * 0.3)
-                task_manager.update_progress(task_id, scaled_progress, msg)
+            task_manager.update_progress(task_id, 5, "영상 다운로드 중...")
+            
+            # 다운로드 콜백 (sync 함수 내부에서 호출됨)
+            def dl_callback(percent, msg):
+                # 5% ~ 20% 사이로 매핑
+                scaled = 5 + (percent * 0.15)
+                task_manager.update_progress(task_id, int(scaled), msg)
 
+            # Blocking I/O -> Executor 사용 (서버 멈춤 방지)
             loop = asyncio.get_running_loop()
-            dl_result = await loop.run_in_executor(
+            result = await loop.run_in_executor(
                 None, 
-                partial(downloader.download_from_url, req.url, download_progress_hook)
+                partial(downloader.download_from_url, req.url, progress_callback=dl_callback)
             )
             
-            if dl_result["status"] == "error":
-                raise Exception(dl_result["message"])
+            if result["status"] == "error":
+                raise Exception(result["message"])
             
-            video_filename = dl_result["filename"]
-            # 만약 사용자가 제목을 안 정했으면, 유튜브 제목을 기본 제목으로 사용 (옵션)
-            if not req.custom_title and "meta" in dl_result:
-                req.custom_title = dl_result["meta"].get("title")
-        
-        # B. 로컬 파일 모드
-        else:
-            task_manager.update_progress(task_id, 10, "업로드된 파일 확인 완료")
-        
-        # 경로 확인
+            video_filename = result["filename"]
+            
+        # 파일 존재 확인
         video_path = os.path.join("static/videos", video_filename)
         if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
+            raise FileNotFoundError(f"File not found: {video_filename}")
 
-        # --- Phase 2: Transcribe (30~90%) ---
-        task_manager.update_progress(task_id, 30, "AI 음성 분석 준비 중...")
+        # --- Phase 2: Transcription (20% ~ 70%) ---
+        task_manager.update_progress(task_id, 20, "AI가 영상을 듣는 중 (STT)...")
         
-        def status_updater(msg):
-            current_task = task_manager.get_task(task_id)
-            if current_task:
-                task_manager.update_progress(task_id, current_task['progress'], msg)
-
+        # Whisper는 오래 걸리므로 진행률 시뮬레이션(Fake Progress) 시작
         stop_event = asyncio.Event()
-        simulator_task = asyncio.create_task(
-            simulate_progress(task_id, start=30, end=90, duration_sec=60, stop_event=stop_event)
+        sim_task = asyncio.create_task(
+            simulate_progress(task_id, start=20, end=70, duration_sec=60, stop_event=stop_event)
         )
-
+        
         loop = asyncio.get_running_loop()
-        trans_result = await loop.run_in_executor(
+        # Transcriber 실행 (Blocking)
+        transcribe_result = await loop.run_in_executor(
             None,
-            partial(transcriber.transcribe, video_path, status_updater)
+            partial(transcriber.transcribe, video_path)
         )
         
+        # 시뮬레이션 종료
         stop_event.set()
-        await simulator_task
-
-        # --- Phase 3: Summarize (90~99%) ---
-        task_manager.update_progress(task_id, 90, "내용 요약 및 챕터 생성 중...")
+        await sim_task
         
-        # [New] custom_title 전달
+        if transcribe_result.get("status") == "error":
+             raise Exception("Transcription failed")
+
+        segments = transcribe_result["segments"]
+
+        # --- Phase 3: Summarization (70% ~ 90%) ---
+        task_manager.update_progress(task_id, 70, "내용 요약 및 챕터 생성 중 (LLM)...")
+        
+        # LLM 실행 (Blocking)
         summary_result = await loop.run_in_executor(
             None,
             partial(
                 summarizer.summarize, 
-                trans_result["segments"], 
+                segments, 
                 video_filename, 
-                req.custom_title,  # 전달
-                status_updater
+                custom_title=req.custom_title
             )
         )
         
-        if "error" in summary_result:
+        if summary_result.get("error"):
             raise Exception(summary_result["error"])
 
         # --- Phase 4: Finish (100%) ---
-        final_result = {
-            "video_filename": video_filename,
-            "transcripts": trans_result["segments"],
-            "chapters": summary_result["chapters"],
-            "srt_path": trans_result["srt_path"],
-            "vtt_path": trans_result.get("vtt_path"), # [New] VTT 경로 추가
-            "summary_json_path": os.path.basename(summary_result.get("json_path", "") or "")
-        }
-        
-        task_manager.complete_task(task_id, final_result)
-        print(f"[{task_id}] Pipeline Completed Successfully.")
+        task_manager.complete_task(task_id, summary_result)
+        print(f"[{task_id}] Analysis Completed: {video_filename}")
 
     except Exception as e:
-        print(f"[{task_id}] Pipeline Failed: {e}")
+        print(f"[{task_id}] Analysis Failed: {e}")
+        task_manager.fail_task(task_id, str(e))
+
+# --- [Background Pipeline] ---
+async def run_clip_pipeline(task_id: str, req: ClipRequest):
+    """
+    [Background] 영상 클립 생성 및 영구 저장 파이프라인
+    1. Cut Video -> 2. Cut Subtitle -> 3. Zip to 'static/clips' -> 4. Metadata Update
+    """
+    try:
+        task_manager.update_progress(task_id, 0, "클립 생성 시작...")
+        
+        # 1. 경로 준비
+        video_path = os.path.join("static/videos", req.filename)
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {req.filename}")
+
+        base_name = os.path.splitext(req.filename)[0]
+        temp_files = [] # 나중에 정리할 조각 파일들
+
+        # 2. 비디오 자르기 (10% ~ 60%)
+        task_manager.update_progress(task_id, 10, "영상 자르는 중 (가속 모드)...")
+        loop = asyncio.get_running_loop()
+        
+        cut_video_path = await loop.run_in_executor(
+            None,
+            partial(
+                clipper.cut_video,
+                video_path,
+                req.start_time,
+                req.end_time,
+                output_filename=f"clip_{base_name}_{task_id[:8]}.mp4"
+            )
+        )
+        temp_files.append(cut_video_path)
+        
+        # 3. 자막 자르기 (60% ~ 80%)
+        task_manager.update_progress(task_id, 60, "자막 동기화 중...")
+        
+        # 자막 파일 탐색
+        srt_path = os.path.join("static/results", f"{base_name}.srt")
+        vtt_path = os.path.join("static/results", f"{base_name}.vtt")
+        
+        sub_source_path = None
+        sub_ext = ""
+        
+        if os.path.exists(srt_path):
+            sub_source_path = srt_path
+            sub_ext = ".srt"
+        elif os.path.exists(vtt_path):
+            sub_source_path = vtt_path
+            sub_ext = ".vtt"
+            
+        if sub_source_path:
+            cut_sub_path = await loop.run_in_executor(
+                None,
+                partial(
+                    clipper.cut_subtitle,
+                    sub_source_path,
+                    req.start_time,
+                    req.end_time,
+                    output_filename=f"clip_{base_name}_{task_id[:8]}{sub_ext}"
+                )
+            )
+            if cut_sub_path:
+                temp_files.append(cut_sub_path)
+
+        # 4. 압축 및 영구 저장 (80% ~ 95%)
+        task_manager.update_progress(task_id, 80, "클립 보관함에 저장 중...")
+        
+        # [New] 파일명을 UUID 기반으로 안전하게 생성 (사용자 입력 제목은 메타데이터에만 저장)
+        clip_uuid = str(uuid.uuid4())
+        safe_zip_name = f"clip_{base_name}_{clip_uuid[:8]}.zip"
+        
+        # [New] destination_dir을 static/clips로 지정
+        zip_path = await loop.run_in_executor(
+            None,
+            partial(
+                clipper.create_zip,
+                temp_files,
+                zip_filename=safe_zip_name,
+                destination_dir="static/clips" 
+            )
+        )
+        
+        # 임시 조각 파일 삭제
+        for f in temp_files:
+            if os.path.exists(f): os.remove(f)
+
+        # 5. 메타데이터(JSON) 업데이트 (95% ~ 100%)
+        # 해당 영상에 대한 클립 목록 파일: {영상파일명}_clips.json
+        meta_filename = f"{base_name}_clips.json"
+        meta_path = os.path.join("static/results", meta_filename)
+        
+        new_clip_info = {
+            "clip_id": clip_uuid,
+            "title": req.title, # 사용자가 입력한 제목
+            "filename": safe_zip_name,
+            "start_time": req.start_time,
+            "end_time": req.end_time,
+            "created_at": str(asyncio.get_running_loop().time()), # 간단한 타임스탬프 (실제론 datetime 추천)
+            "download_url": f"/static/clips/{safe_zip_name}"
+        }
+        
+        # 기존 목록 읽기 -> 추가 -> 쓰기
+        clips_data = []
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f:
+                    clips_data = json.load(f)
+            except Exception:
+                clips_data = []
+        
+        clips_data.insert(0, new_clip_info) # 최신순 추가
+        
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(clips_data, f, ensure_ascii=False, indent=2)
+
+        # 6. 완료 처리
+        # 결과에 다운로드 URL을 포함하지 않고(새로고침으로 목록 확인), 성공 메시지만 전달
+        task_manager.complete_task(task_id, {"message": "Saved to library"})
+        print(f"[{task_id}] Clip Saved: {zip_path}")
+
+    except Exception as e:
+        print(f"[{task_id}] Clip Pipeline Failed: {e}")
         task_manager.fail_task(task_id, str(e))
 
 # --- [API Endpoints] ---
@@ -195,9 +327,9 @@ async def start_processing(req: AnalyzeRequest, background_tasks: BackgroundTask
     """
     task_id = str(uuid.uuid4())
     
-    # 작업 등록
+    # 작업 등록 (task_type="analysis" 명시)
     target_name = req.url if req.url else req.filename
-    task_manager.add_task(task_id, target_name)
+    task_manager.add_task(task_id, target_name, task_type="analysis")
     
     # 백그라운드 실행
     background_tasks.add_task(run_analysis_pipeline, task_id, req)
@@ -320,6 +452,100 @@ async def get_history():
     
     history.sort(key=lambda x: x['timestamp'], reverse=True)
     return history
+
+@app.post("/api/export/clip")
+async def export_clip(req: ClipRequest, background_tasks: BackgroundTasks):
+    """
+    [Async] 클립 내보내기 요청
+    파일을 직접 반환하지 않고, 백그라운드 작업 ID를 반환합니다.
+    """
+    task_id = str(uuid.uuid4())
+    
+    # 작업 등록 (task_type="clip_export" 명시)
+    task_manager.add_task(task_id, req.filename, task_type="clip_export")
+    
+    # 백그라운드 파이프라인 시작
+    background_tasks.add_task(run_clip_pipeline, task_id, req)
+    
+    return {"task_id": task_id, "message": "Clip generation started"}
+
+@app.get("/api/clips/{video_filename}")
+async def get_clips_library(video_filename: str):
+    """
+    특정 원본 영상에 연결된 클립 목록을 조회합니다.
+    """
+    base_name = os.path.splitext(video_filename)[0]
+    meta_path = os.path.join("static/results", f"{base_name}_clips.json")
+    
+    if not os.path.exists(meta_path):
+        return [] # 클립이 없으면 빈 리스트 반환
+        
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data
+    except Exception as e:
+        print(f"[Error] Failed to load clips json: {e}")
+        return []
+
+@app.delete("/api/clips/{video_filename}/{clip_id}")
+async def delete_clip(video_filename: str, clip_id: str):
+    """
+    특정 클립을 메타데이터 목록과 디스크에서 삭제합니다.
+    """
+    base_name = os.path.splitext(video_filename)[0]
+    meta_path = os.path.join("static/results", f"{base_name}_clips.json")
+    
+    if not os.path.exists(meta_path):
+        raise HTTPException(status_code=404, detail="Clips metadata not found")
+        
+    try:
+        # 1. JSON 읽기
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            clips = json.load(f)
+            
+        # 2. 삭제 대상 찾기
+        target_clip = next((c for c in clips if c["clip_id"] == clip_id), None)
+        if not target_clip:
+            raise HTTPException(status_code=404, detail="Clip not found")
+            
+        # 3. 파일 삭제
+        zip_filename = target_clip.get("filename")
+        if zip_filename:
+            zip_path = os.path.join("static/clips", zip_filename)
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+                print(f"[Deleted] Clip file: {zip_path}")
+                
+        # 4. 리스트에서 제거 및 저장
+        clips = [c for c in clips if c["clip_id"] != clip_id]
+        
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(clips, f, ensure_ascii=False, indent=2)
+            
+        return {"status": "success", "message": "Clip deleted"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/download/temp/{filename}")
+async def download_temp_file(filename: str, background_tasks: BackgroundTasks):
+    """
+    생성된 임시 파일(Zip)을 다운로드하고, 전송 후 삭제합니다.
+    """
+    file_path = os.path.join("static/temp", filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found or expired")
+        
+    # 파일 전송 후 삭제 예약
+    background_tasks.add_task(remove_temp_files, [file_path])
+    
+    return FileResponse(
+        file_path, 
+        media_type='application/zip', 
+        filename=filename
+    )
 
 if __name__ == "__main__":
     import uvicorn

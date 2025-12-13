@@ -9,15 +9,23 @@ class TaskManager:
         # 구조: { "task_id": { "status": "...", "progress": 0, "message": "...", ... } }
         self.tasks = {}
 
-    def add_task(self, task_id: str, filename: str):
-        """새로운 작업을 등록합니다."""
+    def add_task(self, task_id: str, filename: str, task_type: str = "analysis"):
+        """
+        새로운 작업을 등록합니다.
+        
+        Args:
+            task_id (str): 작업 고유 ID
+            filename (str): 관련 파일명 (표시용)
+            task_type (str): 'analysis' (분석) 또는 'clip_export' (클립 내보내기) 등 작업 구분
+        """
         self.tasks[task_id] = {
             "task_id": task_id,
             "filename": filename,
+            "type": task_type,       # [New] UI에서 처리 방식을 구분하기 위한 필드
             "status": "pending",     # pending, processing, completed, failed
             "progress": 0,           # 0 ~ 100 (int)
             "message": "대기 중...",  # 사용자에게 보여줄 상태 메시지
-            "result": None,          # 완료 시 결과 데이터
+            "result": None,          # 완료 시 결과 데이터 (다운로드 링크 등)
             "error": None            # 실패 시 에러 메시지
         }
 
