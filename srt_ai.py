@@ -245,7 +245,8 @@ def process_video_chapters(srt_path, output_json_path):
     print(f"--- [Target] Processing {processor.total_lines} lines ---")
 
     # 2. API 실행 (긴 영상 대응 모델 사용 + 트래커 전달)
-    target_model = "gemini-2.5-flash-lite" 
+    # target_model = "gemini-2.5-flash-lite" 
+    target_model = "gemini-2.5-flash" 
     print(f"--- [Strategy] Using '{target_model}' with Usage Tracking ---")
 
     prompt_text = processor.get_prompt_text()

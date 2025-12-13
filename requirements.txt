@@ -6,3 +6,4 @@ huggingface_hub
 soundfile
 google-genai 
 python-dotenv
+yt-dlp
