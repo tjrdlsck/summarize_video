@@ -7,3 +7,6 @@ soundfile
 google-genai 
 python-dotenv
 yt-dlp
+fastapi 
+uvicorn
+python-multipart
