@@ -113,75 +113,71 @@ class VideoSummarizer:
         )
         return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
+    # [Update] 기존 summarize 메서드를 교체하세요.
     def summarize(self, segments, video_filename, custom_title=None, status_callback=None):
         """
-        Args:
-            segments (list): [{'id':1, 'start':0.0, 'end':2.0, 'text':'...'}, ...]
-            video_filename (str): 원본 파일명 (JSON 저장용 ID 역할)
-            custom_title (str, optional): 사용자가 지정한 영상 제목 (없으면 파일명 사용)
-            status_callback (func, optional): 상태 메시지 콜백
-        
-        Returns:
-            dict: 최종 챕터 데이터 (타임스탬프 포함)
+        Gemini 1.5/2.0의 JSON Mode를 사용하여 정확한 챕터 데이터를 생성합니다.
+        Regex 파싱이 필요 없어 훨씬 안정적입니다.
         """
         if not self.api_key:
             return {"error": "GOOGLE_API_KEY is missing in .env"}
         
         total_lines = len(segments)
-        if total_lines == 0:
-            return {"error": "Empty segments"}
+        if total_lines == 0: return {"error": "Empty segments"}
 
-        print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini ---")
-        
-        # 상태 메시지 전송
-        if status_callback:
-            status_callback("Gemini가 내용을 분석하고 요약하는 중...")
+        print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini (JSON Mode) ---")
+        if status_callback: status_callback("Gemini가 내용을 정밀 분석 중 (JSON Mode)...")
 
         tracker = UsageTracker()
         
+        # 프롬프트 구성
+        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
+        script_text = "\n".join(lines)
+        
+        # JSON 스키마 정의 (Pydantic 없이도 dict 형태로 전달 가능)
+        response_schema = {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "title": {"type": "STRING", "description": "챕터 제목"},
+                    "summary": {"type": "STRING", "description": "상세 내용 요약"},
+                    "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
+                    "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
+                },
+                "required": ["title", "summary", "start_id", "end_id"]
+            }
+        }
+
+        system_instruction = (
+            "당신은 영상 콘텐츠 분석 AI입니다. 대본을 읽고 논리적인 '챕터'로 나누어 JSON으로 출력하세요.\n"
+            "규칙 1: 영상의 시작(ID:1)부터 끝까지 빈틈없이 커버해야 합니다.\n"
+            "규칙 2: start_id와 end_id는 제공된 스크립트의 ID를 참조합니다.\n"
+            "규칙 3: 한국어로 작성하세요."
+        )
+
         try:
             client = genai.Client(api_key=self.api_key)
-            prompt = self._create_prompt(segments)
             
-            # API Call
             response = client.models.generate_content(
                 model=self.model_name,
-                contents=prompt,
+                contents=f"{system_instruction}\n\n[Script]:\n{script_text}",
                 config=types.GenerateContentConfig(
                     temperature=0.2,
-                    max_output_tokens=8192
+                    response_mime_type="application/json", # 핵심: JSON 강제
+                    response_schema=response_schema        # 핵심: 스키마 지정
                 )
             )
             tracker.update(response)
             
-            # Parsing & Healing
-            if status_callback:
-                status_callback("요약 데이터 후처리 중...")
-
-            raw_text = response.text
-            parsed_chapters = ChapterHealer.parse_markdown(raw_text)
+            # JSON 파싱 (이제 text는 무조건 유효한 JSON임)
+            final_chapters = json.loads(response.text)
             
-            if not parsed_chapters:
-                print("[Warning] Parsing failed. Using fallback.")
-                final_chapters = [{
-                    "title": "전체 요약",
-                    "summary": "챕터 자동 구분 실패 (전체 영상)",
-                    "start_id": 1, 
-                    "end_id": total_lines
-                }]
-            else:
-                final_chapters = ChapterHealer.heal_chapters(parsed_chapters, total_lines)
-
-            # ID -> Time Mapping
+            # ID -> Time 매핑
             mapped_result = []
             for chap in final_chapters:
-                # 1-based index to 0-based list index
-                s_idx = chap['start_id'] - 1
-                e_idx = chap['end_id'] - 1
-                
-                # Safe indexing
-                s_idx = max(0, min(s_idx, total_lines - 1))
-                e_idx = max(0, min(e_idx, total_lines - 1))
+                s_idx = max(0, min(chap['start_id'] - 1, total_lines - 1))
+                e_idx = max(0, min(chap['end_id'] - 1, total_lines - 1))
                 
                 start_time = segments[s_idx]['start']
                 end_time = segments[e_idx]['end']
@@ -197,26 +193,23 @@ class VideoSummarizer:
                     }
                 })
 
-            # [New] 결정된 제목 (사용자 지정 제목이 있으면 우선 사용)
             display_title = custom_title if custom_title and custom_title.strip() else video_filename
 
-            # Final JSON Construction
             result_data = {
-                "video_source": video_filename,   # 물리적 파일명 (ID)
-                "video_title": display_title,     # [New] 논리적 제목 (Display용)
+                "video_source": video_filename,
+                "video_title": display_title,
                 "total_chapters": len(mapped_result),
                 "token_usage": tracker.get_report(),
                 "chapters": mapped_result
             }
 
-            # Save to Disk
+            # 저장
             base_name = os.path.splitext(video_filename)[0]
             output_path = os.path.join(self.output_dir, f"{base_name}_summary.json")
             
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(result_data, f, ensure_ascii=False, indent=2)
                 
-            print(f"--- [Summarizer] Done. Saved to {output_path} ---")
             return result_data
 
         except Exception as e:

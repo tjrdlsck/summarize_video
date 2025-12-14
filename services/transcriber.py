@@ -92,6 +92,62 @@ class VideoTranscriber:
                 
         return valid_segments
 
+    # [Add] 이 메서드를 클래스 내부에 새로 추가하세요. (_filter_hallucinations 밑 추천)
+    def _sanitize_segments(self, segments):
+        """
+        [Sanitizer v2] 강력한 중복 제거 및 타임스탬프 교정
+        - 긴 영상에서 발생하는 슬라이딩 윈도우 중복(Sliding Window Duplication)을 제거합니다.
+        - 텍스트 유사도를 검사하여 겹치는 구간을 병합하거나 삭제합니다.
+        """
+        if not segments:
+            return []
+
+        # 1. 무조건 시작 시간순 정렬 (ID 순서 무시)
+        segments.sort(key=lambda x: x['start'])
+
+        sanitized = []
+        
+        for current in segments:
+            # 유효성 검사 1: 종료 시간이 시작 시간보다 빨라선 안 됨 (역행 방지)
+            if current['end'] <= current['start']:
+                continue
+
+            # 첫 세그먼트는 무조건 추가
+            if not sanitized:
+                sanitized.append(current)
+                continue
+
+            prev = sanitized[-1]
+
+            # 2. 중첩(Overlap) 감지
+            # 허용 오차(tolerance) 0.1초: 미세한 겹침은 무시하되, 큰 겹침은 처리
+            if prev['end'] > current['start'] + 0.1:
+                overlap_duration = prev['end'] - current['start']
+                
+                # (A) 텍스트 중복 검사 (핵심)
+                # 앞 문장의 뒷부분과 뒷 문장의 앞부분이 겹치는지 확인
+                prev_text = prev['text'].strip()
+                curr_text = current['text'].strip()
+                
+                # 텍스트가 완전히 포함되거나 매우 유사하면 -> 현재 세그먼트 삭제 (Duplicate)
+                if curr_text in prev_text or prev_text in curr_text:
+                    # 더 긴 쪽을 유지 (정보량이 많은 쪽)
+                    if len(curr_text) > len(prev_text):
+                        sanitized.pop()
+                        sanitized.append(current)
+                    continue # 현재 루프 건너뜀 (삭제 효과)
+
+                # (B) 시간 조정 (Trimming)
+                # 텍스트는 다르지만 시간이 겹침 -> 이전 세그먼트를 잘라서 겹침 해소
+                # 단, 이전 세그먼트가 너무 짧아지면(0.2초 미만) 삭제
+                prev['end'] = current['start']
+                if prev['end'] - prev['start'] < 0.2:
+                    sanitized.pop()
+            
+            sanitized.append(current)
+
+        return sanitized
+
     def _clean_text(self, text):
         """반복되는 텍스트 및 무의미한 자모 제거"""
         if not text: return ""
@@ -106,115 +162,104 @@ class VideoTranscriber:
 
     def transcribe(self, video_path, status_callback=None):
         """
-        [Main Pipeline] 영상 -> 오디오 -> VAD -> Whisper(Word-Level) -> Filter -> Regroup(Stable-Whisper) -> Save
+        [Main Pipeline] 긴 영상 최적화 옵션 적용
         """
         print(f"--- [Transcriber] Start processing: {video_path} ---")
         
         # 1. 오디오 변환
-        if status_callback:
-            status_callback("오디오 추출 및 변환 중...")
-            
+        if status_callback: status_callback("오디오 추출 및 변환 중...")
         wav_path = self._convert_to_16k_wav(video_path)
         if not wav_path: raise Exception("Audio conversion failed")
 
-        # 2. VAD 실행
-        if status_callback:
-            status_callback("음성 구간 탐지(VAD) 실행 중...")
+        try:
+            # 2. VAD 실행
+            if status_callback: status_callback("음성 구간 탐지(VAD) 실행 중...")
+            vad_segments = self._get_vad_timestamps(wav_path)
             
-        vad_segments = self._get_vad_timestamps(wav_path)
-        
-        # 3. Whisper 실행 (Word Timestamps 활성화)
-        print(" -> Running Whisper Inference (with word timestamps)...")
-        if status_callback:
-            status_callback("AI가 스크립트를 작성하는 중... (시간이 걸립니다)")
+            # 3. Whisper 실행
+            print(" -> Running Whisper Inference (Long-form Optimized)...")
+            if status_callback: status_callback("AI가 스크립트를 작성하는 중... (시간이 걸립니다)")
             
-        # [Modified] word_timestamps=True 추가
-        output = mlx_whisper.transcribe(
-            wav_path,
-            path_or_hf_repo=self.model_path,
-            language="ko",
-            verbose=True,
-            word_timestamps=True 
-        )
-        
-        # 4. 필터링 (VAD 기반 환각 제거)
-        if status_callback:
-            status_callback("환각 필터링 및 데이터 정제 중...")
+            # [Optimization] 긴 영상 전용 옵션 추가
+            output = mlx_whisper.transcribe(
+                wav_path,
+                path_or_hf_repo=self.model_path,
+                language="ko",
+                verbose=True,
+                word_timestamps=True,
+                # [핵심 추가] 이전 텍스트 맥락에 의존하지 않음 -> 무한 반복/환각 방지
+                condition_on_previous_text=False,
+                # [핵심 추가] 초기 프롬프트 비활성화 (가끔 이상한 문구 삽입 방지)
+                initial_prompt=None,
+                # [핵심 추가] 온도가 0일 때 반복되면 온도를 높여서 탈출 시도
+                temperature=(0.0, 0.2, 0.4) 
+            )
             
-        raw_segments = output.get('segments', [])
-        clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
+            # 4. 필터링 및 정제
+            if status_callback: status_callback("데이터 정제 및 타임스탬프 교정 중...")
+            
+            raw_segments = output.get('segments', [])
+            clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
 
-        # [New] Stable-Whisper 후처리 파이프라인 시작
-        if status_callback:
-            status_callback("자막 가독성 최적화(Regrouping) 중...")
+            # 텍스트 정제
+            for seg in clean_segments:
+                if 'text' in seg: seg['text'] = self._clean_text(seg['text'])
 
-        # 4-1. 텍스트 1차 정제 (특수문자/반복 제거)
-        # Stable-Whisper에 넣기 전에 텍스트를 깨끗하게 만듭니다.
-        for seg in clean_segments:
-            if 'text' in seg:
-                seg['text'] = self._clean_text(seg['text'])
+            # [Critical Fix] 강력한 타임스탬프 교정기 v2 실행
+            clean_segments = self._sanitize_segments(clean_segments)
 
-        # 4-2. MLX 결과를 Stable-Whisper 객체로 변환
-        # Stable-Whisper는 text, segments, language 키가 있는 dict를 받습니다.
-        composition = {
-            "text": " ".join([s['text'] for s in clean_segments]),
-            "segments": clean_segments,
-            "language": output.get("language", "ko")
-        }
-        result = stable_whisper.WhisperResult(composition)
+            # 5. Stable-Whisper 변환 및 저장
+            if status_callback: status_callback("자막 가독성 최적화(Regrouping) 중...")
 
-        # 4-3. 스마트 분할 (Split) 적용
-        # max_chars: 한 줄당 최대 글자 수 (25자 내외 추천)
-        # max_words: 한 줄당 최대 단어 수 (무제한=None)
-        # split_by_gap: 0.5초 이상 침묵이 있으면 줄바꿈
-        result.split_by_length(max_chars=25, max_words=None)
-        result.split_by_gap(0.5)
+            composition = {
+                "text": " ".join([s['text'] for s in clean_segments]),
+                "segments": clean_segments,
+                "language": output.get("language", "ko")
+            }
+            
+            result = stable_whisper.WhisperResult(composition)
+            
+            # 자막 쪼개기 설정 (너무 짧게 잘리지 않도록 min_chars 조정 가능)
+            result.split_by_length(max_chars=25, max_words=None)
+            result.split_by_gap(0.5)
 
-        # 5. 파일 저장
-        if status_callback:
-            status_callback("결과 파일 저장 중...")
+            # 파일 저장
+            if status_callback: status_callback("결과 파일 저장 중...")
+            base_name = os.path.splitext(os.path.basename(video_path))[0]
+            
+            srt_path = os.path.join(self.output_dir, f"{base_name}.srt")
+            vtt_path = os.path.join(self.output_dir, f"{base_name}.vtt")
+            json_path = os.path.join(self.output_dir, f"{base_name}_transcript.json")
 
-        base_name = os.path.splitext(os.path.basename(video_path))[0]
-        
-        # (1) SRT 저장 (Stable-Whisper 내장 함수 사용)
-        srt_filename = f"{base_name}.srt"
-        srt_path = os.path.join(self.output_dir, srt_filename)
-        result.to_srt_vtt(srt_path, word_level=False) # word_level=False여야 문장 단위 자막이 됨
-        
-        # (2) VTT 저장
-        vtt_filename = f"{base_name}.vtt"
-        vtt_path = os.path.join(self.output_dir, vtt_filename)
-        result.to_srt_vtt(vtt_path, word_level=False)
+            result.to_srt_vtt(srt_path, word_level=False)
+            result.to_srt_vtt(vtt_path, word_level=False)
 
-        # (3) JSON 저장 및 반환 데이터 구성
-        # Stable-Whisper 객체를 다시 리스트 형태로 변환
-        final_data = []
-        for idx, seg in enumerate(result.segments, 1):
-            final_data.append({
-                "id": idx,
-                "start": seg.start,
-                "end": seg.end,
-                "text": seg.text.strip()
-            })
+            # JSON 데이터 구성
+            final_data = []
+            for idx, seg in enumerate(result.segments, 1):
+                final_data.append({
+                    "id": idx,
+                    "start": seg.start,
+                    "end": seg.end,
+                    "text": seg.text.strip()
+                })
 
-        json_filename = f"{base_name}_transcript.json"
-        json_path = os.path.join(self.output_dir, json_filename)
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(final_data, f, ensure_ascii=False, indent=2)
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(final_data, f, ensure_ascii=False, indent=2)
 
-        # 임시 WAV 삭제
-        if os.path.exists(wav_path):
-            os.remove(wav_path)
+            print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
+            
+            return {
+                "status": "success",
+                "srt_path": srt_path,
+                "vtt_path": vtt_path,
+                "json_path": json_path,
+                "segments": final_data 
+            }
 
-        print(f"--- [Transcriber] Done. Processed with Stable-Whisper. Saved to {self.output_dir} ---")
-        
-        return {
-            "status": "success",
-            "srt_path": srt_path,
-            "vtt_path": vtt_path,
-            "json_path": json_path,
-            "segments": final_data 
-        }
+        finally:
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
 
 # --- [Module Test] ---
 if __name__ == "__main__":

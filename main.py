@@ -3,6 +3,7 @@ import uuid
 import asyncio
 import json
 import shutil
+import unicodedata  # [Add] 유니코드 정규화를 위해 추가
 from functools import partial
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -492,6 +493,7 @@ async def get_clips_library(video_filename: str):
 async def delete_clip(video_filename: str, clip_id: str):
     """
     특정 클립을 메타데이터 목록과 디스크에서 삭제합니다.
+    [개선됨] OS별 유니코드(NFC/NFD) 차이로 인한 삭제 실패(Ghost File) 방지 로직 추가
     """
     base_name = os.path.splitext(video_filename)[0]
     meta_path = os.path.join("static/results", f"{base_name}_clips.json")
@@ -509,15 +511,42 @@ async def delete_clip(video_filename: str, clip_id: str):
         if not target_clip:
             raise HTTPException(status_code=404, detail="Clip not found")
             
-        # 3. 파일 삭제
+        # 3. 파일 삭제 (강화된 로직)
         zip_filename = target_clip.get("filename")
         if zip_filename:
-            zip_path = os.path.join("static/clips", zip_filename)
-            if os.path.exists(zip_path):
-                os.remove(zip_path)
-                print(f"[Deleted] Clip file: {zip_path}")
+            clip_dir = "static/clips"
+            file_deleted = False
+            
+            # (A) 1차 시도: 직접 경로 확인 (대부분의 경우 여기서 해결)
+            direct_path = os.path.join(clip_dir, zip_filename)
+            if os.path.exists(direct_path):
+                try:
+                    os.remove(direct_path)
+                    print(f"[Deleted] Clip file (Direct Match): {direct_path}")
+                    file_deleted = True
+                except Exception as e:
+                    print(f"[Warning] Failed to delete file directly: {e}")
+
+            # (B) 2차 시도: 정규화 스캔 (1차 실패 시 실행, macOS 한글 호환성 해결)
+            if not file_deleted and os.path.exists(clip_dir):
+                target_nfc = unicodedata.normalize('NFC', zip_filename)
                 
-        # 4. 리스트에서 제거 및 저장
+                for fname in os.listdir(clip_dir):
+                    # 디스크의 파일명과 타겟 파일명을 모두 NFC로 변환하여 비교
+                    if unicodedata.normalize('NFC', fname) == target_nfc:
+                        full_path = os.path.join(clip_dir, fname)
+                        try:
+                            os.remove(full_path)
+                            print(f"[Deleted] Clip file (Normalized Match): {full_path}")
+                            file_deleted = True
+                            break # 찾아서 삭제했으면 루프 종료
+                        except Exception as e:
+                            print(f"[Error] Found file but failed to delete: {e}")
+            
+            if not file_deleted:
+                print(f"[Info] Physical file not found or already deleted: {zip_filename}")
+                
+        # 4. 리스트에서 제거 및 저장 (파일 삭제 여부와 관계없이 메타데이터 동기화)
         clips = [c for c in clips if c["clip_id"] != clip_id]
         
         with open(meta_path, 'w', encoding='utf-8') as f:
@@ -526,6 +555,7 @@ async def delete_clip(video_filename: str, clip_id: str):
         return {"status": "success", "message": "Clip deleted"}
         
     except Exception as e:
+        print(f"[Delete Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/download/temp/{filename}")
