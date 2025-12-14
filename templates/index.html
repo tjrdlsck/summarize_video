@@ -220,7 +220,7 @@
                                     <div className="flex justify-between text-gray-700 mb-1 items-center">
                                         <div className="flex flex-col w-2/3">
                                             <span className="font-bold truncate" title={task.filename}>
-                                                {index + 1}. {task.filename}
+                                                {index + 1}. {normalizeLegacyTitle(task.filename)}
                                             </span>
                                             <span className="text-xs text-gray-400">
                                                 {task.type === 'clip_export' ? '✂️ 클립 생성' : '🤖 영상 분석'}
