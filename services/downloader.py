@@ -39,12 +39,12 @@ class VideoDownloader:
             original_filename: 사용자가 올린 원본 파일명
             
         Returns:
-            dict: { "status": "success", "file_path": ..., "filename": ... }
+            dict: { "status": "success", "file_path": ..., "filename": ..., "original_filename": ... }
         """
         try:
             # 안전한 파일명 생성
             safe_name = self._sanitize_filename(original_filename)
-            # 중복 방지를 위해 UUID 부착 (선택 사항, 여기선 덮어쓰기 방지용으로 추천)
+            # 중복 방지를 위해 UUID 부착
             unique_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
             final_path = os.path.join(self.download_dir, unique_name)
 
@@ -56,7 +56,8 @@ class VideoDownloader:
             return {
                 "status": "success",
                 "file_path": final_path,
-                "filename": unique_name
+                "filename": unique_name,
+                "original_filename": original_filename  # [Add] 원본 파일명 반환 (메타데이터용)
             }
 
         except Exception as e:

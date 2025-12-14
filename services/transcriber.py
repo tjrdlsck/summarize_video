@@ -160,57 +160,65 @@ class VideoTranscriber:
         text = re.sub(r'(\S+)(?:\s+\1){3,}', r'\1 \1', text)
         return text.strip()
 
-    def transcribe(self, video_path, status_callback=None):
+    def transcribe(self, video_path, progress_callback=None):
         """
-        [Main Pipeline] 긴 영상 최적화 옵션 적용
+        [Main Pipeline] 마일스톤 기반 진행률 보고가 적용된 Transcribe 메서드
+        Args:
+            video_path (str): 영상 파일 경로
+            progress_callback (func): (percent: int, message: str) -> None
         """
         print(f"--- [Transcriber] Start processing: {video_path} ---")
         
+        # [Milestone 0%] 시작
+        if progress_callback: progress_callback(0, "오디오 변환 준비 중...")
+        
         # 1. 오디오 변환
-        if status_callback: status_callback("오디오 추출 및 변환 중...")
         wav_path = self._convert_to_16k_wav(video_path)
         if not wav_path: raise Exception("Audio conversion failed")
 
+        # [Milestone 10%] 오디오 변환 완료 (FFmpeg 종료)
+        if progress_callback: progress_callback(10, "오디오 변환 완료")
+
         try:
             # 2. VAD 실행
-            if status_callback: status_callback("음성 구간 탐지(VAD) 실행 중...")
+            if progress_callback: progress_callback(15, "음성 구간 탐지(VAD) 실행 중...")
             vad_segments = self._get_vad_timestamps(wav_path)
+            
+            # [Milestone 30%] VAD 완료
+            if progress_callback: progress_callback(30, "음성 구간 분석 완료")
             
             # 3. Whisper 실행
             print(" -> Running Whisper Inference (Long-form Optimized)...")
-            if status_callback: status_callback("AI가 스크립트를 작성하는 중... (시간이 걸립니다)")
             
-            # [Optimization] 긴 영상 전용 옵션 추가
+            # [Milestone 35%] 핵심! 여기서 메인 프로세스에 '시뮬레이션 시작' 신호를 줍니다.
+            if progress_callback: progress_callback(35, "AI 자막 생성 시작 (시간이 소요됩니다)...")
+            
+            # Whisper 추론 (Blocking Operation)
+            # 여기가 가장 오래 걸리는 구간입니다. main.py에서 이 구간을 시뮬레이션으로 채웁니다.
             output = mlx_whisper.transcribe(
                 wav_path,
                 path_or_hf_repo=self.model_path,
                 language="ko",
-                verbose=True,
+                verbose=True, # 로그는 디버깅용으로 남겨둠
                 word_timestamps=True,
-                # [핵심 추가] 이전 텍스트 맥락에 의존하지 않음 -> 무한 반복/환각 방지
                 condition_on_previous_text=False,
-                # [핵심 추가] 초기 프롬프트 비활성화 (가끔 이상한 문구 삽입 방지)
                 initial_prompt=None,
-                # [핵심 추가] 온도가 0일 때 반복되면 온도를 높여서 탈출 시도
                 temperature=(0.0, 0.2, 0.4) 
             )
             
-            # 4. 필터링 및 정제
-            if status_callback: status_callback("데이터 정제 및 타임스탬프 교정 중...")
+            # [Milestone 90%] 추론 완료! (메인 프로세스는 여기서 시뮬레이션을 종료하고 점프합니다)
+            if progress_callback: progress_callback(90, "데이터 정제 및 타임스탬프 교정 중...")
             
+            # 4. 필터링 및 정제
             raw_segments = output.get('segments', [])
             clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
 
-            # 텍스트 정제
             for seg in clean_segments:
                 if 'text' in seg: seg['text'] = self._clean_text(seg['text'])
 
-            # [Critical Fix] 강력한 타임스탬프 교정기 v2 실행
             clean_segments = self._sanitize_segments(clean_segments)
 
             # 5. Stable-Whisper 변환 및 저장
-            if status_callback: status_callback("자막 가독성 최적화(Regrouping) 중...")
-
             composition = {
                 "text": " ".join([s['text'] for s in clean_segments]),
                 "segments": clean_segments,
@@ -218,13 +226,10 @@ class VideoTranscriber:
             }
             
             result = stable_whisper.WhisperResult(composition)
-            
-            # 자막 쪼개기 설정 (너무 짧게 잘리지 않도록 min_chars 조정 가능)
             result.split_by_length(max_chars=25, max_words=None)
             result.split_by_gap(0.5)
 
             # 파일 저장
-            if status_callback: status_callback("결과 파일 저장 중...")
             base_name = os.path.splitext(os.path.basename(video_path))[0]
             
             srt_path = os.path.join(self.output_dir, f"{base_name}.srt")
@@ -248,6 +253,9 @@ class VideoTranscriber:
                 json.dump(final_data, f, ensure_ascii=False, indent=2)
 
             print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
+            
+            # [Milestone 100%] 작업 끝
+            if progress_callback: progress_callback(100, "자막 생성 완료")
             
             return {
                 "status": "success",

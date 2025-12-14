@@ -1,4 +1,5 @@
 import os
+import re  # [Add] 정규표현식 모듈 추가
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -10,7 +11,7 @@ class TextRefiner:
     def __init__(self):
         load_dotenv()
         self.api_key = os.getenv("GOOGLE_API_KEY")
-        # gemma-3-27b-it 모델 사용 (만약 할당량 문제 발생 시 gemini-2.0-flash 등으로 대체 가능)
+        # gemma-3-27b-it 모델 사용
         self.model_name = "gemma-3-27b-it" 
         self.client = None
         
@@ -20,6 +21,7 @@ class TextRefiner:
     def refine_chapter(self, raw_text, chapter_title=""):
         """
         챕터별 텍스트를 입력받아 구조화된 Markdown 형식으로 반환합니다.
+        [Update] 마크다운 문법 오류(공백 등)를 정규식으로 자동 교정하는 로직 추가
         """
         if not self.client:
             return "API Key missing."
@@ -27,7 +29,7 @@ class TextRefiner:
         if not raw_text or len(raw_text.strip()) < 10:
             return "내용이 너무 짧아 요약할 수 없습니다."
 
-        # 프롬프트 엔지니어링: 전문 에디터 페르소나 부여
+        # 프롬프트 엔지니어링: 전문 에디터 페르소나 부여 + 문법 규칙 강화
         prompt = f"""
         You are a professional blog editor. 
         Your task is to refine the following raw spoken text into a highly readable, structured Markdown format.
@@ -39,6 +41,12 @@ class TextRefiner:
         4. **Quote**: If there is a key message or insight, use a Blockquote (`>`).
         5. **Tone**: Polite, engaging, and professional (maintain the original meaning but fix speech errors).
         6. **Language**: **Korean (한국어)** only.
+        
+        ### Formatting Rules (Strict):
+        - **NEVER** put spaces inside bold markers. 
+        - Wrong: ** Key Point **
+        - Right: **Key Point**
+        - Ensure quotes inside bold are tight: **'Word'** (not ** ' Word ' **).
 
         ### Raw Text:
         {raw_text}
@@ -53,7 +61,22 @@ class TextRefiner:
                     temperature=0.3, # 사실 기반 유지를 위해 온도를 낮춤
                 )
             )
-            return response.text.strip()
+            
+            refined_text = response.text.strip()
+            
+            # --- [Regex Healing] 마크다운 문법 강제 교정 ---
+            
+            # 1. 굵은 글씨 내부 공백 제거: "** 텍스트 **" -> "**텍스트**"
+            # (?<=...) 등의 룩비하인드 대신 안전한 그룹 치환 사용
+            refined_text = re.sub(r'\*\*\s+(.+?)\s+\*\*', r'**\1**', refined_text)
+            
+            # 2. 굵은 글씨 내부의 따옴표 공백 제거: "** ' 텍스트 ' **" -> "**'텍스트'**"
+            refined_text = re.sub(r"\*\*\s*['\"](.+?)['\"]\s*\*\*", r"**'\1'**", refined_text)
+            
+            # 3. 불필요한 이중 별표 제거 (가끔 ****텍스트**** 형태로 나올 때)
+            refined_text = re.sub(r'\*{4,}(.+?)\*{4,}', r'**\1**', refined_text)
+
+            return refined_text
 
         except Exception as e:
             print(f"[Refiner Error] {e}")

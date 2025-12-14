@@ -118,6 +118,7 @@ class VideoSummarizer:
         """
         Gemini 1.5/2.0의 JSON Mode를 사용하여 정확한 챕터 데이터를 생성합니다.
         Regex 파싱이 필요 없어 훨씬 안정적입니다.
+        [Fix] 챕터 제목의 Markdown 문법 제거 및 가독성 높은 제목 처리 추가
         """
         if not self.api_key:
             return {"error": "GOOGLE_API_KEY is missing in .env"}
@@ -134,7 +135,7 @@ class VideoSummarizer:
         lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
         script_text = "\n".join(lines)
         
-        # JSON 스키마 정의 (Pydantic 없이도 dict 형태로 전달 가능)
+        # JSON 스키마 정의
         response_schema = {
             "type": "ARRAY",
             "items": {
@@ -164,16 +165,16 @@ class VideoSummarizer:
                 contents=f"{system_instruction}\n\n[Script]:\n{script_text}",
                 config=types.GenerateContentConfig(
                     temperature=0.2,
-                    response_mime_type="application/json", # 핵심: JSON 강제
-                    response_schema=response_schema        # 핵심: 스키마 지정
+                    response_mime_type="application/json", 
+                    response_schema=response_schema       
                 )
             )
             tracker.update(response)
             
-            # JSON 파싱 (이제 text는 무조건 유효한 JSON임)
+            # JSON 파싱
             final_chapters = json.loads(response.text)
             
-            # ID -> Time 매핑
+            # ID -> Time 매핑 & [New] 챕터 제목 정제
             mapped_result = []
             for chap in final_chapters:
                 s_idx = max(0, min(chap['start_id'] - 1, total_lines - 1))
@@ -182,8 +183,12 @@ class VideoSummarizer:
                 start_time = segments[s_idx]['start']
                 end_time = segments[e_idx]['end']
                 
+                # [Fix] 챕터 제목 내 불필요한 마크다운(**, __) 제거
+                # 예: "**서론**" -> "서론"
+                clean_chapter_title = re.sub(r'\*\*|__', '', chap['title']).strip()
+                
                 mapped_result.append({
-                    "title": chap['title'],
+                    "title": clean_chapter_title, # 정제된 제목 사용
                     "summary": chap['summary'],
                     "time": {
                         "start": start_time,
@@ -193,6 +198,7 @@ class VideoSummarizer:
                     }
                 })
 
+            # [Fix] display_title이 이미 정제되어 넘어오므로 그대로 사용
             display_title = custom_title if custom_title and custom_title.strip() else video_filename
 
             result_data = {

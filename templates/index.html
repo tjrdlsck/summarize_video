@@ -145,6 +145,30 @@
             return `${hStr}:${mStr}:${sStr}.${msStr}`;
         };
 
+        // [Add] 레거시 데이터(과거 분석 기록) 제목 정규화 유틸리티
+        // 백엔드 패치 이전에 생성된 데이터의 제목(.mp4, _ 포함)을 UI에서 즉시 교정하여 보여줍니다.
+        const normalizeLegacyTitle = (title) => {
+            if (!title) return "제목 없음";
+            
+            // 이미 깔끔한 경우(확장자 없고, 언더스코어 없고, UUID 패턴도 없는 경우)는 패스
+            // (UUID 패턴 검사는 복잡하므로, 아래 로직을 항상 타게 해도 무방합니다)
+
+            let clean = title;
+
+            // 1. [New] UUID 접두사 제거 (8자리 hex + _)
+            // 정규식: 시작(^)에서 16진수 8자리와 _를 찾아서 빈 문자열로 치환
+            clean = clean.replace(/^[0-9a-fA-F]{8}_/, "");
+
+            // 2. 확장자 제거
+            clean = clean.replace(/\.[^/.]+$/, "");
+
+            // 3. 언더스코어를 공백으로 치환
+            clean = clean.replace(/_/g, " ");
+
+            // 4. 양쪽 공백 제거
+            return clean.trim();
+        };
+
         const { useState, useRef, useEffect, useMemo } = React;
 
         // --- [Sub Component] Task Monitor Widget (Upgraded) ---
@@ -744,14 +768,13 @@
                                                     </button>
 
                                                     <div className="flex flex-col h-full">
-                                                        {/* [New] 제목 표시 (item.title 사용) */}
+                                                        {/* [Modified] 제목 정규화 함수 적용 */}
                                                         <h4 className="font-bold text-gray-800 line-clamp-2 mb-2 group-hover:text-indigo-600 transition">
-                                                            {item.title}
+                                                            {normalizeLegacyTitle(item.title)}
                                                         </h4>
                                                         <p className="text-xs text-gray-400 mb-4">{new Date(item.timestamp * 1000).toLocaleString()}</p>
 
                                                         <div className="mt-auto flex justify-between items-center">
-                                                            {/* [Fix] 챕터 개수 버그 수정됨 */}
                                                             <span className="text-xs font-medium text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
                                                                 {item.total_chapters} Chapters
                                                             </span>
@@ -824,7 +847,7 @@
                                                         </div>
                                                     ) : (
                                                         <h2 className="font-bold text-gray-800 text-lg leading-snug flex-1">
-                                                            {playerData.video_title || playerData.chapters[0]?.title || "제목 없음"}
+                                                            {normalizeLegacyTitle(playerData.video_title || playerData.chapters[0]?.title || "제목 없음")}
                                                         </h2>
                                                     )}
                                                     {!isEditingTitle && (
@@ -1021,9 +1044,12 @@
                                         {activeTab === 'blog' && (
                                             <div className="max-w-3xl mx-auto pb-20 animate-fade-in px-4">
                                                 <div className="mb-8 text-center border-b border-gray-100 pb-6 pt-4">
-                                                    <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-2">{playerData.video_title}</h2>
+                                                    {/* [Modified] 블로그 뷰 상단 제목도 정규화 적용 */}
+                                                    <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-2">
+                                                        {normalizeLegacyTitle(playerData.video_title)}
+                                                    </h2>
                                                     <p className="text-xs text-indigo-500 font-bold uppercase tracking-wide">
-                                                        Refined by Gemma-2-27b
+                                                        Refined by AI
                                                     </p>
                                                 </div>
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import shutil
 import unicodedata  # [Add] 유니코드 정규화를 위해 추가
+import re
 from functools import partial
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
+
 
 # [Custom Services]
 from services.downloader import VideoDownloader
@@ -97,26 +99,27 @@ def remove_temp_files(file_paths: list):
 
 async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
     """
-    [Background] 영상 분석 통합 파이프라인
-    1. Download (URL일 경우) -> 2. Transcribe (Whisper) -> 3. Summarize (Gemini)
+    [Background] 영상 분석 통합 파이프라인 (Thread-Safe + Auto Cleanup)
+    1. Download (URL일 경우) -> 2. Transcribe (Milestone + Hybrid Sim) -> 3. Summarize (Gemini)
     """
+    # [Cleanup 준비] 에러 발생 시점 확인을 위해 변수 미리 초기화
+    video_filename = req.filename 
+    display_title = req.custom_title # 1순위: 사용자 지정 제목
+
     try:
+        # 메인 스레드의 이벤트 루프 캡처
+        loop = asyncio.get_running_loop()
+        
         task_manager.update_progress(task_id, 0, "작업 시작...")
         
         # --- Phase 1: Video Preparation (0% ~ 20%) ---
-        video_filename = req.filename
-        
         if req.url:
             task_manager.update_progress(task_id, 5, "영상 다운로드 중...")
             
-            # 다운로드 콜백 (sync 함수 내부에서 호출됨)
             def dl_callback(percent, msg):
-                # 5% ~ 20% 사이로 매핑
                 scaled = 5 + (percent * 0.15)
-                task_manager.update_progress(task_id, int(scaled), msg)
+                loop.call_soon_threadsafe(task_manager.update_progress, task_id, int(scaled), msg)
 
-            # Blocking I/O -> Executor 사용 (서버 멈춤 방지)
-            loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None, 
                 partial(downloader.download_from_url, req.url, progress_callback=dl_callback)
@@ -127,30 +130,56 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
             
             video_filename = result["filename"]
             
-        # 파일 존재 확인
+            # 2순위: 유튜브 원본 제목 (사용자 지정 제목이 없을 경우)
+            if not display_title and result.get("meta") and result["meta"].get("title"):
+                display_title = result["meta"]["title"]
+            
+        # 파일 경로 확정
         video_path = os.path.join("static/videos", video_filename)
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"File not found: {video_filename}")
 
+        # 3순위: 파일명 가공 (Fallback)
+       # (UUID 제거 -> 확장자 제거 -> 언더스코어 공백 치환 -> 양쪽 공백 제거)
+        if not display_title:
+            raw_name = video_filename
+            
+            # [Add] UUID 접두사(8자리 hex + _) 제거
+            # 예: "a1b2c3d4_test_video.mp4" -> "test_video.mp4"
+            # 정규식 설명: ^(시작) [0-9a-fA-F](16진수) {8}(8자리) _(언더스코어)
+            clean_name = re.sub(r'^[0-9a-fA-F]{8}_', '', raw_name)
+            
+            name_no_ext = os.path.splitext(clean_name)[0]
+            display_title = name_no_ext.replace("_", " ").strip()
+
+
         # --- Phase 2: Transcription (20% ~ 70%) ---
-        task_manager.update_progress(task_id, 20, "AI가 영상을 듣는 중 (STT)...")
-        
-        # Whisper는 오래 걸리므로 진행률 시뮬레이션(Fake Progress) 시작
         stop_event = asyncio.Event()
-        sim_task = asyncio.create_task(
-            simulate_progress(task_id, start=20, end=70, duration_sec=60, stop_event=stop_event)
-        )
         
-        loop = asyncio.get_running_loop()
-        # Transcriber 실행 (Blocking)
+        # Smart Handler (Thread-Safe)
+        def transcriber_progress_handler(local_percent, msg):
+            global_percent = 20 + int(local_percent * 0.5)
+            
+            if local_percent == 35:
+                loop.call_soon_threadsafe(task_manager.update_progress, task_id, global_percent, msg)
+                stop_event.clear()
+                asyncio.run_coroutine_threadsafe(
+                    simulate_progress(task_id, start=global_percent, end=65, duration_sec=120, stop_event=stop_event),
+                    loop
+                )
+            elif local_percent >= 90:
+                loop.call_soon_threadsafe(stop_event.set)
+                loop.call_soon_threadsafe(task_manager.update_progress, task_id, global_percent, msg)
+            else:
+                if local_percent < 35 or local_percent > 90:
+                    loop.call_soon_threadsafe(task_manager.update_progress, task_id, global_percent, msg)
+
         transcribe_result = await loop.run_in_executor(
             None,
-            partial(transcriber.transcribe, video_path)
+            partial(transcriber.transcribe, video_path, progress_callback=transcriber_progress_handler)
         )
         
-        # 시뮬레이션 종료
         stop_event.set()
-        await sim_task
         
         if transcribe_result.get("status") == "error":
              raise Exception("Transcription failed")
@@ -160,75 +189,84 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         # --- Phase 3: Summarization (70% ~ 90%) ---
         task_manager.update_progress(task_id, 70, "내용 요약 및 챕터 생성 중 (LLM)...")
         
-        # LLM 실행 (Blocking)
         summary_result = await loop.run_in_executor(
             None,
             partial(
                 summarizer.summarize, 
                 segments, 
                 video_filename, 
-                custom_title=req.custom_title
+                custom_title=display_title # [Fix] 확정된 깔끔한 제목 전달
             )
         )
         
         if summary_result.get("error"):
             raise Exception(summary_result["error"])
 
-        # =================================================================
-        # [Phase 4] Refining Content (Gemma) - 순차 처리 로직 추가
-        # =================================================================
+        # --- Phase 4: Refining Content (90% ~ 99%) ---
         task_manager.update_progress(task_id, 90, "블로그 포스팅 작성 중 (Gemma)...")
         
         chapters = summary_result.get("chapters", [])
         total_chaps = len(chapters)
-        
-        # 원본 세그먼트를 시간순으로 정렬 (검색 최적화)
         sorted_segments = sorted(segments, key=lambda x: x['start'])
 
         for i, chapter in enumerate(chapters):
-            # 진행률 세분화 (90% ~ 99% 구간을 챕터 수만큼 나눔)
             current_progress = 90 + int((i / total_chaps) * 9)
             task_manager.update_progress(task_id, current_progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
 
-            # 1. 해당 챕터 시간대에 맞는 텍스트 추출
             c_start = chapter['time']['start']
             c_end = chapter['time']['end']
             
             chapter_text_list = []
             for seg in sorted_segments:
-                # 세그먼트가 챕터 시간 내에 50% 이상 포함되면 채택, 
-                # 혹은 간단히 시작 시간이 범위 내에 있으면 포함
                 if seg['start'] >= c_start and seg['start'] < c_end:
                     chapter_text_list.append(seg['text'])
             
             raw_text_chunk = " ".join(chapter_text_list)
             
-            # 2. Gemma에게 윤문 요청 (순차 처리)
-            # Blocking I/O이므로 Executor 사용
             refined_md = await loop.run_in_executor(
                 None,
                 partial(refiner.refine_chapter, raw_text_chunk, chapter['title'])
             )
-            
-            # 3. 결과 데이터를 기존 챕터 객체에 추가
             chapter['blog_content'] = refined_md
 
-        # 4. 업데이트된 전체 데이터를 파일에 다시 저장
-        # (summarizer가 저장했던 파일을 덮어씁니다)
         base_name = os.path.splitext(video_filename)[0]
         json_path = os.path.join("static/results", f"{base_name}_summary.json")
         
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(summary_result, f, ensure_ascii=False, indent=2)
 
-        # =================================================================
-
         # --- Phase 5: Finish (100%) ---
         task_manager.complete_task(task_id, summary_result)
-        print(f"[{task_id}] Analysis Completed: {video_filename}")
+        print(f"[{task_id}] Analysis Completed: {video_filename} (Title: {display_title})")
 
     except Exception as e:
         print(f"[{task_id}] Analysis Failed: {e}")
+        
+        # 1. 시뮬레이터 안전 종료
+        if 'stop_event' in locals():
+            stop_event.set()
+            
+        # 2. 실패 시 관련 파일 삭제 (Cleanup)
+        if video_filename:
+            try:
+                base_name = os.path.splitext(video_filename)[0]
+                cleanup_targets = [
+                    os.path.join("static/videos", video_filename),           
+                    os.path.join("static/results", f"{base_name}.srt"),      
+                    os.path.join("static/results", f"{base_name}.vtt"),      
+                    os.path.join("static/results", f"{base_name}_transcript.json"), 
+                    os.path.join("static/results", f"{base_name}_summary.json")     
+                ]
+                
+                print(f"[{task_id}] Cleaning up failed files...")
+                for path in cleanup_targets:
+                    if os.path.exists(path):
+                        os.remove(path)
+                        print(f" -> Deleted: {path}")
+                        
+            except Exception as cleanup_error:
+                print(f"[{task_id}] Cleanup Warning: {cleanup_error}")
+
         task_manager.fail_task(task_id, str(e))
 
 # --- [Background Pipeline] ---
