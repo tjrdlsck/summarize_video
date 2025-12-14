@@ -406,7 +406,7 @@
             // --- [New] Clip Library API ---
             const fetchClips = async (filename) => {
                 try {
-                    const res = await axios.get(`/api/clips/${filename}`);
+                    const res = await axios.get(`/api/clips/${filename}?t=${Date.now()}`);
                     setClipsList(res.data);
                 } catch (err) {
                     console.error("Failed to fetch clips:", err);
@@ -508,14 +508,14 @@
             // --- [API Handlers] ---
             const fetchHistory = async () => {
                 try {
-                    const res = await axios.get('/api/history');
+                    const res = await axios.get(`/api/history?t=${Date.now()}`);
                     setHistoryList(res.data);
                 } catch (err) { console.error(err); }
             };
 
             const fetchActiveTasks = async () => {
                 try {
-                    const res = await axios.get('/api/tasks');
+                    const res = await axios.get(`/api/tasks?t=${Date.now()}`);
                     setActiveTasks(res.data);
                 } catch (err) { console.error(err); }
             };
@@ -598,7 +598,7 @@
                 try {
                     let transcripts = [];
                     if (item.result_data.has_transcript_file) {
-                        const tRes = await axios.get(`/static/results/${item.result_data.transcript_json_filename}`);
+                        const tRes = await axios.get(`/static/results/${item.result_data.transcript_json_filename}?t=${Date.now()}`);
                         transcripts = tRes.data;
                     }
 

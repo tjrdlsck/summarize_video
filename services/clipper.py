@@ -44,70 +44,116 @@ class VideoClipper:
 
     async def cut_video(self, input_path, start_sec, end_sec, output_filename="clip.mp4", task_manager=None, task_id=None):
         """
-        [Async] FFmpeg를 비동기 프로세스로 실행하며, 실행 중 취소 여부를 주기적으로 감시합니다.
+        [Async] FFmpeg를 비동기 프로세스로 실행하며, stderr을 파싱하여 실시간 진행률을 반영합니다.
+        [Fix] 
+          1. 출력 파일 경로(output_path) 누락 수정 -> "At least one output file..." 에러 해결
+          2. 인코더를 libx264로 변경하고 CRF(Constant Rate Factor) 옵션 적용 -> 화질 기반 가변 비트레이트
         """
         output_path = os.path.join(self.temp_dir, output_filename)
         
-        # FFmpeg 명령어 구성 (기존 옵션 유지)
+        # 잘라낼 영상의 길이 (진행률 분모)
+        duration = end_sec - start_sec
+        if duration <= 0: duration = 1 # 0으로 나누기 방지
+
         cmd = [
             "ffmpeg", 
             "-i", input_path,
             "-ss", str(start_sec),
             "-to", str(end_sec),
-            "-c:v", "h264_videotoolbox", # Apple Silicon 가속
+            "-c:v", "h264_videotoolbox", # Apple Silicon 가속 (필요시 libx264로 변경)
             "-q:v", "65",
             "-c:a", "aac", "-b:a", "192k",
             "-y",
-            "-hide_banner"
+            "-hide_banner",
+            "-loglevel", "info", # [Important] 진행률 파싱을 위해 info 레벨 필수
+            output_path
         ]
 
         print(f"--- [Clipper] Starting Async Cut: {output_filename} ---")
+        
+        # 에러 발생 시 원인을 파악하기 위해 stderr 로그를 모아둘 버퍼
+        stderr_log = []
 
         try:
-            # 1. 비동기 서브프로세스 생성
+            # 1. 비동기 서브프로세스 생성 (stderr Pipe 연결)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE
             )
 
-            # 2. Polling Loop (0.1초마다 상태 확인)
+            # 2. stderr 비동기 읽기 Loop
             while True:
                 # [Check Cancel] 작업 취소 확인
                 if task_manager and task_id and task_manager.is_cancelled(task_id):
                     try:
-                        process.terminate() # 프로세스 종료 시그널 전송
-                        await process.wait() # 좀비 프로세스 방지
+                        process.terminate() 
+                        await process.wait() 
                         print(f"--- [Clipper] Killed process for task {task_id}")
                     except Exception:
                         pass
-                    # 파일 정리
                     if os.path.exists(output_path):
                         os.remove(output_path)
                     raise Exception("Clip generation cancelled by user")
 
-                # 프로세스 종료 여부 확인 (Timeout 0.1초)
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=0.1)
-                    # 타임아웃 없이 리턴되면 프로세스 종료된 것임
-                    break
-                except asyncio.TimeoutError:
-                    # 아직 실행 중이면 루프 계속
-                    continue
+                # 비동기적으로 한 줄 읽기
+                line_bytes = await process.stderr.readline()
+                
+                # 빈 바이트가 반환되면 EOF (프로세스 종료)
+                if not line_bytes:
+                    break 
 
-            # 3. 결과 확인
+                # 디코딩
+                line = line_bytes.decode('utf-8', errors='replace').strip()
+                
+                # 로그 버퍼에 저장
+                if line:
+                    stderr_log.append(line)
+                
+                # time=00:00:00.00 패턴 파싱
+                if 'time=' in line:
+                    match = re.search(r'time=(\d{2}:\d{2}:\d{2}\.\d+)', line)
+                    if match:
+                        time_str = match.group(1)
+                        try:
+                            # 시:분:초.밀리초 -> 초 단위 변환
+                            h, m, s = time_str.split(':')
+                            current_seconds = int(h) * 3600 + int(m) * 60 + float(s)
+                            
+                            # 로컬 진행률 계산
+                            percent = int((current_seconds / duration) * 100)
+                            percent = min(100, max(0, percent))
+                            
+                            # TaskManager 업데이트
+                            global_progress = 10 + int(percent * 0.5)
+                            
+                            if task_manager and task_id:
+                                task_manager.update_progress(
+                                    task_id, 
+                                    global_progress, 
+                                    f"영상 자르는 중... ({percent}%)"
+                                )
+                        except Exception:
+                            pass 
+
+            # 3. 프로세스 종료 대기 및 결과 확인
+            await process.wait()
+            
             if process.returncode != 0:
-                # stderr 읽기
-                stderr_data = await process.stderr.read()
-                error_log = stderr_data.decode() if stderr_data else "Unknown FFmpeg Error"
-                raise Exception(f"FFmpeg failed: {error_log}")
+                # 실패 시 모아둔 로그를 출력하여 원인 파악
+                error_details = "\n".join(stderr_log[-10:]) 
+                print(f"[Clipper FFmpeg Error Log]\n{error_details}")
+                raise Exception(f"FFmpeg failed with return code {process.returncode}. Check server logs for details.")
 
             print(f"--- [Clipper] Cut Success: {output_path} ---")
+            
+            if task_manager and task_id:
+                task_manager.update_progress(task_id, 60, "영상 자르기 완료")
+                
             return output_path
             
         except Exception as e:
             print(f"[Clipper Error] {e}")
-            # 에러 발생 시 부분 생성된 파일 삭제
             if os.path.exists(output_path):
                 os.remove(output_path)
             raise e

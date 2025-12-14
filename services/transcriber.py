@@ -9,30 +9,81 @@ import numpy as np
 import stable_whisper
 import time
 import multiprocessing
+import sys
 
 class TaskCancelledError(Exception):
     """작업이 사용자에 의해 취소되었을 때 발생하는 예외"""
     pass
 
-def run_whisper_worker(wav_path, model_path, result_queue):
+class WhisperProgressHook:
+    """
+    [New] Whisper 모델의 stdout 출력을 가로채서 진행률을 계산하고 Queue로 보냅니다.
+    예: [00:12.000 --> 00:15.000] ... 형태의 로그를 파싱합니다.
+    """
+    def __init__(self, queue, total_duration):
+        self.queue = queue
+        self.total_duration = total_duration if total_duration > 0 else 1
+        self.last_percent = -1
+        self.terminal = sys.stdout  # 원래의 stdout 저장
+
+    def write(self, message):
+        # 1. 원래 터미널에도 출력 (디버깅용)
+        self.terminal.write(message)
+        
+        # 2. 타임스탬프 파싱 (정규식)
+        # 패턴: [00:00.000 --> 00:05.000] 또는 [00:00 --> 00:05]
+        match = re.search(r'\[(\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?) --> (\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)\]', message)
+        if match:
+            end_time_str = match.group(2)
+            try:
+                # 시간 문자열을 초(seconds)로 변환
+                parts = end_time_str.replace('.', ':').split(':')
+                seconds = 0.0
+                if len(parts) == 3: # MM:SS.ms
+                    seconds = int(parts[0]) * 60 + float(f"{parts[1]}.{parts[2]}")
+                elif len(parts) >= 4: # HH:MM:SS.ms
+                    seconds = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(f"{parts[2]}.{parts[3]}")
+                
+                # 퍼센트 계산
+                percent = int((seconds / self.total_duration) * 100)
+                percent = min(99, max(0, percent)) # 0~99 사이로 제한
+
+                # 진행률이 변경되었을 때만 큐 전송 (부하 감소)
+                if percent > self.last_percent:
+                    self.queue.put({"status": "progress", "percent": percent})
+                    self.last_percent = percent
+            except Exception:
+                pass # 파싱 실패 시 무시
+
+    def flush(self):
+        self.terminal.flush()
+
+def run_whisper_worker(wav_path, model_path, result_queue, total_duration):
     """
     [Worker Process] 별도 프로세스에서 실행되는 Whisper 추론 함수입니다.
-    메인 프로세스와의 격리를 통해, 언제든 외부에서 강제 종료(Kill)할 수 있습니다.
+    stdout을 캡처하여 진행률을 실시간으로 보고합니다.
     """
     try:
         print(f"[Whisper Worker] PID {os.getpid()} started processing...")
         
+        # [New] stdout을 Hook 클래스로 리다이렉트
+        # 이제부터 print()나 라이브러리의 stdout 출력은 hook.write()로 전달됨
+        hook = WhisperProgressHook(result_queue, total_duration)
+        sys.stdout = hook
+        
         # MLX Whisper 추론 실행
-        # (옵션은 클래스와 동일하게 유지)
         output = mlx_whisper.transcribe(
             wav_path,
             path_or_hf_repo=model_path,
             language="ko",
-            verbose=True, 
+            verbose=True,  # [중요] True여야 타임스탬프 로그가 출력되어 Hook이 작동함
             word_timestamps=True,
             condition_on_previous_text=False,
             temperature=(0.0, 0.2, 0.4) 
         )
+        
+        # stdout 복구
+        sys.stdout = hook.terminal
         
         # 결과를 큐에 담아 부모 프로세스로 전송
         result_queue.put({"status": "success", "data": output})
@@ -40,6 +91,7 @@ def run_whisper_worker(wav_path, model_path, result_queue):
         
     except Exception as e:
         # 에러 발생 시 부모에게 알림
+        sys.stdout = sys.__stdout__ # 혹시 모르니 표준출력 복구
         print(f"[Whisper Worker] Error: {e}")
         result_queue.put({"status": "error", "message": str(e)})
 
@@ -59,36 +111,72 @@ class VideoTranscriber:
 
     def _convert_to_16k_wav(self, input_path, task_manager=None, task_id=None):
         """
-        FFmpeg를 사용하여 영상을 16kHz Mono WAV로 변환합니다.
-        [수정] 변환 도중 취소 가능하도록 Polling Loop 적용
+        FFmpeg를 사용하여 영상을 16kHz Mono WAV로 변환하며, stderr을 파싱해 진행률을 보고합니다.
         """
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         output_wav = os.path.join(self.output_dir, f"{base_name}_temp.wav")
+        
+        # 1. 전체 영상 길이(Duration) 확인 (ffprobe 사용)
+        total_duration = 1.0
+        try:
+            probe_cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration", 
+                "-of", "default=noprint_wrappers=1:nokey=1", input_path
+            ]
+            duration_str = subprocess.check_output(probe_cmd).decode().strip()
+            total_duration = float(duration_str)
+        except Exception:
+            print("[Transcriber] Failed to get duration via ffprobe, progress will be inaccurate.")
 
+        # 2. FFmpeg 변환 시작
         cmd = [
             "ffmpeg", "-i", input_path,
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-vn",
-            output_wav, "-y", "-hide_banner", "-loglevel", "error"
+            output_wav, "-y", "-hide_banner", "-loglevel", "info" # [Change] info 레벨이어야 time= 로그가 나옴
         ]
         
         try:
-            # 1. Popen으로 프로세스 시작 (Non-blocking)
-            process = subprocess.Popen(cmd)
+            # stderr=subprocess.PIPE를 통해 출력을 읽을 준비
+            process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.PIPE,
+                universal_newlines=True, # 텍스트 모드로 읽기
+                encoding='utf-8',
+                errors='replace'
+            )
             
-            # 2. 종료될 때까지 감시 (Polling)
-            while process.poll() is None:
+            # 3. 로그 파싱 Loop
+            while True:
                 # [Check Cancel]
                 if task_manager and task_id and task_manager.is_cancelled(task_id):
-                    process.terminate() # 프로세스 사살
-                    process.wait()      # 자원 회수
-                    if os.path.exists(output_wav):
-                        os.remove(output_wav)
-                    print(f"--- [Transcriber] Audio conversion cancelled for {task_id}")
+                    process.terminate()
+                    process.wait()
+                    if os.path.exists(output_wav): os.remove(output_wav)
                     raise TaskCancelledError("Audio conversion cancelled")
+
+                # 한 줄 읽기 (Blocking이지만 짧은 로그라 괜찮음)
+                line = process.stderr.readline()
+                if not line and process.poll() is not None:
+                    break # 프로세스 종료됨
                 
-                time.sleep(0.1) # CPU 과부하 방지
-            
-            # 3. 결과 확인
+                if line:
+                    # time=00:00:15.40 패턴 찾기
+                    time_match = re.search(r'time=(\d{2}:\d{2}:\d{2}\.\d+)', line)
+                    if time_match and total_duration > 0:
+                        time_str = time_match.group(1)
+                        h, m, s = time_str.split(':')
+                        seconds = int(h) * 3600 + int(m) * 60 + float(s)
+                        
+                        percent = int((seconds / total_duration) * 100)
+                        
+                        # TaskManager에 업데이트 (구간: 0~20%)
+                        # FFmpeg의 0~100%를 전체 파이프라인의 0~20%로 매핑
+                        scaled_percent = int(percent * 0.2)
+                        if task_manager and task_id:
+                            task_manager.update_progress(task_id, scaled_percent, f"오디오 추출 중... ({percent}%)")
+
+            # 4. 결과 확인
             if process.returncode != 0:
                 raise subprocess.CalledProcessError(process.returncode, cmd)
                 
@@ -98,7 +186,6 @@ class VideoTranscriber:
             print(f"[Error] FFmpeg conversion failed: {e}")
             return None
         except Exception as e:
-            # TaskCancelledError는 상위로 전파
             raise e
 
 
@@ -234,89 +321,100 @@ class VideoTranscriber:
     # [Modify] 시그니처 변경: task_manager와 task_id를 선택적 인자로 받음
     def transcribe(self, video_path, progress_callback=None, task_manager=None, task_id=None):
         """
-        [Main Pipeline] 프로세스 격리(Isolation)가 적용된 안전한 Transcribe 메서드
+        [Main Pipeline] 프로세스 격리 + 정밀 진행률 추적이 적용된 Transcribe 메서드
         """
         print(f"--- [Transcriber] Start processing: {video_path} ---")
         
-        # [Checkpoint 1] 시작 전 확인
         self._check_cancel(task_manager, task_id)
         
-        if progress_callback: progress_callback(0, "오디오 변환 준비 중...")
-        
-        # 1. 오디오 변환 (이전 단계에서 적용한 Polling 방식 사용)
+        # 1. 오디오 변환 (FFmpeg 내부에서 0~20% 진행률 자동 업데이트)
+        # progress_callback은 여기서 쓰지 않고 FFmpeg 내부 로직이 task_manager를 직접 호출함
         wav_path = self._convert_to_16k_wav(video_path, task_manager, task_id)
         if not wav_path: raise Exception("Audio conversion failed")
 
         try:
-            # [Checkpoint 2] 오디오 변환 직후 확인
             self._check_cancel(task_manager, task_id)
 
-            if progress_callback: progress_callback(10, "오디오 변환 완료")
+            # [New] 오디오 길이 계산 (Whisper 진행률 계산용)
+            try:
+                audio_info = sf.info(wav_path)
+                total_duration = audio_info.duration
+            except Exception:
+                total_duration = 100 # Fallback
 
             # 2. VAD 실행
-            if progress_callback: progress_callback(15, "음성 구간 탐지(VAD) 실행 중...")
+            if progress_callback: progress_callback(20, "음성 구간 탐지(VAD) 실행 중...")
             vad_segments = self._get_vad_timestamps(wav_path)
             
-            # [Checkpoint 3] VAD 완료 후 확인
             self._check_cancel(task_manager, task_id)
+            if progress_callback: progress_callback(25, "AI 자막 생성 준비 중...")
             
-            if progress_callback: progress_callback(30, "음성 구간 분석 완료")
-            
-            # 3. Whisper 실행 (Process Isolation)
+            # 3. Whisper 실행
             print(" -> Spawning Whisper Worker Process...")
-            if progress_callback: progress_callback(35, "AI 자막 생성 시작 (시간이 소요됩니다)...")
-            
-            # 결과 통신을 위한 큐 생성
             queue = multiprocessing.Queue()
             
-            # 자식 프로세스 생성 및 시작
+            # [New] total_duration을 인자로 전달
             worker_process = multiprocessing.Process(
                 target=run_whisper_worker,
-                args=(wav_path, self.model_path, queue)
+                args=(wav_path, self.model_path, queue, total_duration)
             )
             worker_process.start()
             
-            # [Supervisor Loop] 자식 프로세스 감시 및 취소 제어
-            worker_failed = False
+            # [Supervisor Loop] 자식 프로세스 감시 및 메시지 처리
             output = None
             
             while worker_process.is_alive():
-                # (A) 취소 요청 확인
+                # (A) 취소 확인
                 if task_manager and task_id and task_manager.is_cancelled(task_id):
-                    print(f"--- [Supervisor] Killing Whisper Worker (PID {worker_process.pid}) ---")
-                    worker_process.terminate()  # 1차 경고 (SIGTERM)
+                    worker_process.terminate()
                     worker_process.join(timeout=1)
-                    if worker_process.is_alive():
-                        worker_process.kill()   # 2차 사살 (SIGKILL)
-                    
+                    if worker_process.is_alive(): worker_process.kill()
                     raise TaskCancelledError("Whisper inference cancelled by user")
                 
-                # (B) CPU 과부하 방지
-                time.sleep(0.5)
+                # (B) Queue 메시지 처리 (Non-blocking)
+                while not queue.empty():
+                    msg = queue.get()
+                    if msg["status"] == "progress":
+                        # Worker의 0~100%를 전체의 25~85% 구간에 매핑
+                        local_pct = msg["percent"]
+                        global_pct = 25 + int(local_pct * 0.6)
+                        
+                        if progress_callback:
+                            progress_callback(global_pct, f"자막 생성 중... ({local_pct}%)")
+                    
+                    elif msg["status"] == "success":
+                        output = msg["data"]
+                        break # 성공 메시지 받으면 루프 탈출 가능 (프로세스는 곧 죽음)
+                        
+                    elif msg["status"] == "error":
+                        raise Exception(f"Worker Error: {msg.get('message')}")
 
-            # 프로세스 종료 후 결과 확인
-            if not queue.empty():
-                result = queue.get()
-                if result["status"] == "success":
-                    output = result["data"]
-                else:
-                    raise Exception(f"Worker Error: {result.get('message')}")
-            else:
-                # 큐가 비었는데 프로세스가 죽음 (OOM, Crash 등)
-                if worker_process.exitcode != 0:
-                     raise Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
+                if output: break # 결과 받았으면 루프 종료
+                time.sleep(0.1) # CPU 과부하 방지
+
+            # 프로세스 종료 대기
+            worker_process.join()
+
+            if not output and queue.empty():
+                 # 큐에 남은 메시지 한번 더 확인 (프로세스 종료 직전 보낸 것)
+                 if not queue.empty():
+                    msg = queue.get()
+                    if msg["status"] == "success": output = msg["data"]
+                    elif msg["status"] == "error": raise Exception(f"Worker Error: {msg.get('message')}")
             
-            # [Milestone 90%] 추론 완료
-            if progress_callback: progress_callback(90, "데이터 정제 및 타임스탬프 교정 중...")
+            if not output:
+                 raise Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
             
-            # 4. 필터링 및 정제 (기존 로직 유지)
+            # 4. 후처리 (85% ~ 100%)
+            if progress_callback: progress_callback(85, "데이터 정제 및 저장 중...")
+            
             raw_segments = output.get('segments', [])
             clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
             for seg in clean_segments:
                 if 'text' in seg: seg['text'] = self._clean_text(seg['text'])
             clean_segments = self._sanitize_segments(clean_segments)
 
-            # 5. 저장 로직 (Stable Whisper 후처리)
+            # 저장 로직 (Stable Whisper)
             composition = {
                 "text": " ".join([s['text'] for s in clean_segments]),
                 "segments": clean_segments,
@@ -326,7 +424,6 @@ class VideoTranscriber:
             result_obj.split_by_length(max_chars=25, max_words=None)
             result_obj.split_by_gap(0.5)
 
-            # 파일 쓰기
             base_name = os.path.splitext(os.path.basename(video_path))[0]
             srt_path = os.path.join(self.output_dir, f"{base_name}.srt")
             vtt_path = os.path.join(self.output_dir, f"{base_name}.vtt")
@@ -335,7 +432,6 @@ class VideoTranscriber:
             result_obj.to_srt_vtt(srt_path, word_level=False)
             result_obj.to_srt_vtt(vtt_path, word_level=False)
 
-            # JSON 데이터 구성
             final_data = []
             for idx, seg in enumerate(result_obj.segments, 1):
                 final_data.append({
@@ -349,9 +445,6 @@ class VideoTranscriber:
                 json.dump(final_data, f, ensure_ascii=False, indent=2)
 
             print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
-            
-            if progress_callback: progress_callback(100, "자막 생성 완료")
-            
             return {
                 "status": "success",
                 "srt_path": srt_path,
@@ -365,7 +458,6 @@ class VideoTranscriber:
             raise 
 
         finally:
-            # [중요] 임시 wav 파일은 반드시 삭제
             if os.path.exists(wav_path):
                 os.remove(wav_path)
 

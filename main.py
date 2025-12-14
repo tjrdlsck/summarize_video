@@ -91,25 +91,27 @@ class ClipRequest(BaseModel):
     title: Optional[str] = "Untitled Clip" # [New] 사용자가 지정한 클립 제목
 
 
-# --- [Helper: Progress Simulator] ---
-async def simulate_progress(task_id: str, start: int, end: int, duration_sec: int, stop_event: asyncio.Event):
+# --- [Helper: Progress Wrapper] ---
+class TaskProgressWrapper:
     """
-    AI 작업(Whisper)이 진행되는 동안 진행률을 자연스럽게 올리는 시뮬레이터.
-    실제 작업이 끝나면 stop_event가 설정되어 루프가 종료됨.
+    [New] 하위 모듈(Transcriber 등)이 보고하는 0~100% 진행률을
+    전체 파이프라인의 특정 구간(예: 10~70%)으로 스케일링하여 TaskManager에 전달하는 래퍼
     """
-    step_time = 0.5  # 0.5초마다 업데이트
-    total_steps = duration_sec / step_time
-    increment = (end - start) / total_steps
-    
-    current_progress = start
-    
-    while not stop_event.is_set() and current_progress < end:
-        current_progress += increment
-        # 99%를 넘지 않도록 제한
-        if current_progress > end: current_progress = end
-        
-        task_manager.update_progress(task_id, int(current_progress))
-        await asyncio.sleep(step_time)
+    def __init__(self, real_task_manager, task_id, start_offset, scale_factor):
+        self.tm = real_task_manager
+        self.task_id = task_id
+        self.offset = start_offset     # 시작 % (예: 10)
+        self.scale = scale_factor      # 구간 크기 비율 (예: 0.6 -> 60% 구간)
+
+    def update_progress(self, task_id, progress, message=None):
+        # task_id 인자는 무시하고 초기화 시 받은 id 사용
+        # 로컬 진행률(0~100) -> 글로벌 진행률 변환
+        scaled_progress = self.offset + int(progress * self.scale)
+        self.tm.update_progress(self.task_id, scaled_progress, message)
+
+    def is_cancelled(self, task_id):
+        # 취소 여부는 원본 매니저에게 위임
+        return self.tm.is_cancelled(self.task_id)
 
 def remove_temp_files(file_paths: list):
     """
@@ -125,13 +127,17 @@ def remove_temp_files(file_paths: list):
 
 async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
     """
-    [Background] 영상 분석 통합 파이프라인 (Queue Consumer에 의해 실행됨)
-    [수정] 각 단계별 취소 제어 파라미터 전달 및 예외 처리 강화
+    [Background] 영상 분석 통합 파이프라인 (Real-time Progress 적용)
+    구간 계획:
+    - 0~10%: 다운로드
+    - 10~70%: 오디오 변환 및 자막 생성 (Transcriber)
+    - 70~90%: 요약 및 챕터 생성 (Summarizer)
+    - 90~100%: 블로그 글 윤문 (Refiner)
     """
     video_filename = req.filename 
     display_title = req.custom_title
     
-    # [Helper] 정리(Cleanup) 함수
+    # 정리 함수
     def cleanup_files(filename):
         if not filename: return
         try:
@@ -142,44 +148,37 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
                 os.path.join("static/results", f"{base_name}.vtt"),      
                 os.path.join("static/results", f"{base_name}_transcript.json"), 
                 os.path.join("static/results", f"{base_name}_summary.json"),
-                os.path.join("static/results", f"{base_name}_temp.wav") # [Add] 임시 오디오 파일도 삭제 대상 포함
+                os.path.join("static/results", f"{base_name}_temp.wav")
             ]
-            print(f"[{task_id}] Cleaning up files...")
             for path in targets:
-                if os.path.exists(path):
-                    os.remove(path)
-                    print(f" -> Deleted: {path}")
-        except Exception as e:
-            print(f"[{task_id}] Cleanup Warning: {e}")
+                if os.path.exists(path): os.remove(path)
+        except Exception:
+            pass
 
     try:
         loop = asyncio.get_running_loop()
         
-        # [Checkpoint 1] 시작 전 취소 확인
-        if task_manager.is_cancelled(task_id):
-            raise TaskCancelledError("Pending task cancelled")
-
+        # [Start]
+        if task_manager.is_cancelled(task_id): raise TaskCancelledError()
         task_manager.update_progress(task_id, 0, "작업 시작...")
         
-        # --- Phase 1: Video Preparation ---
+        # --- Phase 1: Video Preparation (0~10%) ---
         if req.url:
-            if task_manager.is_cancelled(task_id): raise TaskCancelledError()
-
-            task_manager.update_progress(task_id, 5, "영상 다운로드 중...")
+            task_manager.update_progress(task_id, 1, "영상 다운로드 중...")
             
             def dl_callback(percent, msg):
-                scaled = 5 + (percent * 0.15)
-                loop.call_soon_threadsafe(task_manager.update_progress, task_id, int(scaled), msg)
+                # 0~100 -> 1~10% 매핑
+                scaled = 1 + int(percent * 0.09)
+                loop.call_soon_threadsafe(task_manager.update_progress, task_id, scaled, msg)
 
-            # [수정] downloader에 task_manager와 task_id를 전달하여 다운로드 중단 가능하게 함
             result = await loop.run_in_executor(
                 None, 
                 partial(
                     downloader.download_from_url, 
                     req.url, 
                     progress_callback=dl_callback,
-                    task_manager=task_manager, # [Pass]
-                    task_id=task_id            # [Pass]
+                    task_manager=task_manager,
+                    task_id=task_id
                 )
             )
             
@@ -191,73 +190,66 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
 
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
 
-        # 파일 경로 확정
         video_path = os.path.join("static/videos", video_filename)
         if not os.path.exists(video_path): raise FileNotFoundError(f"File not found: {video_filename}")
         
+        # 제목 보정
         if not display_title:
             raw_name = video_filename
             clean_name = re.sub(r'^[0-9a-fA-F]{8}_', '', raw_name)
-            name_no_ext = os.path.splitext(clean_name)[0]
-            display_title = name_no_ext.replace("_", " ").strip()
+            display_title = os.path.splitext(clean_name)[0].replace("_", " ").strip()
 
-        # --- Phase 2: Transcription ---
-        stop_event = asyncio.Event()
+        # --- Phase 2: Transcription (10~70%) ---
+        # [Change] 시뮬레이션 제거, 리얼타임 진행률 적용
+        task_manager.update_progress(task_id, 10, "오디오 변환 준비 중...")
         
-        def transcriber_progress_handler(local_percent, msg):
-            global_percent = 20 + int(local_percent * 0.5)
-            
-            if local_percent == 35:
-                loop.call_soon_threadsafe(task_manager.update_progress, task_id, global_percent, msg)
-                stop_event.clear()
-                # 시뮬레이터 시작
-                asyncio.run_coroutine_threadsafe(
-                    simulate_progress(task_id, start=global_percent, end=65, duration_sec=120, stop_event=stop_event),
-                    loop
-                )
-            elif local_percent >= 90:
-                loop.call_soon_threadsafe(stop_event.set) # 시뮬레이터 종료
-                loop.call_soon_threadsafe(task_manager.update_progress, task_id, global_percent, msg)
-            else:
-                if local_percent < 35 or local_percent > 90:
-                    loop.call_soon_threadsafe(task_manager.update_progress, task_id, global_percent, msg)
+        # Transcriber용 진행률 래퍼 생성 (10%에서 시작, 전체의 60% 비중)
+        # Transcriber 내부의 0~100% 진행률이 -> 전체 파이프라인의 10~70%로 자동 변환됨
+        progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=10, scale_factor=0.6)
+        
+        # 콜백 함수 정의 (Wrapper 사용)
+        def transcriber_callback(local_percent, msg):
+            loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
 
-        # [수정] Transcriber는 이제 내부적으로 Multiprocessing을 사용하지만, 
-        # 부모 프로세스는 여전히 Polling Loop(Blocking)를 돌므로 run_in_executor 사용이 적절함.
+        # Transcriber 실행 (wrapper를 task_manager로 전달하여 내부의 direct call도 커버)
         transcribe_result = await loop.run_in_executor(
             None,
             partial(
                 transcriber.transcribe, 
                 video_path, 
-                progress_callback=transcriber_progress_handler,
-                task_manager=task_manager, 
+                progress_callback=transcriber_callback,
+                task_manager=progress_wrapper, # [Injection] Wrapper 주입
                 task_id=task_id            
             )
         )
-        
-        stop_event.set()
         
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
         if transcribe_result.get("status") == "error": raise Exception("Transcription failed")
         segments = transcribe_result["segments"]
 
-        # --- Phase 3: Summarization ---
-        task_manager.update_progress(task_id, 70, "내용 요약 및 챕터 생성 중 (LLM)...")
+        # --- Phase 3: Summarization (70~90%) ---
+        task_manager.update_progress(task_id, 70, "내용 구조화 및 요약 중 (LLM)...")
         
-        # LLM 요약 단계는 API 호출이므로 취소 시 즉각 중단은 어렵지만, 체크포인트로 방어
-        if task_manager.is_cancelled(task_id): raise TaskCancelledError()
+        # LLM Callback
+        def summarizer_callback(msg):
+             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 75, msg)
 
         summary_result = await loop.run_in_executor(
             None,
-            partial(summarizer.summarize, segments, video_filename, custom_title=display_title)
+            partial(
+                summarizer.summarize, 
+                segments, 
+                video_filename, 
+                custom_title=display_title,
+                status_callback=summarizer_callback
+            )
         )
         
         if summary_result.get("error"): raise Exception(summary_result["error"])
-
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
 
-        # --- Phase 4: Refining Content ---
-        task_manager.update_progress(task_id, 90, "블로그 포스팅 작성 중 (Gemma)...")
+        # --- Phase 4: Refining Content (90~100%) ---
+        task_manager.update_progress(task_id, 90, "블로그 포스팅 작성 중...")
         
         chapters = summary_result.get("chapters", [])
         total_chaps = len(chapters)
@@ -266,29 +258,29 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         for i, chapter in enumerate(chapters):
             if task_manager.is_cancelled(task_id): raise TaskCancelledError()
 
+            # 90~99% 구간 매핑
             current_progress = 90 + int((i / total_chaps) * 9)
             task_manager.update_progress(task_id, current_progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
 
+            # 챕터에 해당하는 텍스트 추출
             c_start = chapter['time']['start']
             c_end = chapter['time']['end']
-            
-            chapter_text_list = []
-            for seg in sorted_segments:
-                if seg['start'] >= c_start and seg['start'] < c_end:
-                    chapter_text_list.append(seg['text'])
-            
+            chapter_text_list = [
+                s['text'] for s in sorted_segments 
+                if s['start'] >= c_start and s['start'] < c_end
+            ]
             raw_text_chunk = " ".join(chapter_text_list)
             
+            # 윤문 (Refine)
             refined_md = await loop.run_in_executor(
                 None,
                 partial(refiner.refine_chapter, raw_text_chunk, chapter['title'])
             )
             chapter['blog_content'] = refined_md
 
-        # JSON 저장
+        # 결과 저장
         base_name = os.path.splitext(video_filename)[0]
         json_path = os.path.join("static/results", f"{base_name}_summary.json")
-        
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(summary_result, f, ensure_ascii=False, indent=2)
 
@@ -298,74 +290,67 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
 
     except TaskCancelledError:
         print(f"[{task_id}] Task Cancelled by User.")
-        if 'stop_event' in locals(): stop_event.set()
-        
-        # [Cleanup] 생성된 파일들 즉시 삭제
         cleanup_files(video_filename)
-        
-        task_manager.fail_task(task_id, "사용자에 의해 취소되었습니다.")
+        task_manager.fail_task(task_id, "취소됨")
 
     except Exception as e:
         print(f"[{task_id}] Analysis Failed: {e}")
-        if 'stop_event' in locals(): stop_event.set()
-        
         cleanup_files(video_filename)
-        
         task_manager.fail_task(task_id, str(e))
 
 # --- [Background Pipeline] ---
 async def run_clip_pipeline(task_id: str, req: ClipRequest):
     """
     [Background] 영상 클립 생성 파이프라인
-    [수정] Clipper가 async로 변경됨에 따라 호출 방식 변경 (await 직접 호출)
+    [Fix] 입력값 검증 로직 추가 (시간 범위 유효성 체크)
     """
+    # 정리 대상 임시 파일 목록
+    temp_files = [] 
+    
     try:
-        task_manager.update_progress(task_id, 0, "클립 생성 시작...")
+        task_manager.update_progress(task_id, 0, "클립 생성 준비...")
         
-        # 1. 경로 준비
+        # [Validation 1] 파일 존재 여부 확인
         video_path = os.path.join("static/videos", req.filename)
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {req.filename}")
 
-        base_name = os.path.splitext(req.filename)[0]
-        temp_files = [] 
+        # [Validation 2] 시간 범위 유효성 확인 (종료 시간이 시작 시간보다 앞서면 안 됨)
+        if req.end_time <= req.start_time:
+            raise ValueError(f"잘못된 구간 설정: 종료 시간({req.end_time})이 시작 시간({req.start_time})보다 빠르거나 같습니다.")
 
-        # 2. 비디오 자르기 (10% ~ 60%)
-        # [수정] clipper.cut_video는 이제 async 메서드이므로 await로 직접 호출합니다.
-        # 또한 task_manager와 task_id를 전달하여 FFmpeg 실행 중 취소를 지원합니다.
-        task_manager.update_progress(task_id, 10, "영상 자르는 중 (취소 가능)...")
+        # [Validation 3] 최소 길이 제한 (0.5초 미만은 오류 가능성 높음)
+        if (req.end_time - req.start_time) < 0.5:
+            raise ValueError("클립 길이는 최소 0.5초 이상이어야 합니다.")
+
+        base_name = os.path.splitext(req.filename)[0]
+
+        # 1. 비디오 자르기 (10% ~ 60%)
+        # Clipper는 Main-aware 하므로 Wrapper 없이 원본 TM 전달
+        task_manager.update_progress(task_id, 10, "영상 자르는 중...")
         
         cut_video_path = await clipper.cut_video(
             video_path,
             req.start_time,
             req.end_time,
             output_filename=f"clip_{base_name}_{task_id[:8]}.mp4",
-            task_manager=task_manager, # [Pass]
-            task_id=task_id            # [Pass]
+            task_manager=task_manager, 
+            task_id=task_id
         )
         temp_files.append(cut_video_path)
         
-        # 3. 자막 자르기 (60% ~ 80%)
+        # 2. 자막 자르기 (60% ~ 80%)
         if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
         task_manager.update_progress(task_id, 60, "자막 동기화 중...")
         
-        # 자막 파일 탐색
         srt_path = os.path.join("static/results", f"{base_name}.srt")
         vtt_path = os.path.join("static/results", f"{base_name}.vtt")
         
-        sub_source_path = None
-        sub_ext = ""
-        
-        if os.path.exists(srt_path):
-            sub_source_path = srt_path
-            sub_ext = ".srt"
-        elif os.path.exists(vtt_path):
-            sub_source_path = vtt_path
-            sub_ext = ".vtt"
-            
-        loop = asyncio.get_running_loop()
+        sub_source_path = srt_path if os.path.exists(srt_path) else (vtt_path if os.path.exists(vtt_path) else None)
+        sub_ext = ".srt" if sub_source_path == srt_path else ".vtt"
+
         if sub_source_path:
-            # cut_subtitle은 순수 Python 로직이므로 run_in_executor 사용
+            loop = asyncio.get_running_loop()
             cut_sub_path = await loop.run_in_executor(
                 None,
                 partial(
@@ -376,17 +361,16 @@ async def run_clip_pipeline(task_id: str, req: ClipRequest):
                     output_filename=f"clip_{base_name}_{task_id[:8]}{sub_ext}"
                 )
             )
-            if cut_sub_path:
-                temp_files.append(cut_sub_path)
+            if cut_sub_path: temp_files.append(cut_sub_path)
 
-        # 4. 압축 및 영구 저장 (80% ~ 95%)
+        # 3. 압축 및 저장 (80% ~ 95%)
         if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
-        task_manager.update_progress(task_id, 80, "클립 보관함에 저장 중...")
+        task_manager.update_progress(task_id, 80, "클립 패키징 중...")
         
+        loop = asyncio.get_running_loop()
         clip_uuid = str(uuid.uuid4())
         safe_zip_name = f"clip_{base_name}_{clip_uuid[:8]}.zip"
         
-        # create_zip도 순수 Python
         zip_path = await loop.run_in_executor(
             None,
             partial(
@@ -397,17 +381,16 @@ async def run_clip_pipeline(task_id: str, req: ClipRequest):
             )
         )
         
-        # 임시 조각 파일 삭제
-        for f in temp_files:
-            if os.path.exists(f): os.remove(f)
-
-        # 5. 메타데이터(JSON) 업데이트 (95% ~ 100%)
+        # 4. 메타데이터 저장
         meta_filename = f"{base_name}_clips.json"
         meta_path = os.path.join("static/results", meta_filename)
         
+        # [Fix] req.title이 없을 경우를 대비한 기본값 처리
+        final_title = req.title if req.title and req.title.strip() else f"Clip {req.start_time}-{req.end_time}"
+        
         new_clip_info = {
             "clip_id": clip_uuid,
-            "title": req.title,
+            "title": final_title,
             "filename": safe_zip_name,
             "start_time": req.start_time,
             "end_time": req.end_time,
@@ -420,50 +403,46 @@ async def run_clip_pipeline(task_id: str, req: ClipRequest):
             try:
                 with open(meta_path, 'r', encoding='utf-8') as f:
                     clips_data = json.load(f)
-            except Exception:
-                clips_data = []
+            except Exception: pass
         
         clips_data.insert(0, new_clip_info)
-        
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump(clips_data, f, ensure_ascii=False, indent=2)
 
-        # 6. 완료 처리
-        task_manager.complete_task(task_id, {"message": "Saved to library"})
+        # 완료
+        task_manager.complete_task(task_id, {"message": "Saved to library", "download_url": new_clip_info["download_url"]})
         print(f"[{task_id}] Clip Saved: {zip_path}")
 
     except Exception as e:
         print(f"[{task_id}] Clip Pipeline Failed: {e}")
-        # 실패 시 임시 파일 정리
-        if 'temp_files' in locals():
-            for f in temp_files:
-                if os.path.exists(f): os.remove(f)
         task_manager.fail_task(task_id, str(e))
+    
+    finally:
+        # [Cleanup] 임시 파일 정리 (성공/실패 여부와 관계없이 실행)
+        for f in temp_files:
+            if f and os.path.exists(f): 
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
 
 async def worker():
-    """
-    [Background] 큐에서 작업을 하나씩 꺼내 실행하는 영구 루프 워커
-    """
     print("--- [Worker] Analysis Worker Started ---")
     while True:
-        # 1. 큐에서 작업 가져오기 (비어있으면 대기)
         task_id, req = await job_queue.get()
-        
         try:
-            # 2. 작업 실행 (이미 취소된 상태면 스킵)
             if task_manager.is_cancelled(task_id):
                 print(f"[{task_id}] Task cancelled before start.")
                 task_manager.fail_task(task_id, "대기 중 취소됨")
             else:
-                await run_analysis_pipeline(task_id, req)
-                
+                if isinstance(req, AnalyzeRequest):
+                    await run_analysis_pipeline(task_id, req)
+                elif isinstance(req, ClipRequest):
+                    await run_clip_pipeline(task_id, req)
         except Exception as e:
             print(f"[Worker Error] {e}")
-            
         finally:
-            # 3. 작업 완료 통보 (중요)
             job_queue.task_done()
-
 
 
 # --- [API Endpoints] ---
