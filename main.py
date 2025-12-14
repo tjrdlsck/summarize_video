@@ -18,6 +18,8 @@ from services.transcriber import VideoTranscriber
 from services.summarizer import VideoSummarizer
 from services.task_manager import TaskManager
 from services.clipper import VideoClipper
+from services.refiner import TextRefiner
+
 
 # --- [App Initialization] ---
 app = FastAPI(title="AI Video Analyst API", version="2.0")
@@ -41,6 +43,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 downloader = VideoDownloader(download_dir="static/videos")
 transcriber = VideoTranscriber(output_dir="static/results")
 summarizer = VideoSummarizer(output_dir="static/results")
+refiner = TextRefiner() # [New] Refiner 인스턴스 추가
 task_manager = TaskManager()  # [New] Task Manager Instance
 clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 생성
 
@@ -171,7 +174,56 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         if summary_result.get("error"):
             raise Exception(summary_result["error"])
 
-        # --- Phase 4: Finish (100%) ---
+        # =================================================================
+        # [Phase 4] Refining Content (Gemma) - 순차 처리 로직 추가
+        # =================================================================
+        task_manager.update_progress(task_id, 90, "블로그 포스팅 작성 중 (Gemma)...")
+        
+        chapters = summary_result.get("chapters", [])
+        total_chaps = len(chapters)
+        
+        # 원본 세그먼트를 시간순으로 정렬 (검색 최적화)
+        sorted_segments = sorted(segments, key=lambda x: x['start'])
+
+        for i, chapter in enumerate(chapters):
+            # 진행률 세분화 (90% ~ 99% 구간을 챕터 수만큼 나눔)
+            current_progress = 90 + int((i / total_chaps) * 9)
+            task_manager.update_progress(task_id, current_progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
+
+            # 1. 해당 챕터 시간대에 맞는 텍스트 추출
+            c_start = chapter['time']['start']
+            c_end = chapter['time']['end']
+            
+            chapter_text_list = []
+            for seg in sorted_segments:
+                # 세그먼트가 챕터 시간 내에 50% 이상 포함되면 채택, 
+                # 혹은 간단히 시작 시간이 범위 내에 있으면 포함
+                if seg['start'] >= c_start and seg['start'] < c_end:
+                    chapter_text_list.append(seg['text'])
+            
+            raw_text_chunk = " ".join(chapter_text_list)
+            
+            # 2. Gemma에게 윤문 요청 (순차 처리)
+            # Blocking I/O이므로 Executor 사용
+            refined_md = await loop.run_in_executor(
+                None,
+                partial(refiner.refine_chapter, raw_text_chunk, chapter['title'])
+            )
+            
+            # 3. 결과 데이터를 기존 챕터 객체에 추가
+            chapter['blog_content'] = refined_md
+
+        # 4. 업데이트된 전체 데이터를 파일에 다시 저장
+        # (summarizer가 저장했던 파일을 덮어씁니다)
+        base_name = os.path.splitext(video_filename)[0]
+        json_path = os.path.join("static/results", f"{base_name}_summary.json")
+        
+        with open(json_path, 'w', encoding='utf-8') as f:
+            json.dump(summary_result, f, ensure_ascii=False, indent=2)
+
+        # =================================================================
+
+        # --- Phase 5: Finish (100%) ---
         task_manager.complete_task(task_id, summary_result)
         print(f"[{task_id}] Analysis Completed: {video_filename}")
 

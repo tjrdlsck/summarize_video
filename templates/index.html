@@ -10,6 +10,7 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
     <!-- Tailwind CSS (CDN) -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -77,6 +78,49 @@
             /* 한글 단어 끊김 방지 */
             text-align: justify;
             /* 양쪽 정렬 */
+        }
+
+        /* Markdown Custom Styles */
+        .markdown-body h3 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #1f2937;
+            /* Gray-800 */
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .markdown-body p {
+            margin-bottom: 1rem;
+            line-height: 1.75;
+            color: #374151;
+            /* Gray-700 */
+        }
+
+        .markdown-body ul {
+            list-style-type: disc;
+            padding-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .markdown-body li {
+            margin-bottom: 0.5rem;
+        }
+
+        .markdown-body blockquote {
+            border-left: 4px solid #6366f1;
+            /* Indigo-500 */
+            background-color: #f9fafb;
+            padding: 1rem;
+            margin: 1.5rem 0;
+            font-style: italic;
+            color: #4b5563;
+        }
+
+        .markdown-body strong {
+            color: #4f46e5;
+            /* Indigo-600 */
+            font-weight: 700;
         }
     </style>
 </head>
@@ -973,54 +1017,67 @@
                                             </div>
                                         )}
 
-                                        {/* [추가] Tab 2: Blog View (New Feature) */}
+                                        {/* [수정] Tab 2: Blog View (Markdown Rendered) */}
                                         {activeTab === 'blog' && (
-                                            <div className="max-w-2xl mx-auto pb-20 animate-fade-in">
+                                            <div className="max-w-3xl mx-auto pb-20 animate-fade-in px-4">
                                                 <div className="mb-8 text-center border-b border-gray-100 pb-6 pt-4">
                                                     <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-2">{playerData.video_title}</h2>
-                                                    <p className="text-xs text-indigo-500 font-bold uppercase tracking-wide">AI Generated Story</p>
+                                                    <p className="text-xs text-indigo-500 font-bold uppercase tracking-wide">
+                                                        Refined by Gemma-2-27b
+                                                    </p>
                                                 </div>
 
                                                 <div className="space-y-12">
-                                                    {blogContent.map((section, idx) => (
-                                                        <article key={idx} className="group">
-                                                            <div className="flex items-center gap-3 mb-4">
+                                                    {playerData.chapters.map((chapter, idx) => (
+                                                        <article key={idx} className="group border-b border-gray-100 pb-10 last:border-0">
+                                                            <div className="flex items-center gap-3 mb-6">
                                                                 <button
-                                                                    onClick={() => seekVideo(section.time.start)}
+                                                                    onClick={() => seekVideo(chapter.time.start)}
                                                                     className="shrink-0 px-2.5 py-1 bg-gray-100 text-gray-500 text-xs font-mono rounded-lg hover:bg-indigo-600 hover:text-white transition flex items-center gap-1.5 border border-gray-200"
                                                                     title="이 구간 영상 재생"
                                                                 >
-                                                                    ▶ {formatTime(section.time.start)}
+                                                                    ▶ {formatTime(chapter.time.start)}
                                                                 </button>
-                                                                <h3 className="text-lg font-bold text-gray-800 group-hover:text-indigo-700 transition leading-snug">
-                                                                    {section.title}
-                                                                </h3>
+                                                                {/* 챕터 제목은 Markdown 내에 포함될 수도 있지만, UI 일관성을 위해 여기서도 표시 */}
+                                                                <span className="text-sm text-gray-400 font-medium">Chapter {idx + 1}</span>
                                                             </div>
 
-                                                            {/* 요약 박스 (Highlight) */}
-                                                            <div className="bg-indigo-50/60 border-l-4 border-indigo-300 p-4 mb-5 rounded-r-xl">
-                                                                <p className="text-sm text-indigo-900 font-medium leading-relaxed whitespace-pre-line">
-                                                                    💡 {section.summary}
-                                                                </p>
-                                                            </div>
-
-                                                            {/* 본문 (전체 대사 합침) */}
-                                                            <p className="text-gray-700 prose-custom text-[15px] leading-7 px-1">
-                                                                {section.fullText}
-                                                            </p>
+                                                            {/* [핵심 변경] Markdown 렌더링 영역 */}
+                                                            {chapter.blog_content ? (
+                                                                <div
+                                                                    className="markdown-body prose-custom"
+                                                                    dangerouslySetInnerHTML={{ __html: marked.parse(chapter.blog_content) }}
+                                                                />
+                                                            ) : (
+                                                                // 하위 호환성: blog_content가 없는 구버전 데이터는 기존 방식대로 표시
+                                                                <div>
+                                                                    <h3 className="text-lg font-bold text-gray-800 mb-2">{chapter.title}</h3>
+                                                                    <p className="bg-indigo-50/60 p-4 rounded-lg text-indigo-900 mb-4 font-medium">
+                                                                        💡 {chapter.summary}
+                                                                    </p>
+                                                                    <p className="text-gray-700 leading-7">
+                                                                        (아직 윤문 데이터가 생성되지 않았습니다. 분석을 다시 실행하면 Gemma가 글을 작성해줍니다.)
+                                                                    </p>
+                                                                </div>
+                                                            )}
                                                         </article>
                                                     ))}
                                                 </div>
 
+                                                {/* 전체 복사 버튼 */}
                                                 <div className="mt-16 p-8 bg-gray-50 rounded-2xl text-center border border-gray-100">
-                                                    <p className="text-gray-500 text-sm mb-3">전체 텍스트가 필요하신가요?</p>
-
-                                                    {/* [수정] onClick 핸들러 교체 */}
                                                     <button
-                                                        onClick={handleCopyFullText}
+                                                        onClick={async () => {
+                                                            // Markdown 원본 텍스트를 모두 합쳐서 복사
+                                                            const fullText = playerData.chapters.map(c => c.blog_content || c.title + "\n" + c.summary).join("\n\n---\n\n");
+                                                            try {
+                                                                await navigator.clipboard.writeText(fullText);
+                                                                alert('전체 마크다운 내용이 복사되었습니다!');
+                                                            } catch (e) { alert('복사 실패'); }
+                                                        }}
                                                         className="px-5 py-2.5 bg-white border border-gray-200 shadow-sm rounded-xl text-sm font-bold text-gray-700 hover:text-indigo-600 hover:border-indigo-200 transition"
                                                     >
-                                                        📋 전체 글 복사하기
+                                                        📋 마크다운 원본 복사하기
                                                     </button>
                                                 </div>
                                             </div>
