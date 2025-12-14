@@ -3,3 +3,6 @@ venv/
 video/
 __pycache__/
 static/
+1.txt
+gemma.py
+sermon_output.md
