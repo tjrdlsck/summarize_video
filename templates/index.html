@@ -149,7 +149,7 @@
         // 백엔드 패치 이전에 생성된 데이터의 제목(.mp4, _ 포함)을 UI에서 즉시 교정하여 보여줍니다.
         const normalizeLegacyTitle = (title) => {
             if (!title) return "제목 없음";
-            
+
             // 이미 깔끔한 경우(확장자 없고, 언더스코어 없고, UUID 패턴도 없는 경우)는 패스
             // (UUID 패턴 검사는 복잡하므로, 아래 로직을 항상 타게 해도 무방합니다)
 
@@ -171,55 +171,106 @@
 
         const { useState, useRef, useEffect, useMemo } = React;
 
-        // --- [Sub Component] Task Monitor Widget (Upgraded) ---
-        function TaskMonitor({ tasks }) {
+        // --- [Sub Component] Task Monitor Widget (Upgraded v2) ---
+        function TaskMonitor({ tasks, onCancel }) { // [Modify] onCancel prop 추가
             if (!tasks || tasks.length === 0) return null;
 
             return (
-                <div className="fixed bottom-6 right-6 w-80 bg-white rounded-xl shadow-2xl border border-indigo-100 overflow-hidden z-50 fade-in">
-                    <div className="bg-indigo-600 px-4 py-3 flex justify-between items-center">
+                <div className="fixed bottom-6 right-6 w-96 bg-white rounded-xl shadow-2xl border border-indigo-100 overflow-hidden z-50 fade-in flex flex-col max-h-[80vh]">
+                    <div className="bg-indigo-600 px-4 py-3 flex justify-between items-center shrink-0">
                         <h3 className="text-white font-bold text-sm flex items-center gap-2">
                             <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
-                            작업 진행 중 ({tasks.length})
+                            작업 대기열 ({tasks.length})
                         </h3>
+                        <span className="text-xs text-indigo-200">자동 갱신 중</span>
                     </div>
-                    <div className="max-h-60 overflow-y-auto p-4 space-y-4">
-                        {tasks.map((task) => (
-                            <div key={task.task_id} className="text-sm border-b border-gray-100 last:border-0 pb-2 last:pb-0">
-                                <div className="flex justify-between text-gray-700 mb-1">
-                                    <span className="font-semibold truncate w-2/3" title={task.filename}>
-                                        {task.type === 'clip_export' ? '✂️ 클립 생성' : '🤖 영상 분석'}
-                                    </span>
-                                    <span className="text-indigo-600 font-bold">{task.progress}%</span>
-                                </div>
 
-                                {/* Progress Bar */}
-                                <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
-                                    <div
-                                        className={`h-2 rounded-full transition-all duration-500 ${task.status === 'failed' ? 'bg-red-500' :
-                                            task.status === 'completed' ? 'bg-green-500' : 'bg-indigo-500'
-                                            }`}
-                                        style={{ width: `${task.progress}%` }}>
+                    <div className="overflow-y-auto p-4 space-y-4 custom-scrollbar">
+                        {tasks.map((task, index) => {
+                            // 상태별 스타일링 계산
+                            let statusColor = "bg-indigo-500";
+                            let statusText = `${task.progress}%`;
+                            let isCancelable = true;
+
+                            if (task.status === 'queued') {
+                                statusColor = "bg-gray-300"; // 대기 중은 회색
+                                statusText = "대기 중";
+                            } else if (task.status === 'canceling') {
+                                statusColor = "bg-red-400";
+                                statusText = "중단 중...";
+                                isCancelable = false;
+                            } else if (task.status === 'failed') {
+                                statusColor = "bg-red-500";
+                                statusText = "오류/취소";
+                                isCancelable = false;
+                            } else if (task.status === 'completed') {
+                                statusColor = "bg-green-500";
+                                statusText = "완료";
+                                isCancelable = false;
+                            }
+
+                            return (
+                                <div key={task.task_id} className="text-sm border-b border-gray-100 last:border-0 pb-3 last:pb-0 relative group">
+                                    <div className="flex justify-between text-gray-700 mb-1 items-center">
+                                        <div className="flex flex-col w-2/3">
+                                            <span className="font-bold truncate" title={task.filename}>
+                                                {index + 1}. {task.filename}
+                                            </span>
+                                            <span className="text-xs text-gray-400">
+                                                {task.type === 'clip_export' ? '✂️ 클립 생성' : '🤖 영상 분석'}
+                                            </span>
+                                        </div>
+
+                                        {/* 취소 버튼 (대기 중 or 진행 중일 때만 표시) */}
+                                        {isCancelable && (
+                                            <button
+                                                onClick={() => onCancel(task.task_id)}
+                                                className="text-xs bg-white border border-red-200 text-red-500 px-2 py-0.5 rounded hover:bg-red-50 transition"
+                                            >
+                                                중단
+                                            </button>
+                                        )}
                                     </div>
-                                </div>
 
-                                <div className="flex justify-between items-center">
-                                    <p className="text-xs text-gray-500 truncate w-2/3">
-                                        {task.message}
-                                    </p>
+                                    {/* Progress Bar Container */}
+                                    <div className="w-full bg-gray-100 rounded-full h-2 mb-1.5 overflow-hidden">
+                                        {task.status === 'queued' ? (
+                                            // 대기 중일 때: 빗금 패턴 애니메이션
+                                            <div className="h-full w-full bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAIklEQVQIW2NkQAKrVq36zwjjgzjwqgAA6gJwww==')] opacity-30"></div>
+                                        ) : (
+                                            // 진행 중일 때: 실제 진행률
+                                            <div
+                                                className={`h-2 rounded-full transition-all duration-500 ${statusColor}`}
+                                                style={{ width: `${task.progress}%` }}>
+                                            </div>
+                                        )}
+                                    </div>
 
-                                    {/* [New] 완료 시 다운로드 버튼 표시 */}
+                                    <div className="flex justify-between items-center text-xs">
+                                        <p className="text-gray-500 truncate w-3/4">
+                                            {task.status === 'queued'
+                                                ? `대기 순번: ${index + 1}번째`
+                                                : task.message}
+                                        </p>
+                                        <span className={`font-bold ${task.status === 'failed' ? 'text-red-500' : 'text-indigo-600'}`}>
+                                            {statusText}
+                                        </span>
+                                    </div>
+
+                                    {/* 완료 시 다운로드 버튼 */}
                                     {task.status === 'completed' && task.type === 'clip_export' && task.result && (
-                                        <a
-                                            href={task.result.download_url}
-                                            className="text-xs bg-green-500 text-white px-2 py-1 rounded hover:bg-green-600 transition font-bold no-underline"
-                                            download>
-                                            ⬇ 다운로드
-                                        </a>
+                                        <div className="mt-1 text-right">
+                                            <a
+                                                href={task.result.download_url}
+                                                className="inline-block text-xs bg-green-500 text-white px-2 py-1 rounded hover:bg-green-600 transition font-bold no-underline"
+                                                download>
+                                                ⬇ 다운로드
+                                            </a>
+                                        </div>
                                     )}
                                 </div>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </div>
             );
@@ -528,6 +579,21 @@
                 }
             };
 
+            // [New] 작업 취소 핸들러
+            const handleCancelTask = async (taskId) => {
+                if (!confirm("현재 작업을 취소하시겠습니까?\n(진행 중인 내용은 저장되지 않습니다)")) return;
+
+                try {
+                    // 3단계에서 만든 취소 API 호출
+                    await axios.delete(`/api/tasks/${taskId}`);
+
+                    // 즉시 UI 갱신 (사용자에게 반응성 제공)
+                    fetchActiveTasks();
+                } catch (err) {
+                    alert("취소 요청 실패: " + err.message);
+                }
+            };
+
             const loadPlayer = async (item) => {
                 try {
                     let transcripts = [];
@@ -674,8 +740,12 @@
                         </div>
                     </header>
 
-                    {/* Task Monitor Widget (그대로 유지) */}
-                    <TaskMonitor tasks={activeTasks} />
+                    {/* Task Monitor Widget */}
+                    {/* [Modify] activeTasks와 함께 onCancel 핸들러를 전달합니다 */}
+                    <TaskMonitor
+                        tasks={activeTasks}
+                        onCancel={handleCancelTask}
+                    />
 
                     <main className="flex-1 flex overflow-hidden bg-gray-50">
 

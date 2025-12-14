@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import zipfile
+import asyncio
 
 class VideoClipper:
     """
@@ -41,54 +42,75 @@ class VideoClipper:
         except Exception:
             return 0.0
 
-    def cut_video(self, input_path, start_sec, end_sec, output_filename="clip.mp4"):
+    async def cut_video(self, input_path, start_sec, end_sec, output_filename="clip.mp4", task_manager=None, task_id=None):
         """
-        FFmpeg와 Apple VideoToolbox를 사용하여 하드웨어 가속으로 영상을 자릅니다.
-        [개선사항] 고정 비트레이트 대신 품질 기반 VBR(-q:v)을 사용하여 
-        용량을 최적화하고 원본 화질을 보존합니다.
+        [Async] FFmpeg를 비동기 프로세스로 실행하며, 실행 중 취소 여부를 주기적으로 감시합니다.
         """
         output_path = os.path.join(self.temp_dir, output_filename)
         
+        # FFmpeg 명령어 구성 (기존 옵션 유지)
         cmd = [
             "ffmpeg", 
             "-i", input_path,
             "-ss", str(start_sec),
             "-to", str(end_sec),
-            
-            # [Apple Silicon 하드웨어 가속 설정]
-            "-c:v", "h264_videotoolbox", # 인코더: Apple M-Series Media Engine
-            
-            # [핵심 변경 사항: 화질 제어]
-            # -q:v 65: 품질 기준 VBR (0~100). 
-            # 65는 시각적 무손실(Visually Lossless)에 가까운 Apple 권장 'High' 품질입니다.
-            # 복잡한 장면엔 비트레이트를 높이고, 단순한 장면엔 낮춰 용량을 최적화합니다.
+            "-c:v", "h264_videotoolbox", # Apple Silicon 가속
             "-q:v", "65",
-            
-            # [오디오 설정]
-            # -c:a aac: 호환성을 위해 AAC 사용
-            # -b:a 192k: 오디오 음질 저하를 막기 위해 충분한 비트레이트 할당
             "-c:a", "aac", "-b:a", "192k",
-            
-            "-y",           # 파일 덮어쓰기 허용
-            "-hide_banner", # 불필요한 로그 숨김
-            output_path
+            "-y",
+            "-hide_banner"
         ]
 
+        print(f"--- [Clipper] Starting Async Cut: {output_filename} ---")
+
         try:
-            # 하드웨어 가속 디버깅을 위해 에러 발생 시에만 로그를 캡처합니다.
-            result = subprocess.run(
-                cmd, 
-                check=True, 
-                stdout=subprocess.DEVNULL, 
-                stderr=subprocess.PIPE
+            # 1. 비동기 서브프로세스 생성
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE
             )
-            print(f"--- [Clipper] VBR Optimized Cut Success: {output_path} ---")
+
+            # 2. Polling Loop (0.1초마다 상태 확인)
+            while True:
+                # [Check Cancel] 작업 취소 확인
+                if task_manager and task_id and task_manager.is_cancelled(task_id):
+                    try:
+                        process.terminate() # 프로세스 종료 시그널 전송
+                        await process.wait() # 좀비 프로세스 방지
+                        print(f"--- [Clipper] Killed process for task {task_id}")
+                    except Exception:
+                        pass
+                    # 파일 정리
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                    raise Exception("Clip generation cancelled by user")
+
+                # 프로세스 종료 여부 확인 (Timeout 0.1초)
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=0.1)
+                    # 타임아웃 없이 리턴되면 프로세스 종료된 것임
+                    break
+                except asyncio.TimeoutError:
+                    # 아직 실행 중이면 루프 계속
+                    continue
+
+            # 3. 결과 확인
+            if process.returncode != 0:
+                # stderr 읽기
+                stderr_data = await process.stderr.read()
+                error_log = stderr_data.decode() if stderr_data else "Unknown FFmpeg Error"
+                raise Exception(f"FFmpeg failed: {error_log}")
+
+            print(f"--- [Clipper] Cut Success: {output_path} ---")
             return output_path
             
-        except subprocess.CalledProcessError as e:
-            error_log = e.stderr.decode() if e.stderr else "Unknown Error"
-            print(f"[Clipper Error] FFmpeg failed: {error_log}")
-            raise Exception(f"Video cutting failed: {error_log}")
+        except Exception as e:
+            print(f"[Clipper Error] {e}")
+            # 에러 발생 시 부분 생성된 파일 삭제
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            raise e
 
     def cut_subtitle(self, sub_path, start_sec, end_sec, output_filename="clip.srt"):
         """

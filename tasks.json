@@ -806,5 +806,45 @@
       ]
     },
     "error": null
+  },
+  "130fa183-dcb2-41ce-b9ad-248d629788d8": {
+    "task_id": "130fa183-dcb2-41ce-b9ad-248d629788d8",
+    "filename": "https://www.youtube.com/watch?v=VtCI18GjjIU",
+    "type": "analysis",
+    "status": "failed",
+    "progress": 0,
+    "message": "오류 발생",
+    "result": null,
+    "error": "사용자에 의해 취소되었습니다."
+  },
+  "2202c710-04e7-4046-bdf2-3fa3e0675566": {
+    "task_id": "2202c710-04e7-4046-bdf2-3fa3e0675566",
+    "filename": "https://www.youtube.com/watch?v=T0U1isPZTLc",
+    "type": "analysis",
+    "status": "canceled",
+    "progress": 12,
+    "message": "취소 요청됨...",
+    "result": null,
+    "error": null
+  },
+  "ca999c96-426d-4c76-9edb-d59ced9cb61b": {
+    "task_id": "ca999c96-426d-4c76-9edb-d59ced9cb61b",
+    "filename": "https://www.youtube.com/watch?v=VtCI18GjjIU",
+    "type": "analysis",
+    "status": "failed",
+    "progress": 0,
+    "message": "오류 발생",
+    "result": null,
+    "error": "User cancelled the download"
+  },
+  "949b7e48-7506-452d-9e5f-8087db4161b7": {
+    "task_id": "949b7e48-7506-452d-9e5f-8087db4161b7",
+    "filename": "https://www.youtube.com/watch?v=T0U1isPZTLc",
+    "type": "analysis",
+    "status": "failed",
+    "progress": 0,
+    "message": "오류 발생",
+    "result": null,
+    "error": "User cancelled the download"
   }
 }

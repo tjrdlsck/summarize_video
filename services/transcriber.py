@@ -7,6 +7,41 @@ import mlx_whisper
 import soundfile as sf
 import numpy as np
 import stable_whisper
+import time
+import multiprocessing
+
+class TaskCancelledError(Exception):
+    """작업이 사용자에 의해 취소되었을 때 발생하는 예외"""
+    pass
+
+def run_whisper_worker(wav_path, model_path, result_queue):
+    """
+    [Worker Process] 별도 프로세스에서 실행되는 Whisper 추론 함수입니다.
+    메인 프로세스와의 격리를 통해, 언제든 외부에서 강제 종료(Kill)할 수 있습니다.
+    """
+    try:
+        print(f"[Whisper Worker] PID {os.getpid()} started processing...")
+        
+        # MLX Whisper 추론 실행
+        # (옵션은 클래스와 동일하게 유지)
+        output = mlx_whisper.transcribe(
+            wav_path,
+            path_or_hf_repo=model_path,
+            language="ko",
+            verbose=True, 
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            temperature=(0.0, 0.2, 0.4) 
+        )
+        
+        # 결과를 큐에 담아 부모 프로세스로 전송
+        result_queue.put({"status": "success", "data": output})
+        print(f"[Whisper Worker] PID {os.getpid()} finished successfully.")
+        
+    except Exception as e:
+        # 에러 발생 시 부모에게 알림
+        print(f"[Whisper Worker] Error: {e}")
+        result_queue.put({"status": "error", "message": str(e)})
 
 class VideoTranscriber:
     """
@@ -22,8 +57,11 @@ class VideoTranscriber:
         # self.model_path = "mlx-community/whisper-large-v3-mlx-4bit"
         self.model_path = "mlx-community/whisper-large-v3-turbo-q4"
 
-    def _convert_to_16k_wav(self, input_path):
-        """FFmpeg를 사용하여 영상을 16kHz Mono WAV로 변환"""
+    def _convert_to_16k_wav(self, input_path, task_manager=None, task_id=None):
+        """
+        FFmpeg를 사용하여 영상을 16kHz Mono WAV로 변환합니다.
+        [수정] 변환 도중 취소 가능하도록 Polling Loop 적용
+        """
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         output_wav = os.path.join(self.output_dir, f"{base_name}_temp.wav")
 
@@ -34,11 +72,35 @@ class VideoTranscriber:
         ]
         
         try:
-            subprocess.run(cmd, check=True)
+            # 1. Popen으로 프로세스 시작 (Non-blocking)
+            process = subprocess.Popen(cmd)
+            
+            # 2. 종료될 때까지 감시 (Polling)
+            while process.poll() is None:
+                # [Check Cancel]
+                if task_manager and task_id and task_manager.is_cancelled(task_id):
+                    process.terminate() # 프로세스 사살
+                    process.wait()      # 자원 회수
+                    if os.path.exists(output_wav):
+                        os.remove(output_wav)
+                    print(f"--- [Transcriber] Audio conversion cancelled for {task_id}")
+                    raise TaskCancelledError("Audio conversion cancelled")
+                
+                time.sleep(0.1) # CPU 과부하 방지
+            
+            # 3. 결과 확인
+            if process.returncode != 0:
+                raise subprocess.CalledProcessError(process.returncode, cmd)
+                
             return output_wav
+
         except subprocess.CalledProcessError as e:
             print(f"[Error] FFmpeg conversion failed: {e}")
             return None
+        except Exception as e:
+            # TaskCancelledError는 상위로 전파
+            raise e
+
 
     def _get_vad_timestamps(self, audio_path):
         """Silero VAD를 사용하여 실제 음성이 있는 구간(초 단위)을 추출"""
@@ -160,88 +222,122 @@ class VideoTranscriber:
         text = re.sub(r'(\S+)(?:\s+\1){3,}', r'\1 \1', text)
         return text.strip()
 
-    def transcribe(self, video_path, progress_callback=None):
+    def _check_cancel(self, task_manager, task_id):
         """
-        [Main Pipeline] 마일스톤 기반 진행률 보고가 적용된 Transcribe 메서드
-        Args:
-            video_path (str): 영상 파일 경로
-            progress_callback (func): (percent: int, message: str) -> None
+        작업 취소 여부를 확인하고, 취소되었다면 예외를 발생시킵니다.
+        """
+        if task_manager and task_id:
+            if task_manager.is_cancelled(task_id):
+                print(f"--- [Transcriber] Task {task_id} cancelled by user. ---")
+                raise TaskCancelledError("User cancelled the task.")
+
+    # [Modify] 시그니처 변경: task_manager와 task_id를 선택적 인자로 받음
+    def transcribe(self, video_path, progress_callback=None, task_manager=None, task_id=None):
+        """
+        [Main Pipeline] 프로세스 격리(Isolation)가 적용된 안전한 Transcribe 메서드
         """
         print(f"--- [Transcriber] Start processing: {video_path} ---")
         
-        # [Milestone 0%] 시작
+        # [Checkpoint 1] 시작 전 확인
+        self._check_cancel(task_manager, task_id)
+        
         if progress_callback: progress_callback(0, "오디오 변환 준비 중...")
         
-        # 1. 오디오 변환
-        wav_path = self._convert_to_16k_wav(video_path)
+        # 1. 오디오 변환 (이전 단계에서 적용한 Polling 방식 사용)
+        wav_path = self._convert_to_16k_wav(video_path, task_manager, task_id)
         if not wav_path: raise Exception("Audio conversion failed")
 
-        # [Milestone 10%] 오디오 변환 완료 (FFmpeg 종료)
-        if progress_callback: progress_callback(10, "오디오 변환 완료")
-
         try:
+            # [Checkpoint 2] 오디오 변환 직후 확인
+            self._check_cancel(task_manager, task_id)
+
+            if progress_callback: progress_callback(10, "오디오 변환 완료")
+
             # 2. VAD 실행
             if progress_callback: progress_callback(15, "음성 구간 탐지(VAD) 실행 중...")
             vad_segments = self._get_vad_timestamps(wav_path)
             
-            # [Milestone 30%] VAD 완료
+            # [Checkpoint 3] VAD 완료 후 확인
+            self._check_cancel(task_manager, task_id)
+            
             if progress_callback: progress_callback(30, "음성 구간 분석 완료")
             
-            # 3. Whisper 실행
-            print(" -> Running Whisper Inference (Long-form Optimized)...")
-            
-            # [Milestone 35%] 핵심! 여기서 메인 프로세스에 '시뮬레이션 시작' 신호를 줍니다.
+            # 3. Whisper 실행 (Process Isolation)
+            print(" -> Spawning Whisper Worker Process...")
             if progress_callback: progress_callback(35, "AI 자막 생성 시작 (시간이 소요됩니다)...")
             
-            # Whisper 추론 (Blocking Operation)
-            # 여기가 가장 오래 걸리는 구간입니다. main.py에서 이 구간을 시뮬레이션으로 채웁니다.
-            output = mlx_whisper.transcribe(
-                wav_path,
-                path_or_hf_repo=self.model_path,
-                language="ko",
-                verbose=True, # 로그는 디버깅용으로 남겨둠
-                word_timestamps=True,
-                condition_on_previous_text=False,
-                initial_prompt=None,
-                temperature=(0.0, 0.2, 0.4) 
-            )
+            # 결과 통신을 위한 큐 생성
+            queue = multiprocessing.Queue()
             
-            # [Milestone 90%] 추론 완료! (메인 프로세스는 여기서 시뮬레이션을 종료하고 점프합니다)
+            # 자식 프로세스 생성 및 시작
+            worker_process = multiprocessing.Process(
+                target=run_whisper_worker,
+                args=(wav_path, self.model_path, queue)
+            )
+            worker_process.start()
+            
+            # [Supervisor Loop] 자식 프로세스 감시 및 취소 제어
+            worker_failed = False
+            output = None
+            
+            while worker_process.is_alive():
+                # (A) 취소 요청 확인
+                if task_manager and task_id and task_manager.is_cancelled(task_id):
+                    print(f"--- [Supervisor] Killing Whisper Worker (PID {worker_process.pid}) ---")
+                    worker_process.terminate()  # 1차 경고 (SIGTERM)
+                    worker_process.join(timeout=1)
+                    if worker_process.is_alive():
+                        worker_process.kill()   # 2차 사살 (SIGKILL)
+                    
+                    raise TaskCancelledError("Whisper inference cancelled by user")
+                
+                # (B) CPU 과부하 방지
+                time.sleep(0.5)
+
+            # 프로세스 종료 후 결과 확인
+            if not queue.empty():
+                result = queue.get()
+                if result["status"] == "success":
+                    output = result["data"]
+                else:
+                    raise Exception(f"Worker Error: {result.get('message')}")
+            else:
+                # 큐가 비었는데 프로세스가 죽음 (OOM, Crash 등)
+                if worker_process.exitcode != 0:
+                     raise Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
+            
+            # [Milestone 90%] 추론 완료
             if progress_callback: progress_callback(90, "데이터 정제 및 타임스탬프 교정 중...")
             
-            # 4. 필터링 및 정제
+            # 4. 필터링 및 정제 (기존 로직 유지)
             raw_segments = output.get('segments', [])
             clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
-
             for seg in clean_segments:
                 if 'text' in seg: seg['text'] = self._clean_text(seg['text'])
-
             clean_segments = self._sanitize_segments(clean_segments)
 
-            # 5. Stable-Whisper 변환 및 저장
+            # 5. 저장 로직 (Stable Whisper 후처리)
             composition = {
                 "text": " ".join([s['text'] for s in clean_segments]),
                 "segments": clean_segments,
                 "language": output.get("language", "ko")
             }
-            
-            result = stable_whisper.WhisperResult(composition)
-            result.split_by_length(max_chars=25, max_words=None)
-            result.split_by_gap(0.5)
+            result_obj = stable_whisper.WhisperResult(composition)
+            result_obj.split_by_length(max_chars=25, max_words=None)
+            result_obj.split_by_gap(0.5)
 
-            # 파일 저장
+            # 파일 쓰기
             base_name = os.path.splitext(os.path.basename(video_path))[0]
-            
             srt_path = os.path.join(self.output_dir, f"{base_name}.srt")
             vtt_path = os.path.join(self.output_dir, f"{base_name}.vtt")
             json_path = os.path.join(self.output_dir, f"{base_name}_transcript.json")
 
-            result.to_srt_vtt(srt_path, word_level=False)
-            result.to_srt_vtt(vtt_path, word_level=False)
+            result_obj.to_srt_vtt(srt_path, word_level=False)
+            result_obj.to_srt_vtt(vtt_path, word_level=False)
 
             # JSON 데이터 구성
             final_data = []
-            for idx, seg in enumerate(result.segments, 1):
+            for idx, seg in enumerate(result_obj.segments, 1):
                 final_data.append({
                     "id": idx,
                     "start": seg.start,
@@ -254,7 +350,6 @@ class VideoTranscriber:
 
             print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
             
-            # [Milestone 100%] 작업 끝
             if progress_callback: progress_callback(100, "자막 생성 완료")
             
             return {
@@ -265,7 +360,12 @@ class VideoTranscriber:
                 "segments": final_data 
             }
 
+        except TaskCancelledError:
+            print(f"[Transcriber] Cleanup initiated for task {task_id}")
+            raise 
+
         finally:
+            # [중요] 임시 wav 파일은 반드시 삭제
             if os.path.exists(wav_path):
                 os.remove(wav_path)
 

@@ -30,18 +30,22 @@ class VideoDownloader:
         clean_name = clean_name.strip().replace(" ", "_")
         return clean_name
 
-    def save_uploaded_file(self, file_object, original_filename):
+    def save_uploaded_file(self, file_object, original_filename, task_manager=None, task_id=None):
         """
         [New] 사용자가 직접 업로드한 파일을 저장하는 메서드
+        [수정] 저장 시작 전 취소 확인 로직 추가
         
         Args:
             file_object: FastAPI의 UploadFile.file 객체 (Binary IO)
             original_filename: 사용자가 올린 원본 파일명
-            
-        Returns:
-            dict: { "status": "success", "file_path": ..., "filename": ..., "original_filename": ... }
+            task_manager: (Optional) 취소 확인용
+            task_id: (Optional) 취소 확인용
         """
         try:
+            # [Check Cancel] 저장 시작 전 확인
+            if task_manager and task_id and task_manager.is_cancelled(task_id):
+                return {"status": "error", "message": "Upload cancelled by user"}
+
             # 안전한 파일명 생성
             safe_name = self._sanitize_filename(original_filename)
             # 중복 방지를 위해 UUID 부착
@@ -57,28 +61,34 @@ class VideoDownloader:
                 "status": "success",
                 "file_path": final_path,
                 "filename": unique_name,
-                "original_filename": original_filename  # [Add] 원본 파일명 반환 (메타데이터용)
+                "original_filename": original_filename
             }
 
         except Exception as e:
             print(f"[Error] Upload failed: {e}")
             return {"status": "error", "message": str(e)}
 
-    def download_from_url(self, url, progress_callback=None):
+    def download_from_url(self, url, progress_callback=None, task_manager=None, task_id=None):
         """
         YouTube URL을 통해 영상을 다운로드합니다.
+        [수정] Hook 내부에서 TaskManager를 조회하여 다운로드 강제 중단 기능 추가
         
         Args:
             url (str): 유튜브 URL
-            progress_callback (func, optional): (percent: int, message: str) -> None 형태의 콜백 함수
-        
-        Returns:
-            dict: { "status": "success", "file_path": ..., "meta": ... }
+            progress_callback (func): 진행률 콜백
+            task_manager (TaskManager): 취소 상태 확인용 인스턴스
+            task_id (str): 작업 ID
         """
         print(f"--- [Downloader] Processing URL: {url} ---")
         
         # 내부 Hook 함수 정의 (yt-dlp가 다운로드 중에 계속 호출함)
         def _progress_hook(d):
+            # [Check Cancel] 다운로드 중간에 취소 여부 확인
+            if task_manager and task_id:
+                if task_manager.is_cancelled(task_id):
+                    # 예외를 발생시키면 yt-dlp가 즉시 중단됩니다.
+                    raise Exception("Download cancelled by user")
+
             if d['status'] == 'downloading':
                 # 전체 크기 대비 다운로드된 크기 계산
                 total = d.get('total_bytes') or d.get('total_bytes_estimate')
@@ -122,10 +132,9 @@ class VideoDownloader:
                     'default': final_path
                 }
 
-                # 3. 다운로드 수행
+                # 3. 다운로드 수행 (Hook에 의해 중단될 수 있음)
                 if os.path.exists(final_path):
                     print(f" -> File already exists: {final_path}")
-                    # 이미 존재하면 즉시 100% 보고
                     if progress_callback:
                         progress_callback(100, "파일이 이미 존재합니다.")
                 else:
@@ -144,6 +153,11 @@ class VideoDownloader:
                 }
 
         except Exception as e:
+            # 취소 메시지가 감지되면 명확히 로깅
+            if "cancelled by user" in str(e):
+                print(f"[Downloader] Task {task_id} cancelled.")
+                return {"status": "error", "message": "User cancelled the download"}
+            
             print(f"[Error] Download failed: {e}")
             return {
                 "status": "error",
