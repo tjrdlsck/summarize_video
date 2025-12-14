@@ -297,6 +297,39 @@ class VideoTranscriber:
 
         return sanitized
 
+    def _remove_punctuation_from_subtitle_file(self, file_path):
+        """
+        주어진 자막 파일에서 문장 부호 (., ?, !, ,)를 제거하고 파일을 덮어씁니다.
+        자막 시간 정보는 건드리지 않고, 텍스트 부분만 처리합니다.
+        """
+        if not os.path.exists(file_path):
+            return
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+
+        cleaned_lines = []
+        for line in lines:
+            # 시간 정보가 포함된 라인은 건드리지 않음
+            # 예: "00:00:00,000 --> 00:00:00,000" 또는 "00:00:00.000 --> 00:00:00.000"
+            if re.match(r'^\d{2}:\d{2}:\d{2}[.,]\d{3} --> \d{2}:\d{2}:\d{2}[.,]\d{3}', line.strip()):
+                cleaned_lines.append(line)
+            # 자막 인덱스 (숫자만 있는 라인)도 건드리지 않음
+            elif re.match(r'^\d+$', line.strip()):
+                cleaned_lines.append(line)
+            # WEBVTT 헤더 (VTT 파일용)도 건드리지 않음
+            elif line.strip() == "WEBVTT":
+                cleaned_lines.append(line)
+            # 빈 줄도 유지
+            elif not line.strip():
+                cleaned_lines.append(line)
+            # 그 외의 텍스트 라인에서만 문장 부호 제거
+            else:
+                cleaned_lines.append(re.sub(r'[.,?!]', '', line).strip() + '\n')
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.writelines(cleaned_lines)
+
     def _clean_text(self, text):
         """반복되는 텍스트 및 무의미한 자모 제거"""
         if not text: return ""
@@ -429,9 +462,7 @@ class VideoTranscriber:
             vtt_path = os.path.join(self.output_dir, f"{base_name}.vtt")
             json_path = os.path.join(self.output_dir, f"{base_name}_transcript.json")
 
-            result_obj.to_srt_vtt(srt_path, word_level=False)
-            result_obj.to_srt_vtt(vtt_path, word_level=False)
-
+            # [Step 1] JSON 저장 (원본 텍스트 유지 - 요약/블로그용)
             final_data = []
             for idx, seg in enumerate(result_obj.segments, 1):
                 final_data.append({
@@ -443,6 +474,15 @@ class VideoTranscriber:
 
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(final_data, f, ensure_ascii=False, indent=2)
+
+            # [Step 2] 자막 파일 생성 및 후처리 (문장 부호 제거 - 자막용)
+            # stable_whisper로 자막 파일 우선 생성
+            result_obj.to_srt_vtt(srt_path, word_level=False)
+            result_obj.to_srt_vtt(vtt_path, word_level=False)
+
+            # 생성된 자막 파일에서 문장 부호 제거 후 덮어쓰기
+            self._remove_punctuation_from_subtitle_file(srt_path)
+            self._remove_punctuation_from_subtitle_file(vtt_path)
 
             print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
             return {
