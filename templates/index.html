@@ -212,67 +212,16 @@
 
         const { useState, useRef, useEffect, useMemo } = React;
 
-        // --- [Sub Component] Task Monitor Widget (Hybrid: Desktop Widget / Mobile FAB) ---
+        // --- [Sub Component] Task Monitor Widget (Stabilized Version) ---
         function TaskMonitor({ tasks, onCancel }) {
-            const [isOpen, setIsOpen] = useState(false); // Mobile Drawer State
+            // [State] 모바일 드로어 열림 상태 (리렌더링 시에도 유지됨)
+            const [isOpen, setIsOpen] = useState(false);
 
-            if (!tasks || tasks.length === 0) return null;
+            // [Data] 데이터 안전 처리
+            const safeTasks = tasks || [];
+            const hasTasks = safeTasks.length > 0;
 
-            // --- [Mobile View] Floating Action Button & Drawer ---
-            const MobileView = () => (
-                <div className="lg:hidden fixed bottom-20 right-4 z-40">
-                    {/* FAB (Floating Action Button) */}
-                    <button
-                        onClick={() => setIsOpen(true)}
-                        className="bg-indigo-600 text-white p-3 rounded-full shadow-lg flex items-center justify-center relative animate-bounce-slight"
-                    >
-                        {/* Loading Spinner Icon */}
-                        <svg className="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
-                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full border border-white">
-                            {tasks.length}
-                        </span>
-                    </button>
-
-                    {/* Mobile Drawer (Overlay) */}
-                    {isOpen && (
-                        <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/50 fade-in">
-                            <div className="bg-white rounded-t-2xl p-4 w-full max-h-[80vh] overflow-y-auto pb-safe shadow-2xl relative animate-slide-up">
-                                <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
-                                    <h3 className="font-bold text-gray-800 text-lg">작업 대기열 ({tasks.length})</h3>
-                                    <button onClick={(e) => { e.stopPropagation(); setIsOpen(false); }} className="p-2 text-gray-400 hover:text-gray-600">
-                                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                                    </button>
-                                </div>
-                                {/* Task List Rendering (Reused) */}
-                                <div className="space-y-4">
-                                    {tasks.map((task, index) => renderTaskItem(task, index))}
-                                </div>
-                            </div>
-                        </div>
-                    )}
-                </div>
-            );
-
-            // --- [Desktop View] Fixed Widget ---
-            const DesktopView = () => (
-                <div className="hidden lg:flex fixed bottom-6 right-6 w-96 bg-white rounded-xl shadow-2xl border border-indigo-100 overflow-hidden z-50 fade-in flex-col max-h-[80vh]">
-                    <div className="bg-indigo-600 px-4 py-3 flex justify-between items-center shrink-0">
-                        <h3 className="text-white font-bold text-sm flex items-center gap-2">
-                            <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
-                            작업 대기열 ({tasks.length})
-                        </h3>
-                        <span className="text-xs text-indigo-200">자동 갱신 중</span>
-                    </div>
-                    <div className="overflow-y-auto p-4 space-y-4 custom-scrollbar">
-                        {tasks.map((task, index) => renderTaskItem(task, index))}
-                    </div>
-                </div>
-            );
-
-            // Helper: Render individual task item (Used by both Mobile & Desktop)
+            // [Helper] 개별 작업 아이템 렌더링 (함수로 분리하되, 컴포넌트가 아닌 일반 함수로 사용)
             const renderTaskItem = (task, index) => {
                 let statusColor = "bg-indigo-500";
                 let statusText = `${task.progress}%`;
@@ -341,8 +290,78 @@
 
             return (
                 <>
-                    <DesktopView />
-                    <MobileView />
+                    {/* --- [Mobile View] Floating Action Button & Drawer --- */}
+                    <div className="lg:hidden fixed bottom-20 right-4 z-40">
+                        {/* FAB: 데이터가 갱신되어도 버튼 자체는 유지됨 (animate-bounce 등은 클래스로 제어) */}
+                        <button 
+                            onClick={() => setIsOpen(true)}
+                            className={`p-3 rounded-full shadow-lg flex items-center justify-center relative transition-transform active:scale-95 ${hasTasks ? 'bg-indigo-600 text-white' : 'bg-white text-gray-400 border border-gray-200'}`}
+                        >
+                            {/* Icon */}
+                            {hasTasks ? (
+                                <svg className="w-6 h-6 animate-spin" fill="none" viewBox="0 0 24 24">
+                                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                </svg>
+                            ) : (
+                                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                            )}
+                            
+                            {/* Badge */}
+                            <span className={`absolute -top-1 -right-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full border border-white transition-colors duration-300 ${hasTasks ? 'bg-red-500 text-white' : 'bg-gray-200 text-gray-500'}`}>
+                                {safeTasks.length}
+                            </span>
+                        </button>
+
+                        {/* Mobile Drawer (Overlay) */}
+                        {isOpen && (
+                            <div className="fixed inset-0 z-50 flex flex-col justify-end bg-black/50 fade-in" onClick={() => setIsOpen(false)}>
+                                <div className="bg-white rounded-t-2xl p-4 w-full max-h-[80vh] overflow-y-auto pb-safe shadow-2xl relative animate-slide-up" onClick={(e) => e.stopPropagation()}>
+                                    <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
+                                        <h3 className="font-bold text-gray-800 text-lg">작업 대기열 ({safeTasks.length})</h3>
+                                        <button onClick={() => setIsOpen(false)} className="p-2 text-gray-400 hover:text-gray-600">
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                                        </button>
+                                    </div>
+                                    <div className="space-y-4">
+                                        {hasTasks ? (
+                                            safeTasks.map((task, index) => renderTaskItem(task, index))
+                                        ) : (
+                                            <div className="text-center py-8 text-gray-400">
+                                                <p className="text-sm">현재 진행 중인 작업이 없습니다.</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* --- [Desktop View] Fixed Widget --- */}
+                    {/* fade-in 클래스를 제거하거나, 최초 마운트 시에만 적용되도록 주의해야 함. 여기서는 유지하되 컴포넌트 자체가 리마운트되지 않으므로 깜빡이지 않음 */}
+                    <div className="hidden lg:flex fixed bottom-6 right-6 w-96 bg-white rounded-xl shadow-2xl border border-indigo-100 overflow-hidden z-50 flex-col max-h-[80vh]">
+                        <div className={`${hasTasks ? 'bg-indigo-600' : 'bg-gray-500'} px-4 py-3 flex justify-between items-center shrink-0 transition-colors duration-500`}>
+                            <h3 className="text-white font-bold text-sm flex items-center gap-2">
+                                {hasTasks ? (
+                                    <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
+                                ) : (
+                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                                )}
+                                작업 대기열 ({safeTasks.length})
+                            </h3>
+                            <span className="text-xs text-indigo-100 opacity-80">{hasTasks ? "처리 중..." : "대기 중"}</span>
+                        </div>
+                        <div className="overflow-y-auto p-4 space-y-4 custom-scrollbar bg-white min-h-[100px]">
+                            {hasTasks ? (
+                                safeTasks.map((task, index) => renderTaskItem(task, index))
+                            ) : (
+                                <div className="text-center py-6 text-gray-400 flex flex-col items-center gap-2">
+                                    <svg className="w-8 h-8 opacity-20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                                    <p className="text-xs">현재 진행 중인 작업이 없습니다.</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 </>
             );
         }
