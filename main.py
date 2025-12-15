@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Optional
-
+from datetime import datetime
 
 # [Custom Services]
 from services.downloader import VideoDownloader
@@ -22,7 +22,7 @@ from services.summarizer import VideoSummarizer
 from services.task_manager import TaskManager
 from services.clipper import VideoClipper
 from services.refiner import TextRefiner
-
+from services.shorts_maker import ShortsMaker
 
 
 # --- [Lifespan Manager] ---
@@ -74,6 +74,7 @@ summarizer = VideoSummarizer(output_dir="static/results")
 refiner = TextRefiner() # [New] Refiner 인스턴스 추가
 task_manager = TaskManager()  # [New] Task Manager Instance
 clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 생성
+shorts_maker = ShortsMaker()
 
 # --- [Pydantic Models] ---
 class AnalyzeRequest(BaseModel):
@@ -90,6 +91,8 @@ class ClipRequest(BaseModel):
     end_time: float     # 종료 시간 (초)
     title: Optional[str] = "Untitled Clip" # [New] 사용자가 지정한 클립 제목
 
+class ShortsGenerateRequest(BaseModel):
+    filename: str  # 원본 영상 파일명
 
 # --- [Helper: Progress Wrapper] ---
 class TaskProgressWrapper:
@@ -426,6 +429,159 @@ async def run_clip_pipeline(task_id: str, req: ClipRequest):
                 except Exception:
                     pass
 
+# [Modify] run_shorts_pipeline 함수를 아래 코드로 통째로 교체하세요.
+async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
+    """
+    [Background] AI 숏츠 생성 파이프라인 (Updated)
+    - 3분 이내 숏츠 생성
+    - Video + SRT + VTT(New) 생성 및 관리
+    """
+    temp_files = [] 
+    base_name = os.path.splitext(req.filename)[0]
+    
+    try:
+        task_manager.update_progress(task_id, 0, "AI 숏츠 기획 시작...")
+        
+        # 1. 데이터 로드
+        transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+        srt_path = os.path.join("static/results", f"{base_name}.srt") 
+        summary_path = os.path.join("static/results", f"{base_name}_summary.json")
+
+        if not os.path.exists(transcript_path):
+            raise FileNotFoundError("분석 데이터가 없습니다.")
+        
+        with open(transcript_path, 'r', encoding='utf-8') as f: transcripts = json.load(f)
+        
+        video_title = req.filename
+        if os.path.exists(summary_path):
+            with open(summary_path, 'r', encoding='utf-8') as f:
+                video_title = json.load(f).get("video_title", req.filename)
+
+        # 2. LLM 기획 (0~30%)
+        if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
+        task_manager.update_progress(task_id, 10, "AI가 하이라이트 구간 선별 중...")
+        
+        loop = asyncio.get_running_loop()
+        candidates = await loop.run_in_executor(
+            None, 
+            partial(shorts_maker.make_shorts_candidates, transcripts, video_title)
+        )
+        
+        if not candidates: raise Exception("AI가 숏츠 구간을 찾지 못했습니다.")
+        task_manager.update_progress(task_id, 30, f"{len(candidates)}개의 숏츠 기획안 생성 완료.")
+
+        # 3. 렌더링 및 패키징 (30~90%)
+        PHASE_START, PHASE_END = 30, 90
+        slot_weight = (PHASE_END - PHASE_START) / len(candidates)
+        results = []
+        video_path = os.path.join("static/videos", req.filename)
+        
+        for idx, cand in enumerate(candidates):
+            if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
+            
+            current_base_progress = PHASE_START + (idx * slot_weight)
+            
+            def ffmpeg_callback(local_percent):
+                global_progress = int(current_base_progress + (local_percent / 100.0) * slot_weight)
+                task_manager.update_progress(task_id, global_progress, f"숏츠 {idx+1}/{len(candidates)} 제작 중... ({local_percent}%)")
+
+            # 파일명 정리
+            safe_title = re.sub(r'[\\/*?:"<>|]', "", cand['title']).replace(" ", "_")
+            video_filename = f"AI_Shorts_{idx+1}_{safe_title}.mp4"
+            
+            # [Update] merge_segments가 {video, subtitle, subtitle_vtt} 딕셔너리를 반환함
+            merge_result = await clipper.merge_segments(
+                video_path,
+                cand['segments'],
+                output_filename=video_filename, # 임시 폴더에 생성됨
+                sub_input_path=srt_path,        # 원본 자막 전달
+                progress_callback=ffmpeg_callback,
+                task_manager=task_manager,
+                task_id=task_id
+            )
+            
+            generated_video = merge_result['video']
+            generated_sub = merge_result['subtitle']
+            generated_vtt = merge_result['subtitle_vtt'] # [New] VTT 경로
+            
+            if generated_video and os.path.exists(generated_video):
+                # 1) MP4 이동 -> static/clips
+                final_video_path = os.path.join("static/clips", video_filename)
+                shutil.move(generated_video, final_video_path)
+                
+                # 2) SRT 이동
+                final_sub_path = None
+                if generated_sub and os.path.exists(generated_sub):
+                    sub_filename = video_filename.replace(".mp4", ".srt")
+                    final_sub_path = os.path.join("static/clips", sub_filename)
+                    shutil.move(generated_sub, final_sub_path)
+                    
+                # 3) [New] VTT 이동 (웹 플레이어용)
+                final_vtt_filename = None
+                if generated_vtt and os.path.exists(generated_vtt):
+                    vtt_filename = video_filename.replace(".mp4", ".vtt")
+                    final_vtt_path = os.path.join("static/clips", vtt_filename)
+                    shutil.move(generated_vtt, final_vtt_path)
+                    final_vtt_filename = vtt_filename
+
+                # 4) ZIP 압축 (다운로드용: MP4 + SRT)
+                zip_filename = video_filename.replace(".mp4", ".zip")
+                files_to_zip = [final_video_path]
+                if final_sub_path: files_to_zip.append(final_sub_path)
+                
+                # ZIP 생성
+                zip_path = await loop.run_in_executor(
+                    None,
+                    partial(clipper.create_zip, files_to_zip, zip_filename, "static/clips")
+                )
+
+                # 메타데이터 생성
+                results.append({
+                    "clip_id": str(uuid.uuid4()),
+                    "title": cand['title'],
+                    "reason": cand['reason'],
+                    "filename_video": video_filename,
+                    "filename_zip": zip_filename,
+                    "filename_vtt": final_vtt_filename, # [New] VTT 파일명 저장
+                    "duration": cand['total_duration'],
+                    "segments": cand['segments'],
+                    "created_at": datetime.now().isoformat(),
+                    "download_url": f"/static/clips/{zip_filename}",
+                    "preview_url": f"/static/clips/{video_filename}"
+                })
+            else:
+                print(f"[Warning] Failed to render shorts candidate {idx+1}")
+
+        # 4. 메타데이터 저장
+        task_manager.update_progress(task_id, 90, "메타데이터 저장 중...")
+        if not results: raise Exception("숏츠 생성 실패")
+
+        meta_path = os.path.join("static/results", f"{base_name}_clips.json")
+        existing_data = []
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, 'r', encoding='utf-8') as f: existing_data = json.load(f)
+            except: pass
+            
+        for res in reversed(results):
+            res["is_ai_generated"] = True
+            existing_data.insert(0, res)
+            
+        with open(meta_path, 'w', encoding='utf-8') as f:
+            json.dump(existing_data, f, ensure_ascii=False, indent=2)
+
+        task_manager.complete_task(task_id, {"count": len(results), "message": "완료"})
+        print(f"[{task_id}] AI Shorts Completed: {len(results)}")
+
+    except Exception as e:
+        print(f"[{task_id}] Shorts Pipeline Failed: {e}")
+        task_manager.fail_task(task_id, str(e))
+    finally:
+        for f in temp_files:
+            if f and os.path.exists(f): 
+                try: os.remove(f)
+                except: pass
+
 async def worker():
     print("--- [Worker] Analysis Worker Started ---")
     while True:
@@ -439,6 +595,10 @@ async def worker():
                     await run_analysis_pipeline(task_id, req)
                 elif isinstance(req, ClipRequest):
                     await run_clip_pipeline(task_id, req)
+                # [Add] 숏츠 생성 요청 처리 추가
+                elif isinstance(req, ShortsGenerateRequest):
+                    await run_shorts_pipeline(task_id, req)
+                    
         except Exception as e:
             print(f"[Worker Error] {e}")
         finally:
@@ -617,6 +777,26 @@ async def export_clip(req: ClipRequest, background_tasks: BackgroundTasks):
     
     return {"task_id": task_id, "message": "Clip generation started"}
 
+@app.post("/api/shorts/auto-generate")
+async def auto_generate_shorts(req: ShortsGenerateRequest, background_tasks: BackgroundTasks):
+    """
+    [Async] AI 숏츠 자동 생성 요청
+    """
+    # 파일 존재 확인
+    video_path = os.path.join("static/videos", req.filename)
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    task_id = str(uuid.uuid4())
+    
+    # Task Manager 등록 (type="shorts_generation")
+    task_manager.add_task(task_id, req.filename, task_type="shorts_generation")
+    
+    # Queue에 작업 추가
+    await job_queue.put((task_id, req))
+    
+    return {"task_id": task_id, "message": "AI Shorts generation queued"}
+
 @app.get("/api/clips/{video_filename}")
 async def get_clips_library(video_filename: str):
     """
@@ -636,74 +816,82 @@ async def get_clips_library(video_filename: str):
         print(f"[Error] Failed to load clips json: {e}")
         return []
 
+# [Modify] delete_clip 함수를 아래 코드로 통째로 교체하세요.
 @app.delete("/api/clips/{video_filename}/{clip_id}")
 async def delete_clip(video_filename: str, clip_id: str):
     """
-    특정 클립을 메타데이터 목록과 디스크에서 삭제합니다.
-    [개선됨] OS별 유니코드(NFC/NFD) 차이로 인한 삭제 실패(Ghost File) 방지 로직 추가
+    [Fixed] 클립 삭제: Zip, MP4, SRT, VTT(New) 파일을 모두 찾아 삭제합니다.
     """
-    base_name = os.path.splitext(video_filename)[0]
-    meta_path = os.path.join("static/results", f"{base_name}_clips.json")
-    
-    if not os.path.exists(meta_path):
-        raise HTTPException(status_code=404, detail="Clips metadata not found")
-        
     try:
-        # 1. JSON 읽기
+        base_name = os.path.splitext(video_filename)[0]
+        meta_path = os.path.join("static/results", f"{base_name}_clips.json")
+        
+        if not os.path.exists(meta_path):
+            raise HTTPException(status_code=404, detail="Clips metadata not found")
+            
         with open(meta_path, 'r', encoding='utf-8') as f:
             clips = json.load(f)
             
-        # 2. 삭제 대상 찾기
-        target_clip = next((c for c in clips if c["clip_id"] == clip_id), None)
+        target_clip = next((c for c in clips if c.get("clip_id") == clip_id), None)
+        
         if not target_clip:
             raise HTTPException(status_code=404, detail="Clip not found")
-            
-        # 3. 파일 삭제 (강화된 로직)
-        zip_filename = target_clip.get("filename")
-        if zip_filename:
-            clip_dir = "static/clips"
-            file_deleted = False
-            
-            # (A) 1차 시도: 직접 경로 확인 (대부분의 경우 여기서 해결)
-            direct_path = os.path.join(clip_dir, zip_filename)
-            if os.path.exists(direct_path):
-                try:
-                    os.remove(direct_path)
-                    print(f"[Deleted] Clip file (Direct Match): {direct_path}")
-                    file_deleted = True
-                except Exception as e:
-                    print(f"[Warning] Failed to delete file directly: {e}")
+        
+        # 1. 삭제할 파일명 리스트업
+        files_to_delete = []
+        if target_clip.get("filename"): files_to_delete.append(target_clip["filename"]) # Legacy
+        if target_clip.get("filename_video"): files_to_delete.append(target_clip["filename_video"])
+        if target_clip.get("filename_zip"): files_to_delete.append(target_clip["filename_zip"])
+        if target_clip.get("filename_vtt"): files_to_delete.append(target_clip["filename_vtt"]) # [New] VTT 추가
+        
+        # 레거시 데이터 SRT 파일명 유추 (vtt 필드가 없는 경우 대비)
+        if target_clip.get("filename_video"):
+            srt_name = target_clip["filename_video"].replace(".mp4", ".srt")
+            files_to_delete.append(srt_name)
+            # VTT도 유추해서 시도
+            vtt_name = target_clip["filename_video"].replace(".mp4", ".vtt")
+            files_to_delete.append(vtt_name)
 
-            # (B) 2차 시도: 정규화 스캔 (1차 실패 시 실행, macOS 한글 호환성 해결)
-            if not file_deleted and os.path.exists(clip_dir):
-                target_nfc = unicodedata.normalize('NFC', zip_filename)
-                
-                for fname in os.listdir(clip_dir):
-                    # 디스크의 파일명과 타겟 파일명을 모두 NFC로 변환하여 비교
-                    if unicodedata.normalize('NFC', fname) == target_nfc:
-                        full_path = os.path.join(clip_dir, fname)
-                        try:
+        clip_dir = "static/clips"
+        deleted_count = 0
+        
+        # 2. 파일 삭제 로직
+        if os.path.exists(clip_dir):
+            for fname in files_to_delete:
+                if not fname: continue
+
+                try:
+                    # (A) 직접 경로 삭제 시도
+                    path = os.path.join(clip_dir, fname)
+                    if os.path.exists(path):
+                        os.remove(path)
+                        deleted_count += 1
+                        continue 
+
+                    # (B) 자소 분리(NFC) 문제 대응
+                    target_nfc = unicodedata.normalize('NFC', fname)
+                    for f in os.listdir(clip_dir):
+                        if unicodedata.normalize('NFC', f) == target_nfc:
+                            full_path = os.path.join(clip_dir, f)
                             os.remove(full_path)
-                            print(f"[Deleted] Clip file (Normalized Match): {full_path}")
-                            file_deleted = True
-                            break # 찾아서 삭제했으면 루프 종료
-                        except Exception as e:
-                            print(f"[Error] Found file but failed to delete: {e}")
-            
-            if not file_deleted:
-                print(f"[Info] Physical file not found or already deleted: {zip_filename}")
-                
-        # 4. 리스트에서 제거 및 저장 (파일 삭제 여부와 관계없이 메타데이터 동기화)
-        clips = [c for c in clips if c["clip_id"] != clip_id]
+                            deleted_count += 1
+                            break 
+                except Exception as e:
+                    print(f"[Warning] Failed to delete file {fname}: {e}")
+
+        # 3. 메타데이터에서 제거 및 저장
+        clips = [c for c in clips if c.get("clip_id") != clip_id]
         
         with open(meta_path, 'w', encoding='utf-8') as f:
             json.dump(clips, f, ensure_ascii=False, indent=2)
             
-        return {"status": "success", "message": "Clip deleted"}
+        return {"status": "success", "message": f"Clip deleted ({deleted_count} files removed)"}
         
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print(f"[Delete Error] {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[Delete Clip Error] {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
 
 @app.get("/api/download/temp/{filename}")
 async def download_temp_file(filename: str, background_tasks: BackgroundTasks):
