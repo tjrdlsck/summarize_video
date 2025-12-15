@@ -10,7 +10,7 @@ class ShortsMaker:
         load_dotenv()
         self.api_key = os.getenv("GOOGLE_API_KEY")
         # JSON 포맷 준수율이 높은 최신 모델 사용
-        self.model_name = "gemini-2.5-flash-lite"
+        self.model_name = "gemini-2.5-flash"
 
     def _clean_json_text(self, text):
         """
