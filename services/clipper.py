@@ -47,9 +47,7 @@ class VideoClipper:
     async def cut_video(self, input_path, start_sec, end_sec, output_filename="clip.mp4", task_manager=None, task_id=None):
         """
         [Async] FFmpeg를 비동기 프로세스로 실행하며, stderr을 파싱하여 실시간 진행률을 반영합니다.
-        [Fix] 
-          1. 출력 파일 경로(output_path) 누락 수정 -> "At least one output file..." 에러 해결
-          2. 인코더를 libx264로 변경하고 CRF(Constant Rate Factor) 옵션 적용 -> 화질 기반 가변 비트레이트
+        [Fix] readline() 대신 readuntil(b'\r')을 사용하여 FFmpeg의 실시간 로그를 정확히 캐치하도록 수정했습니다.
         """
         output_path = os.path.join(self.temp_dir, output_filename)
         
@@ -57,17 +55,19 @@ class VideoClipper:
         duration = end_sec - start_sec
         if duration <= 0: duration = 1 # 0으로 나누기 방지
 
+        # [FFmpeg Command Configuration]
+        # -ss가 -i 뒤에 오면(Output Seeking) 인코딩을 수행하므로 화질 열화가 적고 정확합니다.
         cmd = [
             "ffmpeg", 
             "-i", input_path,
             "-ss", str(start_sec),
             "-to", str(end_sec),
             "-c:v", "h264_videotoolbox", # Apple Silicon 가속 (필요시 libx264로 변경)
-            "-q:v", "65",
+            "-q:v", "65",                # 품질 기반 VBR
             "-c:a", "aac", "-b:a", "192k",
             "-y",
             "-hide_banner",
-            "-loglevel", "info", # [Important] 진행률 파싱을 위해 info 레벨 필수
+            "-loglevel", "info",         # 진행률 파싱을 위해 info 레벨 필수
             output_path
         ]
 
@@ -84,7 +84,7 @@ class VideoClipper:
                 stderr=asyncio.subprocess.PIPE
             )
 
-            # 2. stderr 비동기 읽기 Loop
+            # 2. stderr 비동기 읽기 Loop (Real-time Parsing)
             while True:
                 # [Check Cancel] 작업 취소 확인
                 if task_manager and task_id and task_manager.is_cancelled(task_id):
@@ -98,17 +98,22 @@ class VideoClipper:
                         os.remove(output_path)
                     raise Exception("Clip generation cancelled by user")
 
-                # 비동기적으로 한 줄 읽기
-                line_bytes = await process.stderr.readline()
-                
-                # 빈 바이트가 반환되면 EOF (프로세스 종료)
-                if not line_bytes:
-                    break 
+                try:
+                    # [Core Fix] readline()은 \n을 기다리지만, FFmpeg는 진행률 업데이트 시 \r을 사용합니다.
+                    # 따라서 \r을 만날 때까지 읽도록 하여 실시간성을 확보합니다.
+                    line_bytes = await process.stderr.readuntil(b'\r')
+                except asyncio.IncompleteReadError as e:
+                    # 스트림이 끝났을 때(EOF) 남은 데이터를 가져옵니다.
+                    line_bytes = e.partial
+                    if not line_bytes:
+                        break # 더 이상 읽을 데이터가 없으면 루프 종료
+                except Exception:
+                    break
 
                 # 디코딩
                 line = line_bytes.decode('utf-8', errors='replace').strip()
                 
-                # 로그 버퍼에 저장
+                # 로그 버퍼에 저장 (에러 분석용)
                 if line:
                     stderr_log.append(line)
                 
@@ -126,7 +131,8 @@ class VideoClipper:
                             percent = int((current_seconds / duration) * 100)
                             percent = min(100, max(0, percent))
                             
-                            # TaskManager 업데이트
+                            # TaskManager 업데이트 (구간: 10% -> 60%)
+                            # 전체 파이프라인에서 Clip은 10~60% 구간을 담당한다고 가정
                             global_progress = 10 + int(percent * 0.5)
                             
                             if task_manager and task_id:
@@ -157,7 +163,8 @@ class VideoClipper:
         except Exception as e:
             print(f"[Clipper Error] {e}")
             if os.path.exists(output_path):
-                os.remove(output_path)
+                try: os.remove(output_path)
+                except: pass
             raise e
 
     def cut_subtitle(self, sub_path, start_sec, end_sec, output_filename="clip.srt"):
