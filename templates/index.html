@@ -1012,20 +1012,51 @@
                                             onMouseMove={handleVideoMouseMove}
                                             onMouseLeave={handleVideoMouseLeave}
                                         >
+                                            {/* 
+                                                [Safari/Mobile Fix] 
+                                                1. playsInline: iOS 인라인 재생 필수
+                                                2. src: /api/stream/video/... 엔드포인트 사용 (Range Request 지원)
+                                                3. preload="metadata": 초기 로딩 속도 최적화
+                                            */}
                                             <video
                                                 ref={videoRef}
-                                                src={`/static/videos/${playerData.video_filename}`}
                                                 controls
+                                                playsInline
+                                                preload="metadata"
                                                 crossOrigin="anonymous"
                                                 className="w-full h-full object-contain"
                                                 onTimeUpdate={handleTimeUpdate}
-                                                // [추가] 전체 길이 정보 저장 (시각화용)
                                                 onLoadedMetadata={(e) => setTotalDuration(e.target.duration)}
-                                            />
-                                            {/* Subtitle Overlay */}
+                                                onPlay={() => {
+                                                    // [New] 숏츠 재생이 아니라면 메인 오버레이 초기화
+                                                    if (!activeShortsId) setCurrentShortsSubtitle("");
+                                                }}
+                                            >
+                                                {/* 직접 src 속성 대신 source 태그 사용 권장 */}
+                                                <source
+                                                    src={`/api/stream/video/${playerData.video_filename}`}
+                                                    type="video/mp4"
+                                                />
+                                                <p className="text-white text-center py-10">
+                                                    브라우저가 비디오 재생을 지원하지 않습니다.
+                                                </p>
+
+                                                {/* VTT 자막 트랙 (선택적) */}
+                                                {playerData.vtt_filename && (
+                                                    <track
+                                                        kind="subtitles"
+                                                        src={`/static/results/${playerData.vtt_filename}`}
+                                                        srcLang="ko"
+                                                        label="한국어"
+                                                        default={false}
+                                                    />
+                                                )}
+                                            </video>
+
+                                            {/* Subtitle Overlay (Main Video) */}
                                             {showSubtitle && currentSubtitle && (
                                                 <div className={`absolute left-0 w-full text-center px-4 pointer-events-none transition-all duration-300 ease-in-out z-10 ${isControlsVisible ? 'bottom-16' : 'bottom-4'}`}>
-                                                    <span className="inline-block bg-black/30 text-white text-xs md:text-base px-1 py-0.25 rounded-lg leading-relaxed shadow-sm">
+                                                    <span className="inline-block bg-black/30 text-white text-xs md:text-base px-1 py-0.25 rounded-lg leading-relaxed shadow-sm backdrop-blur-sm">
                                                         {removePunctuation(currentSubtitle)}
                                                     </span>
                                                 </div>

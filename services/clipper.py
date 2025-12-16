@@ -47,7 +47,7 @@ class VideoClipper:
     async def cut_video(self, input_path, start_sec, end_sec, output_filename="clip.mp4", task_manager=None, task_id=None):
         """
         [Async] FFmpeg를 비동기 프로세스로 실행하며, stderr을 파싱하여 실시간 진행률을 반영합니다.
-        [Fix] readline() 대신 readuntil(b'\r')을 사용하여 FFmpeg의 실시간 로그를 정확히 캐치하도록 수정했습니다.
+        [Quality & Fix] 원본 화질 유지를 위해 품질 기반 인코딩(VBR)을 사용하되, Safari 호환성을 위해 yuv420p를 강제합니다.
         """
         output_path = os.path.join(self.temp_dir, output_filename)
         
@@ -56,14 +56,20 @@ class VideoClipper:
         if duration <= 0: duration = 1 # 0으로 나누기 방지
 
         # [FFmpeg Command Configuration]
-        # -ss가 -i 뒤에 오면(Output Seeking) 인코딩을 수행하므로 화질 열화가 적고 정확합니다.
         cmd = [
             "ffmpeg", 
             "-i", input_path,
             "-ss", str(start_sec),
             "-to", str(end_sec),
             "-c:v", "h264_videotoolbox", # Apple Silicon 가속 (필요시 libx264로 변경)
-            "-q:v", "65",                # 품질 기반 VBR
+            
+            # [수정된 부분] 고정 비트레이트(-b:v) 대신 품질 옵션(-q:v) 사용
+            "-q:v", "65",                # 0~100 사이 값. 65는 높은 화질과 적절한 용량의 균형점 (원본 수준 유지)
+            
+            # [Safari 호환성 유지] 화질은 챙기되, 재생 호환성은 놓치지 않음
+            "-pix_fmt", "yuv420p",       # 모바일/웹 표준 색상 포맷
+            "-profile:v", "main",        # 호환성 프로필
+            
             "-c:a", "aac", "-b:a", "192k",
             "-y",
             "-hide_banner",
@@ -71,7 +77,7 @@ class VideoClipper:
             output_path
         ]
 
-        print(f"--- [Clipper] Starting Async Cut: {output_filename} ---")
+        print(f"--- [Clipper] Starting Async Cut (High Quality): {output_filename} ---")
         
         # 에러 발생 시 원인을 파악하기 위해 stderr 로그를 모아둘 버퍼
         stderr_log = []
@@ -99,14 +105,12 @@ class VideoClipper:
                     raise Exception("Clip generation cancelled by user")
 
                 try:
-                    # [Core Fix] readline()은 \n을 기다리지만, FFmpeg는 진행률 업데이트 시 \r을 사용합니다.
-                    # 따라서 \r을 만날 때까지 읽도록 하여 실시간성을 확보합니다.
+                    # FFmpeg 진행률 로그 캐치 (\r)
                     line_bytes = await process.stderr.readuntil(b'\r')
                 except asyncio.IncompleteReadError as e:
-                    # 스트림이 끝났을 때(EOF) 남은 데이터를 가져옵니다.
                     line_bytes = e.partial
                     if not line_bytes:
-                        break # 더 이상 읽을 데이터가 없으면 루프 종료
+                        break 
                 except Exception:
                     break
 
@@ -132,7 +136,6 @@ class VideoClipper:
                             percent = min(100, max(0, percent))
                             
                             # TaskManager 업데이트 (구간: 10% -> 60%)
-                            # 전체 파이프라인에서 Clip은 10~60% 구간을 담당한다고 가정
                             global_progress = 10 + int(percent * 0.5)
                             
                             if task_manager and task_id:
@@ -148,10 +151,9 @@ class VideoClipper:
             await process.wait()
             
             if process.returncode != 0:
-                # 실패 시 모아둔 로그를 출력하여 원인 파악
                 error_details = "\n".join(stderr_log[-10:]) 
                 print(f"[Clipper FFmpeg Error Log]\n{error_details}")
-                raise Exception(f"FFmpeg failed with return code {process.returncode}. Check server logs for details.")
+                raise Exception(f"FFmpeg failed with return code {process.returncode}.")
 
             print(f"--- [Clipper] Cut Success: {output_path} ---")
             
@@ -306,18 +308,16 @@ class VideoClipper:
             print(f"[Clipper] VTT conversion failed: {e}")
             return None
 
-    # [Modify] 기존 merge_segments 메서드를 아래 코드로 통째로 교체하세요.
     async def merge_segments(self, input_path, segments, output_filename="shorts.mp4", sub_input_path=None, progress_callback=None, task_manager=None, task_id=None):
         """
-        [Async] 불연속적인 여러 구간(Segments)을 하나의 영상으로 병합하고, 자막(SRT/VTT)도 동기화합니다.
-        [Update] SRT 생성 후 VTT 변환 로직이 추가되었습니다.
+        [Async] 불연속적인 여러 구간을 병합합니다.
+        [Quality & Fix] 원본 화질 유지를 위해 품질 기반 VBR 인코딩을 사용하며, yuv420p 포맷으로 호환성을 보장합니다.
         """
         output_video_path = os.path.join(self.temp_dir, output_filename)
-        output_sub_path = None     # SRT 경로
-        output_vtt_path = None     # VTT 경로
+        output_sub_path = None
+        output_vtt_path = None
         
-        # 1. 자막 병합 처리 (동기 처리, CPU 작업)
-        # 자막 파일이 존재하고 요청이 있을 경우 수행
+        # 1. 자막 병합 처리
         if sub_input_path and os.path.exists(sub_input_path):
             try:
                 base_name = os.path.splitext(output_filename)[0]
@@ -325,29 +325,24 @@ class VideoClipper:
                 full_sub_path = os.path.join(self.temp_dir, sub_filename)
                 
                 loop = asyncio.get_running_loop()
-                # SRT 병합
                 output_sub_path = await loop.run_in_executor(
                     None, 
                     partial(self._merge_subtitles, sub_input_path, segments, full_sub_path)
                 )
                 
-                # [New] SRT -> VTT 변환 추가
                 if output_sub_path:
                     output_vtt_path = await loop.run_in_executor(
                         None,
                         self._srt_to_vtt,
                         output_sub_path
                     )
-                    
             except Exception as e:
                 print(f"[Clipper] Warning: Failed to merge subtitles: {e}")
 
         # 2. 영상 병합 처리 (FFmpeg)
-        # 병합될 영상의 총 길이 계산
         total_duration = sum(seg['end'] - seg['start'] for seg in segments)
         if total_duration <= 0: total_duration = 1
 
-        # FFmpeg Filter Complex 구문 생성
         filter_parts = []
         concat_input = ""
         
@@ -355,26 +350,29 @@ class VideoClipper:
             start = f"{seg['start']:.3f}"
             end = f"{seg['end']:.3f}"
             
-            # Video Trim & Reset Timestamp
             filter_parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}]")
-            # Audio Trim & Reset Timestamp
             filter_parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}]")
-            
             concat_input += f"[v{i}][a{i}]"
 
-        # Concat 부분
         filter_parts.append(f"{concat_input}concat=n={len(segments)}:v=1:a=1[outv][outa]")
         filter_complex_str = ";".join(filter_parts)
 
-        # 명령어 구성 (macOS 가속 사용, 필요시 libx264로 변경 가능)
+        # [FFmpeg Command Configuration]
         cmd = [
             "ffmpeg", 
             "-i", input_path,
             "-filter_complex", filter_complex_str,
             "-map", "[outv]", 
             "-map", "[outa]",
-            "-c:v", "h264_videotoolbox", # macOS Hardware Acceleration (or libx264)
-            "-q:v", "65",                # 품질 기반 VBR
+            "-c:v", "h264_videotoolbox", # macOS Hardware Acceleration
+            
+            # [수정된 부분] 고정 비트레이트(-b:v) 제거 -> 품질 기반(-q:v) 적용
+            "-q:v", "65",                # 원본 수준의 고화질 유지 (VBR)
+            
+            # [Safari 호환성 유지]
+            "-pix_fmt", "yuv420p",       # 모바일/웹 표준 색상 포맷
+            "-profile:v", "main",        # 호환성 프로필
+            
             "-c:a", "aac", 
             "-b:a", "192k",
             "-y",
@@ -383,9 +381,8 @@ class VideoClipper:
             output_video_path
         ]
 
-        print(f"--- [Clipper] Starting Merge Segments: {len(segments)} cuts, Duration: {total_duration:.2f}s ---")
+        print(f"--- [Clipper] Starting Merge Segments (High Quality): {len(segments)} cuts, Duration: {total_duration:.2f}s ---")
 
-        # 비동기 실행 및 진행률 파싱
         stderr_log = []
         try:
             process = await asyncio.create_subprocess_exec(
@@ -395,14 +392,12 @@ class VideoClipper:
             )
 
             while True:
-                # [Check Cancel] 작업 취소 확인
                 if task_manager and task_id and task_manager.is_cancelled(task_id):
                     try:
                         process.terminate()
                         await process.wait()
                     except Exception: pass
                     
-                    # 생성 중이던 파일 정리
                     if os.path.exists(output_video_path): os.remove(output_video_path)
                     if output_sub_path and os.path.exists(output_sub_path): os.remove(output_sub_path)
                     if output_vtt_path and os.path.exists(output_vtt_path): os.remove(output_vtt_path)
@@ -415,7 +410,6 @@ class VideoClipper:
                 line = line_bytes.decode('utf-8', errors='replace').strip()
                 if line: stderr_log.append(line)
 
-                # 진행률 파싱
                 if 'time=' in line:
                     match = re.search(r'time=(\d{2}:\d{2}:\d{2}\.\d+)', line)
                     if match:
@@ -441,7 +435,6 @@ class VideoClipper:
 
             print(f"--- [Clipper] Merge Success: {output_video_path} ---")
             
-            # [Update] VTT 경로도 함께 반환
             return {
                 "video": output_video_path,
                 "subtitle": output_sub_path,
@@ -450,7 +443,6 @@ class VideoClipper:
 
         except Exception as e:
             print(f"[Clipper Error] {e}")
-            # 에러 발생 시 잔여 파일 정리
             if os.path.exists(output_video_path): os.remove(output_video_path)
             if output_sub_path and os.path.exists(output_sub_path): os.remove(output_sub_path)
             if output_vtt_path and os.path.exists(output_vtt_path): os.remove(output_vtt_path)
