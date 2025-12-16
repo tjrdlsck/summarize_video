@@ -71,47 +71,41 @@ class VideoDownloader:
     def download_from_url(self, url, progress_callback=None, task_manager=None, task_id=None):
         """
         YouTube URL을 통해 영상을 다운로드합니다.
-        [수정] Hook 내부에서 TaskManager를 조회하여 다운로드 강제 중단 기능 추가
-        
-        Args:
-            url (str): 유튜브 URL
-            progress_callback (func): 진행률 콜백
-            task_manager (TaskManager): 취소 상태 확인용 인스턴스
-            task_id (str): 작업 ID
+        [Safari Fix] 포맷 선택 규칙을 변경하여 모바일/Safari 호환성이 높은 H.264(avc1) 코덱을 우선 다운로드합니다.
         """
         print(f"--- [Downloader] Processing URL: {url} ---")
         
-        # 내부 Hook 함수 정의 (yt-dlp가 다운로드 중에 계속 호출함)
+        # 내부 Hook 함수 정의
         def _progress_hook(d):
             # [Check Cancel] 다운로드 중간에 취소 여부 확인
             if task_manager and task_id:
                 if task_manager.is_cancelled(task_id):
-                    # 예외를 발생시키면 yt-dlp가 즉시 중단됩니다.
                     raise Exception("Download cancelled by user")
 
             if d['status'] == 'downloading':
-                # 전체 크기 대비 다운로드된 크기 계산
                 total = d.get('total_bytes') or d.get('total_bytes_estimate')
                 downloaded = d.get('downloaded_bytes', 0)
                 
                 if total:
                     percent = int(downloaded / total * 100)
-                    # 외부에서 주입된 콜백 호출
                     if progress_callback:
                         progress_callback(percent, f"영상 다운로드 중... ({percent}%)")
             
             elif d['status'] == 'finished':
                 if progress_callback:
-                    progress_callback(100, "다운로드 완료! 변환 준비 중...")
+                    progress_callback(100, "다운로드 완료! 파일 처리 중...")
 
-        # yt-dlp 옵션 구성 (progress_hooks 추가)
+        # [Safari/Mobile 호환성 핵심]
+        # bestvideo[vcodec^=avc1]: 비디오 코덱이 avc1(H.264)으로 시작하는 것 중 최고 화질
+        # bestaudio[ext=m4a]: 오디오는 m4a(AAC) 우선
+        # 만약 H.264가 없으면 차선책으로 mp4 포맷을 선택
         ydl_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'format': 'bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
             'outtmpl': f'{self.download_dir}/%(title)s.%(ext)s',
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
-            'progress_hooks': [_progress_hook]  # Hook 등록
+            'progress_hooks': [_progress_hook]
         }
 
         try:
@@ -132,7 +126,7 @@ class VideoDownloader:
                     'default': final_path
                 }
 
-                # 3. 다운로드 수행 (Hook에 의해 중단될 수 있음)
+                # 3. 다운로드 수행
                 if os.path.exists(final_path):
                     print(f" -> File already exists: {final_path}")
                     if progress_callback:
@@ -153,7 +147,6 @@ class VideoDownloader:
                 }
 
         except Exception as e:
-            # 취소 메시지가 감지되면 명확히 로깅
             if "cancelled by user" in str(e):
                 print(f"[Downloader] Task {task_id} cancelled.")
                 return {"status": "error", "message": "User cancelled the download"}

@@ -11,6 +11,8 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi import Request, Header, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
@@ -912,6 +914,73 @@ async def download_temp_file(filename: str, background_tasks: BackgroundTasks):
         filename=filename
     )
 
+@app.get("/api/stream/video/{filename}")
+async def stream_video(filename: str, request: Request, range: str = Header(None)):
+    """
+    [Safari/Mobile 호환] 비디오 스트리밍 전용 엔드포인트
+    브라우저의 Range Header를 해석하여, 파일의 특정 바이트 청크(Chunk)만 전송합니다.
+    이를 통해 HTTP 206 Partial Content 응답을 구현합니다.
+    """
+    video_path = os.path.join("static/videos", filename)
+    
+    if not os.path.exists(video_path):
+        # 만약 원본 폴더에 없으면 숏츠 폴더(clips)도 확인 (호환성)
+        video_path = os.path.join("static/clips", filename)
+        if not os.path.exists(video_path):
+            raise HTTPException(status_code=404, detail="Video not found")
+
+    file_size = os.path.getsize(video_path)
+    
+    # Range 헤더 파싱 (예: "bytes=0-")
+    # Safari는 이 처리가 없으면 영상을 절대 재생하지 않습니다.
+    byte_start = 0
+    byte_end = file_size - 1
+    
+    if range:
+        try:
+            # "bytes=0-1024" 형식을 파싱
+            range_key, range_value = range.strip().split("=")
+            if range_key == "bytes":
+                range_parts = range_value.split("-")
+                byte_start = int(range_parts[0])
+                if len(range_parts) > 1 and range_parts[1]:
+                    byte_end = int(range_parts[1])
+        except Exception:
+            # 파싱 실패 시 전체 파일 전송 모드로 fallback
+            pass
+
+    # 청크 길이 계산 ($L = E - S + 1$)
+    chunk_length = byte_end - byte_start + 1
+    
+    # 파일 열기 및 제너레이터 생성
+    def iterfile():
+        with open(video_path, "rb") as f:
+            f.seek(byte_start)
+            # 한 번에 너무 많은 데이터를 읽지 않도록 64KB 단위로 전송
+            remaining = chunk_length
+            while remaining > 0:
+                chunk_size = min(64 * 1024, remaining)
+                data = f.read(chunk_size)
+                if not data:
+                    break
+                remaining -= len(data)
+                yield data
+
+    # 헤더 설정
+    headers = {
+        "Content-Range": f"bytes {byte_start}-{byte_end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(chunk_length),
+        "Content-Type": "video/mp4",
+    }
+
+    return StreamingResponse(
+        iterfile(),
+        status_code=206, # [중요] 206 Partial Content
+        headers=headers,
+        media_type="video/mp4"
+    )
+
 @app.delete("/api/tasks/{task_id}")
 async def cancel_task(task_id: str):
     """
@@ -926,6 +995,36 @@ async def cancel_task(task_id: str):
     
     return {"status": "success", "message": "Cancel requested"}
 
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+# proxy server 용
+# ---- nginx 명령어 ---
+# # 1. 업로드 용량 제한 해제 (0 = 무제한, 또는 500M 등 구체적 설정 가능)
+# client_max_body_size 0;
+
+# # 2. 타임아웃 설정 (대용량 업로드/다운로드 시 끊김 방지)
+# proxy_connect_timeout 600s;
+# proxy_send_timeout 600s;
+# proxy_read_timeout 600s;
+
+# # 3. 비디오 스트리밍(Range Request) 및 소켓 호환성 강화
+# proxy_http_version 1.1;
+# proxy_set_header Upgrade $http_upgrade;
+# proxy_set_header Connection "upgrade";
+# proxy_set_header Host $host;
+
+# # 4. 실제 클라이언트 IP 전달 (FastAPI 로그에 실제 IP가 찍히도록)
+# proxy_set_header X-Real-IP $remote_addr;
+# proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+# proxy_set_header X-Forwarded-Proto $scheme;
+
+# # 5. [중요] 버퍼링 끄기 (스트리밍 반응 속도 향상)
+# proxy_buffering off;
+# --- nginx 명령어 끝 ---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # proxy_headers=True: Nginx가 보낸 헤더(X-Forwarded-Proto 등)를 신뢰함
+    # forwarded_allow_ips="*": 모든 IP에서의 프록시 요청을 허용 (보안상 NPM IP만 적는 게 좋지만 편의상 * 사용)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, proxy_headers=True, forwarded_allow_ips="*")
