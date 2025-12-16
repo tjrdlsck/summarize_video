@@ -995,6 +995,36 @@ async def cancel_task(task_id: str):
     
     return {"status": "success", "message": "Cancel requested"}
 
+# if __name__ == "__main__":
+#     import uvicorn
+#     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+# proxy server 용
+# ---- nginx 명령어 ---
+# # 1. 업로드 용량 제한 해제 (0 = 무제한, 또는 500M 등 구체적 설정 가능)
+# client_max_body_size 0;
+
+# # 2. 타임아웃 설정 (대용량 업로드/다운로드 시 끊김 방지)
+# proxy_connect_timeout 600s;
+# proxy_send_timeout 600s;
+# proxy_read_timeout 600s;
+
+# # 3. 비디오 스트리밍(Range Request) 및 소켓 호환성 강화
+# proxy_http_version 1.1;
+# proxy_set_header Upgrade $http_upgrade;
+# proxy_set_header Connection "upgrade";
+# proxy_set_header Host $host;
+
+# # 4. 실제 클라이언트 IP 전달 (FastAPI 로그에 실제 IP가 찍히도록)
+# proxy_set_header X-Real-IP $remote_addr;
+# proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+# proxy_set_header X-Forwarded-Proto $scheme;
+
+# # 5. [중요] 버퍼링 끄기 (스트리밍 반응 속도 향상)
+# proxy_buffering off;
+# --- nginx 명령어 끝 ---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # proxy_headers=True: Nginx가 보낸 헤더(X-Forwarded-Proto 등)를 신뢰함
+    # forwarded_allow_ips="*": 모든 IP에서의 프록시 요청을 허용 (보안상 NPM IP만 적는 게 좋지만 편의상 * 사용)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, proxy_headers=True, forwarded_allow_ips="*")
