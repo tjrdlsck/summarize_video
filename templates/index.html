@@ -429,7 +429,49 @@
                     alert("삭제 실패: " + err.message);
                 }
             };
-            // -------------------------------
+            
+            // [New] 프리미어 프로 XML 내보내기 핸들러
+            const handleExportPremiere = async (e, clipId) => {
+                e.preventDefault();
+                e.stopPropagation(); // 아코디언 토글 방지
+
+                if (!confirm("프리미어 프로용 XML 시퀀스 파일을 다운로드하시겠습니까?\n\n[사용법]\n1. 다운로드된 XML 파일을 프리미어 프로에서 [File] -> [Import] 하세요.\n2. 원본 영상과 자동으로 연결됩니다.")) return;
+
+                try {
+                    // Blob 형태로 응답을 받아야 파일 다운로드가 가능합니다.
+                    const response = await axios.post('/api/export/premiere', {
+                        video_filename: playerData.video_filename,
+                        clip_id: clipId
+                    }, {
+                        responseType: 'blob' 
+                    });
+
+                    // 브라우저 가상 URL 생성 및 클릭 트리거
+                    const url = window.URL.createObjectURL(new Blob([response.data]));
+                    const link = document.createElement('a');
+                    link.href = url;
+                    
+                    // 파일명 추출 (헤더에 없으면 기본값 사용)
+                    let fileName = `Premiere_Seq_${clipId.substring(0,8)}.xml`;
+                    const contentDisposition = response.headers['content-disposition'];
+                    if (contentDisposition) {
+                        const fileNameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+                        if (fileNameMatch && fileNameMatch.length === 2) fileName = fileNameMatch[1];
+                    }
+                    
+                    link.setAttribute('download', fileName);
+                    document.body.appendChild(link);
+                    link.click();
+                    
+                    // 뒷정리
+                    link.remove();
+                    window.URL.revokeObjectURL(url);
+
+                } catch (err) {
+                    console.error(err);
+                    alert("XML 내보내기 실패: 서버 오류가 발생했습니다.");
+                }
+            };
 
 
 
@@ -1315,6 +1357,15 @@
                                                                             </div>
 
                                                                             <div className="flex gap-2 shrink-0 ml-4">
+                                                                                {/* [Add] 프리미어 프로 XML 버튼 */}
+                                                                                <button 
+                                                                                    onClick={(e) => handleExportPremiere(e, safeId)}
+                                                                                    className="px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-bold text-sm flex items-center gap-1 shadow-sm"
+                                                                                    title="프리미어 프로용 시퀀스(XML) 다운로드"
+                                                                                >
+                                                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>
+                                                                                    XML
+                                                                                </button>
                                                                                 <a href={clip.download_url} download className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-bold text-sm flex items-center gap-1 shadow-sm">
                                                                                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
                                                                                     영상+자막 다운

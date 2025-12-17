@@ -25,6 +25,7 @@ from services.task_manager import TaskManager
 from services.clipper import VideoClipper
 from services.refiner import TextRefiner
 from services.shorts_maker import ShortsMaker
+from services.premiere_exporter import PremiereExporter
 
 
 # --- [Lifespan Manager] ---
@@ -77,6 +78,7 @@ refiner = TextRefiner() # [New] Refiner 인스턴스 추가
 task_manager = TaskManager()  # [New] Task Manager Instance
 clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 생성
 shorts_maker = ShortsMaker()
+premiere_exporter = PremiereExporter(output_dir="static/temp")
 
 # --- [Pydantic Models] ---
 class AnalyzeRequest(BaseModel):
@@ -95,6 +97,13 @@ class ClipRequest(BaseModel):
 
 class ShortsGenerateRequest(BaseModel):
     filename: str  # 원본 영상 파일명
+
+class ShortsGenerateRequest(BaseModel):
+    filename: str  # 원본 영상 파일명
+
+class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청 모델
+    video_filename: str
+    clip_id: str
 
 # --- [Helper: Progress Wrapper] ---
 class TaskProgressWrapper:
@@ -980,6 +989,69 @@ async def stream_video(filename: str, request: Request, range: str = Header(None
         headers=headers,
         media_type="video/mp4"
     )
+
+@app.post("/api/export/premiere")
+async def export_premiere_xml(req: PremiereExportRequest, background_tasks: BackgroundTasks):
+    """
+    [Sync] 특정 숏츠(Clip)의 컷 정보를 프리미어 프로용 XML 파일로 변환하여 다운로드합니다.
+    """
+    try:
+        # 1. 메타데이터(clips.json)에서 해당 클립 정보 조회
+        base_name = os.path.splitext(req.video_filename)[0]
+        meta_path = os.path.join("static/results", f"{base_name}_clips.json")
+        
+        if not os.path.exists(meta_path):
+            raise HTTPException(status_code=404, detail="Clips metadata not found")
+            
+        with open(meta_path, 'r', encoding='utf-8') as f:
+            clips_data = json.load(f)
+            
+        target_clip = next((c for c in clips_data if c.get("clip_id") == req.clip_id or c.get("shorts_id") == req.clip_id), None)
+        
+        if not target_clip:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        # 2. 세그먼트 데이터 추출
+        # AI 숏츠는 'segments' 배열을 가지고 있고, 수동 클립은 'start_time'/'end_time'을 가짐
+        segments = []
+        if target_clip.get("segments"):
+            segments = target_clip["segments"]
+        elif "start_time" in target_clip and "end_time" in target_clip:
+            segments = [{"start": target_clip["start_time"], "end": target_clip["end_time"]}]
+        else:
+            raise HTTPException(status_code=400, detail="Invalid clip data: No time segments found")
+
+        # 3. 원본 영상 경로 확인
+        video_path = os.path.join("static/videos", req.video_filename)
+        if not os.path.exists(video_path):
+            raise HTTPException(status_code=404, detail="Source video file not found")
+
+        # 4. XML 생성 실행 (동기 함수이므로 run_in_executor 사용 권장되나, 가벼운 작업이라 직렬 실행)
+        # 파일명 안전하게 변환
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", target_clip.get("title", "Untitled")).replace(" ", "_")
+        xml_filename = f"Premiere_Seq_{safe_title}.xml"
+        
+        xml_path = premiere_exporter.create_xml(
+            video_path=video_path,
+            segments=segments,
+            output_filename=xml_filename
+        )
+
+        # 5. 전송 후 임시 파일 삭제 예약
+        background_tasks.add_task(remove_temp_files, [xml_path])
+
+        # 6. 파일 다운로드 응답
+        return FileResponse(
+            xml_path,
+            media_type='application/xml',
+            filename=xml_filename
+        )
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"[Export XML Error] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/tasks/{task_id}")
 async def cancel_task(task_id: str):
