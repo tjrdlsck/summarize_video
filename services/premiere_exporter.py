@@ -251,3 +251,261 @@ class PremiereExporter:
             
         print(f"--- [Exporter] XML Generated (Relative Path): {output_path} ---")
         return output_path
+    # [Add] 프리미어 프로 라벨 색상 매핑 헬퍼
+    def _get_label_index(self, category):
+        """
+        카테고리에 따른 프리미어 프로 라벨 색상 인덱스를 반환합니다.
+        (0: Violet, 1: Iris, 2: Caribbean, 3: Lavender, 4: Cerulean, 
+         5: Forest, 6: Rose, 7: Mango, 8: Purple)
+        """
+        mapping = {
+            "Hook": 6,      # Rose (Red/Pink)
+            "Story": 1,     # Iris (Blue)
+            "Insight": 7,   # Mango (Orange)
+            "B-Roll": 3,    # Lavender (Purple)
+        }
+        return mapping.get(category, 0) # Default: Violet
+
+    # [Add] 러프컷용 클립 아이템 생성 헬퍼 (마커, 라벨, 트랙 지원)
+    def _create_rough_clip_item(self, idx, track_type, meta, video_name, video_uuid, relative_filename, start_sec, end_sec, current_tl_frame, category=None, title=None, reason=None):
+        in_frame = self._sec_to_frame(start_sec, meta['fps'])
+        out_frame = self._sec_to_frame(end_sec, meta['fps'])
+        duration_frame = out_frame - in_frame
+        
+        if duration_frame <= 0: return ""
+
+        clip_id = f"clipitem-{track_type}-{uuid.uuid4().hex[:8]}"
+        encoded_filename = urllib.parse.quote(relative_filename)
+
+        # 미디어 노드 (Video/Audio 공통)
+        file_node = f"""
+            <file id="file-{video_uuid}">
+              <name>{video_name}</name>
+              <pathurl>file://localhost/{encoded_filename}</pathurl>
+              <rate>
+                <timebase>{meta['timebase']}</timebase>
+                <ntsc>{meta['ntsc']}</ntsc>
+              </rate>
+              <duration>{meta['total_frames']}</duration>
+              <media>
+                <video>
+                  <samplecharacteristics>
+                    <width>{meta['width']}</width>
+                    <height>{meta['height']}</height>
+                  </samplecharacteristics>
+                </video>
+                <audio>
+                  <samplecharacteristics>
+                    <depth>16</depth>
+                    <samplerate>48000</samplerate>
+                  </samplecharacteristics>
+                </audio>
+              </media>
+            </file>
+        """
+
+        # 메타데이터 (라벨 색상, 마커)
+        labels_xml = ""
+        marker_xml = ""
+        
+        if track_type == "video" and category:
+            # 1. 라벨 색상
+            label_idx = self._get_label_index(category)
+            labels_xml = f"<labels><label2>{label_idx}</label2></labels>"
+            
+            # 2. 마커 (선정 이유)
+            if title and reason:
+                marker_xml = f"""
+                <marker>
+                    <name>[{category}] {title}</name>
+                    <comment>{reason}</comment>
+                    <in>{in_frame}</in>
+                    <out>{in_frame}</out>
+                </marker>
+                """
+
+        # 트랙별 특성
+        media_specific = ""
+        sourcetrack = ""
+        
+        if track_type == "video":
+            media_specific = f"""
+                <video>
+                  <samplecharacteristics>
+                    <width>{meta['width']}</width>
+                    <height>{meta['height']}</height>
+                  </samplecharacteristics>
+                </video>
+            """
+        else: # audio
+            media_specific = """
+                <audio>
+                  <samplecharacteristics>
+                    <depth>16</depth>
+                    <samplerate>48000</samplerate>
+                  </samplecharacteristics>
+                </audio>
+            """
+            sourcetrack = """
+            <sourcetrack>
+                <mediatype>audio</mediatype>
+                <trackindex>1</trackindex>
+            </sourcetrack>
+            """
+
+        return f"""
+          <clipitem id="{clip_id}">
+            <name>{video_name}</name>
+            <enabled>TRUE</enabled>
+            <duration>{duration_frame}</duration>
+            <rate>
+              <timebase>{meta['timebase']}</timebase>
+              <ntsc>{meta['ntsc']}</ntsc>
+            </rate>
+            <start>{current_tl_frame}</start>
+            <end>{current_tl_frame + duration_frame}</end>
+            <in>{in_frame}</in>
+            <out>{out_frame}</out>
+            {file_node}
+            {labels_xml}
+            {marker_xml}
+            {sourcetrack}
+          </clipitem>
+        """
+
+    # [Add] AI 선별 소스 전용 XML 생성 메서드 (메인 기능)
+    def create_rough_cut_xml(self, video_path, selected_segments, output_filename="rough_cut.xml"):
+        """
+        V1 트랙: 원본 전체 (참고용)
+        V2 트랙: AI 선별 클립 (색상 라벨링됨)
+        """
+        meta = self._get_video_info(video_path)
+        
+        # 파일명 처리 (UUID 제거)
+        server_filename = os.path.basename(video_path)
+        original_filename = re.sub(r'^[0-9a-fA-F]{8}_', '', server_filename)
+        video_uuid = str(uuid.uuid4()) # XML 내부에서 파일 식별용
+
+        # --- Track V1: 원본 전체 (배경) ---
+        v1_items = []
+        a1_items = []
+        # 원본 전체를 0초부터 끝까지 배치
+        full_duration_frame = meta['total_frames']
+        
+        # V1 비디오
+        v1_clip = self._create_rough_clip_item(
+            0, "video", meta, original_filename, video_uuid, original_filename,
+            0, meta['duration_sec'], 0 # start=0, end=duration, tl_start=0
+        )
+        # V1 오디오
+        a1_clip = self._create_rough_clip_item(
+            0, "audio", meta, original_filename, video_uuid, original_filename,
+            0, meta['duration_sec'], 0
+        )
+        
+        # 투명도 50% 적용을 위한 filter 추가 (V1)
+        # FCP7 XML에서 Opacity는 <filter> 태그로 처리하지만, 
+        # 복잡도를 줄이기 위해 여기서는 생략하고 클립만 배치합니다. (편집자가 직접 조정)
+        v1_items.append(v1_clip)
+        a1_items.append(a1_clip)
+
+
+        # --- Track V2: AI 선별 클립 ---
+        v2_items = []
+        a2_items = []
+        current_tl_frame = 0 # V2 트랙의 타임라인 헤드 위치
+
+        for idx, seg in enumerate(selected_segments):
+            # 클립 생성
+            v_item = self._create_rough_clip_item(
+                idx, "video", meta, original_filename, video_uuid, original_filename,
+                seg['start'], seg['end'], current_tl_frame,
+                category=seg['category'], title=seg['title'], reason=seg['reason']
+            )
+            a_item = self._create_rough_clip_item(
+                idx, "audio", meta, original_filename, video_uuid, original_filename,
+                seg['start'], seg['end'], current_tl_frame
+            )
+            
+            v2_items.append(v_item)
+            a2_items.append(a_item)
+            
+            # 다음 클립 배치 위치 계산
+            in_f = self._sec_to_frame(seg['start'], meta['fps'])
+            out_f = self._sec_to_frame(seg['end'], meta['fps'])
+            current_tl_frame += (out_f - in_f)
+
+        # XML 조립
+        header = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<!DOCTYPE xmeml>',
+            '<xmeml version="4">',
+            '  <sequence>',
+            '    <name>AI_Smart_Rough_Cut</name>',
+            f'    <duration>{max(full_duration_frame, current_tl_frame)}</duration>',
+            '    <rate>',
+            f'      <timebase>{meta["timebase"]}</timebase>',
+            f'      <ntsc>{meta["ntsc"]}</ntsc>',
+            '    </rate>',
+            '    <media>'
+        ]
+
+        # Video Tracks (V1, V2)
+        video_block = [
+            '      <video>',
+            '        <format>',
+            '          <samplecharacteristics>',
+            '            <rate>',
+            f'              <timebase>{meta["timebase"]}</timebase>',
+            f'              <ntsc>{meta["ntsc"]}</ntsc>',
+            '            </rate>',
+            f'            <width>{meta["width"]}</width>',
+            f'            <height>{meta["height"]}</height>',
+            '            <pixelaspectratio>square</pixelaspectratio>',
+            '          </samplecharacteristics>',
+            '        </format>',
+            # Track V1 (Original)
+            '        <track>',
+            '          <enabled>TRUE</enabled>',
+            '          <locked>FALSE</locked>',
+            *v1_items,
+            '        </track>',
+            # Track V2 (Selected)
+            '        <track>',
+            '          <enabled>TRUE</enabled>',
+            '          <locked>FALSE</locked>',
+            *v2_items,
+            '        </track>',
+            '      </video>'
+        ]
+
+        # Audio Tracks (A1, A2) - 영상 트랙과 1:1 매칭
+        audio_block = [
+            '      <audio>',
+            '        <track>',
+            '          <enabled>TRUE</enabled>',
+            '          <locked>FALSE</locked>',
+            *a1_items,
+            '        </track>',
+            '        <track>',
+            '          <enabled>TRUE</enabled>',
+            '          <locked>FALSE</locked>',
+            *a2_items,
+            '        </track>',
+            '      </audio>'
+        ]
+
+        footer = [
+            '    </media>',
+            '  </sequence>',
+            '</xmeml>'
+        ]
+
+        final_xml_str = "\n".join(header + video_block + audio_block + footer)
+        
+        output_path = os.path.join(self.output_dir, output_filename)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(final_xml_str)
+            
+        print(f"--- [Exporter] Rough Cut XML Generated: {output_path} ---")
+        return output_path

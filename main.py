@@ -28,6 +28,7 @@ from services.clipper import VideoClipper
 from services.refiner import TextRefiner
 from services.shorts_maker import ShortsMaker
 from services.premiere_exporter import PremiereExporter
+from services.source_selector import SourceSelector 
 
 
 # --- [Lifespan Manager] ---
@@ -35,7 +36,7 @@ from services.premiere_exporter import PremiereExporter
 async def lifespan(app: FastAPI):
     """
     앱의 수명 주기(시작과 끝)를 관리하는 함수입니다.
-    서버 시작 시 하드웨어 가속 지원 여부를 체크하고 로그를 출력합니다.
+    서버 시작 시 하드웨어 가속 지원 여부를 체크하고, 임시 폴더를 청소합니다.
     """
     # [Startup] 앱 시작 시 실행
     print("\n" + "="*60)
@@ -61,6 +62,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️  Hardware Check Error: {e}")
         print("🐢 Performance Mode: CPU Fallback (Default)")
+    
+    # 2. [New] 임시 폴더 대청소 (Startup Cleanup)
+    print("--- [Lifespan] Cleaning up temp folder... ---")
+    temp_dir = "static/temp"
+    if os.path.exists(temp_dir):
+        deleted_count = 0
+        for filename in os.listdir(temp_dir):
+            file_path = os.path.join(temp_dir, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                    deleted_count += 1
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                    deleted_count += 1
+            except Exception as e:
+                print(f"Failed to delete {file_path}. Reason: {e}")
+        print(f"🧹 Cleaned {deleted_count} files/dirs in {temp_dir}")
 
     print("="*60 + "\n")
 
@@ -107,6 +126,7 @@ task_manager = TaskManager()  # [New] Task Manager Instance
 clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 생성
 shorts_maker = ShortsMaker()
 premiere_exporter = PremiereExporter(output_dir="static/temp")
+source_selector = SourceSelector()
 
 # --- [Pydantic Models] ---
 class AnalyzeRequest(BaseModel):
@@ -132,6 +152,18 @@ class ShortsGenerateRequest(BaseModel):
 class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청 모델
     video_filename: str
     clip_id: str
+
+class PremiereExportRequest(BaseModel): 
+    video_filename: str
+    clip_id: str
+
+# [New] 편집 소스 선별 요청 모델
+class SourceSelectionRequest(BaseModel):
+    filename: str
+
+# [New] 러프컷 XML 내보내기 요청 모델
+class RoughCutExportRequest(BaseModel):
+    filename: str
 
 # --- [Helper: Progress Wrapper] ---
 class TaskProgressWrapper:
@@ -179,13 +211,14 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
     video_filename = req.filename 
     display_title = req.custom_title
     
-    # 정리 함수
+    # 정리 함수 (에러 시 호출용 + 사전 정리용)
     def cleanup_files(filename):
         if not filename: return
         try:
             base_name = os.path.splitext(filename)[0]
             targets = [
-                os.path.join("static/videos", filename),           
+                # 원본 영상은 다운로드 실패시에만 지워야 하므로 여기서는 제외하거나 주의 필요
+                # 여기서는 결과물 위주로 삭제
                 os.path.join("static/results", f"{base_name}.srt"),      
                 os.path.join("static/results", f"{base_name}.vtt"),      
                 os.path.join("static/results", f"{base_name}_transcript.json"), 
@@ -193,7 +226,9 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
                 os.path.join("static/results", f"{base_name}_temp.wav")
             ]
             for path in targets:
-                if os.path.exists(path): os.remove(path)
+                if os.path.exists(path): 
+                    os.remove(path)
+                    print(f"[Cleanup] Removed old file: {path}")
         except Exception:
             pass
 
@@ -203,6 +238,10 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         # [Start]
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
         task_manager.update_progress(task_id, 0, "작업 시작...")
+        
+        # [Pre-cleanup] 기존 분석 데이터가 있다면 선제 삭제 (재분석 시)
+        if video_filename:
+            cleanup_files(video_filename)
         
         # --- Phase 1: Video Preparation (0~10%) ---
         if req.url:
@@ -242,25 +281,22 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
             display_title = os.path.splitext(clean_name)[0].replace("_", " ").strip()
 
         # --- Phase 2: Transcription (10~70%) ---
-        # [Change] 시뮬레이션 제거, 리얼타임 진행률 적용
         task_manager.update_progress(task_id, 10, "오디오 변환 준비 중...")
         
         # Transcriber용 진행률 래퍼 생성 (10%에서 시작, 전체의 60% 비중)
-        # Transcriber 내부의 0~100% 진행률이 -> 전체 파이프라인의 10~70%로 자동 변환됨
         progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=10, scale_factor=0.6)
         
-        # 콜백 함수 정의 (Wrapper 사용)
         def transcriber_callback(local_percent, msg):
             loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
 
-        # Transcriber 실행 (wrapper를 task_manager로 전달하여 내부의 direct call도 커버)
+        # Transcriber 실행
         transcribe_result = await loop.run_in_executor(
             None,
             partial(
                 transcriber.transcribe, 
                 video_path, 
                 progress_callback=transcriber_callback,
-                task_manager=progress_wrapper, # [Injection] Wrapper 주입
+                task_manager=progress_wrapper,
                 task_id=task_id            
             )
         )
@@ -272,7 +308,6 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         # --- Phase 3: Summarization (70~90%) ---
         task_manager.update_progress(task_id, 70, "내용 구조화 및 요약 중 (LLM)...")
         
-        # LLM Callback
         def summarizer_callback(msg):
              loop.call_soon_threadsafe(task_manager.update_progress, task_id, 75, msg)
 
@@ -332,6 +367,7 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
 
     except TaskCancelledError:
         print(f"[{task_id}] Task Cancelled by User.")
+        # 다운로드 중 취소된 경우에만 영상 삭제 고려 (여기서는 결과물만 정리)
         cleanup_files(video_filename)
         task_manager.fail_task(task_id, "취소됨")
 
@@ -621,6 +657,76 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
                 try: os.remove(f)
                 except: pass
 
+async def run_source_selection_pipeline(task_id: str, req: SourceSelectionRequest):
+    """
+    [Background] 편집 소스 선별 파이프라인
+    - Transcript 로드 -> 비디오 길이 확인 -> LLM 분석 -> 결과 저장
+    [Update] 기존 결과 파일 선제 삭제 로직 추가
+    """
+    try:
+        task_manager.update_progress(task_id, 0, "편집 소스 분석 시작...")
+        
+        base_name = os.path.splitext(req.filename)[0]
+        transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+        video_path = os.path.join("static/videos", req.filename)
+        output_path = os.path.join("static/results", f"{base_name}_selected_sources.json")
+
+        # [Pre-cleanup] 기존 결과가 있다면 삭제 (재분석 시 데이터 혼동 방지)
+        if os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+                print(f"[{task_id}] Removed old source selection file: {output_path}")
+            except Exception: pass
+
+        # 1. 필수 파일 확인
+        if not os.path.exists(transcript_path):
+            raise FileNotFoundError("분석 데이터(Transcript)가 없습니다. 먼저 영상 분석을 완료해주세요.")
+        
+        if not os.path.exists(video_path):
+            raise FileNotFoundError("원본 영상 파일이 없습니다.")
+
+        # 2. 데이터 로드
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            transcripts = json.load(f)
+
+        # 3. 비디오 길이 정보 획득 (PremiereExporter 유틸 사용)
+        loop = asyncio.get_running_loop()
+        meta = await loop.run_in_executor(None, premiere_exporter._get_video_info, video_path)
+        duration_sec = meta.get("duration_sec", 0)
+
+        if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
+
+        # 4. 소스 선별 실행 (LLM 수행 - 오래 걸림)
+        result = await loop.run_in_executor(
+            None, 
+            partial(
+                source_selector.select_sources, 
+                transcripts, 
+                duration_sec,
+                task_manager=task_manager,
+                task_id=task_id
+            )
+        )
+
+        if result.get("error"):
+            raise Exception(result["error"])
+        
+        if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
+
+        # 5. 결과 저장
+        task_manager.update_progress(task_id, 98, "결과 파일 쓰는 중...")
+        
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(result["results"], f, ensure_ascii=False, indent=2)
+
+        # 6. 완료 처리
+        task_manager.complete_task(task_id, {"count": result["total_groups"], "message": "분석 완료"})
+        print(f"[{task_id}] Source Selection Completed: {len(result['results'])} items")
+
+    except Exception as e:
+        print(f"[{task_id}] Source Selection Failed: {e}")
+        task_manager.fail_task(task_id, str(e))
+
 async def worker():
     print("--- [Worker] Analysis Worker Started ---")
     while True:
@@ -634,9 +740,11 @@ async def worker():
                     await run_analysis_pipeline(task_id, req)
                 elif isinstance(req, ClipRequest):
                     await run_clip_pipeline(task_id, req)
-                # [Add] 숏츠 생성 요청 처리 추가
                 elif isinstance(req, ShortsGenerateRequest):
                     await run_shorts_pipeline(task_id, req)
+                # [Add] 소스 선별 파이프라인 연결
+                elif isinstance(req, SourceSelectionRequest):
+                    await run_source_selection_pipeline(task_id, req)
                     
         except Exception as e:
             print(f"[Worker Error] {e}")
@@ -1092,6 +1200,95 @@ async def cancel_task(task_id: str):
     task_manager.request_cancel(task_id)
     
     return {"status": "success", "message": "Cancel requested"}
+
+# --- [Editor Feature APIs] ---
+
+@app.post("/api/editor/select-sources")
+async def select_sources_for_editor(req: SourceSelectionRequest):
+    """
+    [Async] 기존 분석된 Transcript를 바탕으로 AI가 편집 소스를 선별합니다.
+    작업을 큐에 등록하고 Task ID를 반환합니다.
+    """
+    # 기본 검증 (파일 존재 여부 등은 Worker에서 상세 체크하지만, 여기서도 간단히 체크 가능)
+    base_name = os.path.splitext(req.filename)[0]
+    transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+    
+    if not os.path.exists(transcript_path):
+         raise HTTPException(status_code=404, detail="Transcript not found. Please analyze the video first.")
+
+    task_id = str(uuid.uuid4())
+    
+    # 1. TaskManager 등록 (type="source_selection")
+    task_manager.add_task(task_id, req.filename, task_type="source_selection")
+    
+    # 2. Queue에 작업 추가
+    await job_queue.put((task_id, req))
+    
+    return {
+        "task_id": task_id, 
+        "message": "Source selection started in background"
+    }
+
+@app.post("/api/export/rough-cut")
+async def export_rough_cut_xml(req: RoughCutExportRequest, background_tasks: BackgroundTasks):
+    """
+    [Sync] 선별된 소스 목록을 바탕으로 프리미어 프로용 XML(FCP7)을 생성합니다.
+    """
+    base_name = os.path.splitext(req.filename)[0]
+    selection_path = os.path.join("static/results", f"{base_name}_selected_sources.json")
+    video_path = os.path.join("static/videos", req.filename)
+
+    if not os.path.exists(selection_path):
+        raise HTTPException(status_code=404, detail="Selection data not found.")
+
+    try:
+        with open(selection_path, 'r', encoding='utf-8') as f:
+            selected_segments = json.load(f)
+
+        # XML 생성 (동기 실행)
+        # 파일명에 'RoughCut' 접미사 추가
+        safe_name = re.sub(r'^[0-9a-fA-F]{8}_', '', base_name)
+        xml_filename = f"RoughCut_{safe_name}.xml"
+        
+        xml_path = premiere_exporter.create_rough_cut_xml(
+            video_path=video_path,
+            selected_segments=selected_segments,
+            output_filename=xml_filename
+        )
+
+        background_tasks.add_task(remove_temp_files, [xml_path])
+
+        return FileResponse(
+            xml_path,
+            media_type='application/xml',
+            filename=xml_filename
+        )
+
+    except Exception as e:
+        print(f"[XML Export Error] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/download/source-video/{filename}")
+async def download_source_video_clean(filename: str):
+    """
+    [핵심] 서버에 저장된 영상(UUID 포함)을 다운로드하되,
+    사용자에게는 'XML 내부 경로와 일치하는 클린 파일명'으로 제공합니다.
+    이것이 되어야 프리미어 프로에서 자동 연결(Relink)이 됩니다.
+    """
+    file_path = os.path.join("static/videos", filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+
+    # UUID 제거 (8자리 hex + underscore)
+    clean_filename = re.sub(r'^[0-9a-fA-F]{8}_', '', filename)
+
+    # FileResponse의 filename 인자를 설정하면 Content-Disposition 헤더가 자동으로 설정됨
+    return FileResponse(
+        file_path,
+        media_type="video/mp4",
+        filename=clean_filename 
+    )
 
 # if __name__ == "__main__":
 #     import uvicorn

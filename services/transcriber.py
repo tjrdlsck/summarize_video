@@ -203,10 +203,19 @@ class VideoTranscriber:
     def _convert_to_16k_wav(self, input_path, task_manager=None, task_id=None):
         """
         FFmpeg를 사용하여 영상을 16kHz Mono WAV로 변환하며, stderr을 파싱해 진행률을 보고합니다.
+        [Update] 변환 전 기존 임시 파일 삭제 로직 추가 (좀비 파일 방지)
         """
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         output_wav = os.path.join(self.output_dir, f"{base_name}_temp.wav")
         
+        # [Pre-cleanup] 혹시 남아있을지 모르는 기존 임시 파일 삭제
+        if os.path.exists(output_wav):
+            try:
+                os.remove(output_wav)
+                print(f"[Transcriber] Removed existing temp wav: {output_wav}")
+            except Exception:
+                pass
+
         # 1. 전체 영상 길이(Duration) 확인 (ffprobe 사용)
         total_duration = 1.0
         try:
@@ -223,7 +232,7 @@ class VideoTranscriber:
         cmd = [
             "ffmpeg", "-i", input_path,
             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-vn",
-            output_wav, "-y", "-hide_banner", "-loglevel", "info" # [Change] info 레벨이어야 time= 로그가 나옴
+            output_wav, "-y", "-hide_banner", "-loglevel", "info" 
         ]
         
         try:

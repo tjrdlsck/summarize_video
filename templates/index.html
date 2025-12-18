@@ -384,6 +384,10 @@
             const [activeIndex, setActiveIndex] = useState(-1);    // 현재 하이라이트된 대사 인덱스
             const itemRefs = useRef([]);                           // 스크롤 이동을 위한 DOM 참조
 
+            // [New] 편집 소스 데이터 State
+            const [sourceData, setSourceData] = useState(null);
+            const [isSelectingSource, setIsSelectingSource] = useState(false);
+
             // [추가] 여기부터 블로그 뷰 데이터 가공 로직입니다.
             // 챕터별로 대사를 그룹화하는 로직 (Memoization으로 성능 최적화)
             const blogContent = useMemo(() => {
@@ -416,6 +420,20 @@
                     setClipsList(res.data);
                 } catch (err) {
                     console.error("Failed to fetch clips:", err);
+                }
+            };
+
+            // [New] 편집 소스 데이터 로드 함수
+            const fetchSourceData = async (filename) => {
+                try {
+                    // 확장자 제거 후 JSON 경로 구성
+                    const baseName = filename.replace(/\.[^/.]+$/, ""); 
+                    // 캐싱 방지를 위해 timestamp 추가
+                    const res = await axios.get(`/static/results/${baseName}_selected_sources.json?t=${Date.now()}`);
+                    setSourceData(res.data);
+                } catch (err) {
+                    // 파일이 아직 없으면(분석 전) null 처리
+                    setSourceData(null);
                 }
             };
 
@@ -484,20 +502,22 @@
                 return () => clearInterval(interval);
             }, []);
 
-            // 작업 완료 감지
+            // 작업 완료 감지 및 데이터 자동 갱신
             const prevTaskCount = useRef(0);
+            
             useEffect(() => {
-                // 작업 개수가 줄어들었다 = 작업이 완료되었다
+                // 작업 개수가 줄어들었다 = 작업이 완료되었다 (혹은 취소되었다)
                 if (prevTaskCount.current > 0 && activeTasks.length < prevTaskCount.current) {
                     fetchHistory(); // 메인 목록 갱신
 
-                    // [New] 현재 플레이어 화면이면 클립 목록도 갱신
+                    // 현재 플레이어 화면 보고 있다면, 관련 데이터들 최신화
                     if (viewMode === 'player' && playerData) {
-                        fetchClips(playerData.video_filename);
+                        fetchClips(playerData.video_filename);      // 클립 목록 갱신
+                        fetchSourceData(playerData.video_filename); // 편집 소스 갱신
                     }
                 }
                 prevTaskCount.current = activeTasks.length;
-            }, [activeTasks, viewMode, playerData]); // 의존성 배열에 viewMode, playerData 추가
+            }, [activeTasks, viewMode, playerData]);
 
             // [Modified] 영상 시간 업데이트 핸들러 (자막 동기화 + 자동 스크롤 + 하이라이트)
             const handleTimeUpdate = () => {
@@ -655,14 +675,15 @@
                         transcripts: transcripts
                     });
 
-                    // [New] 클립 목록 불러오기
+                    // [New] 클립 목록 & 편집 소스 데이터 불러오기
                     fetchClips(item.filename);
+                    fetchSourceData(item.filename);
 
                     // 기존 초기화 로직
                     setEditTitleText(item.result_data.video_title || item.result_data.video_filename);
                     setIsEditingTitle(false);
                     setShowSubtitle(true);
-                    setClipTitle(""); // 클립 제목 입력 초기화
+                    setClipTitle(""); 
 
                     setViewMode('player');
                     setActiveTab('chapters');
@@ -785,6 +806,66 @@
                     console.error(err);
                     alert("요청 실패: " + err.message);
                 }
+            };
+
+            // [Modified] 편집 소스 선별 요청 (비동기)
+            const handleSelectSources = async () => {
+                // 이미 진행 중인 작업이 있는지 확인 (중복 요청 방지)
+                const isAlreadyProcessing = activeTasks.some(
+                    t => t.filename === playerData.video_filename && t.type === 'source_selection'
+                );
+                if (isAlreadyProcessing) return alert("이미 분석 작업이 진행 중입니다.");
+
+                try {
+                    await axios.post('/api/editor/select-sources', {
+                        filename: playerData.video_filename
+                    });
+                    
+                    alert("편집 소스 분석이 시작되었습니다.\n우측 하단 모니터에서 진행 상황을 확인하세요.");
+                    fetchActiveTasks(); // 작업 목록 즉시 갱신
+                } catch (err) {
+                    console.error(err);
+                    alert("요청 실패: " + (err.response?.data?.detail || err.message));
+                }
+            };
+
+            // [New] 러프컷 XML 다운로드
+            const handleDownloadRoughCutXML = async () => {
+                if (!sourceData) return alert("먼저 소스를 선별해주세요.");
+                try {
+                    const response = await axios.post('/api/export/rough-cut', {
+                        filename: playerData.video_filename
+                    }, { responseType: 'blob' });
+
+                    const url = window.URL.createObjectURL(new Blob([response.data]));
+                    const link = document.createElement('a');
+                    link.href = url;
+                    
+                    // 파일명 추출
+                    let fileName = "RoughCut.xml";
+                    const disposition = response.headers['content-disposition'];
+                    if (disposition && disposition.match(/filename="?([^"]+)"?/)) {
+                        fileName = disposition.match(/filename="?([^"]+)"?/)[1];
+                    }
+                    
+                    link.setAttribute('download', fileName);
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                } catch (err) {
+                    alert("XML 다운로드 실패: " + err.message);
+                }
+            };
+
+            // [New] 원본 영상 다운로드 (클린 파일명)
+            const handleDownloadSourceVideo = () => {
+                const link = document.createElement('a');
+                // 백엔드에서 만든 clean filename 다운로드 경로
+                link.href = `/api/download/source-video/${playerData.video_filename}`;
+                link.setAttribute('download', ''); // 브라우저 자동 파일명 사용
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
             };
 
             // [New] AI 숏츠와 일반 클립 분리 (Memoization)
@@ -1242,6 +1323,14 @@
                                             요약 노트
                                         </button>
 
+                                        {/* [Add] 편집 소스 탭 */}
+                                        <button
+                                            onClick={() => setActiveTab('editor')}
+                                            className={`flex-1 py-4 text-sm font-bold transition-all border-b-2 ${activeTab === 'editor' ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50' : 'border-transparent text-gray-400 hover:text-gray-600'}`}
+                                        >
+                                            🎞️ 편집 소스
+                                        </button>
+
                                         {/* [추가] 블로그 뷰 버튼 시작 */}
                                         <button
                                             onClick={() => setActiveTab('blog')}
@@ -1282,6 +1371,158 @@
 
                                     {/* 3. Scrollable Content Area (나머지 영역 스크롤) */}
                                     <div className="flex-1 overflow-y-auto p-4 lg:p-8 custom-scrollbar scroll-smooth relative">
+                                        {/* [Modified] Tab: Editor Source Selector */}
+                                        {activeTab === 'editor' && (
+                                            <div className="p-6 md:p-8 pb-20 space-y-8 animate-fade-in">
+                                                {/* Header Area */}
+                                                <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200">
+                                                    <h2 className="text-xl font-bold text-gray-800 mb-2 flex items-center gap-2">
+                                                        🎞️ AI 스마트 소스 선별기
+                                                    </h2>
+                                                    <p className="text-gray-500 text-sm mb-6">
+                                                        AI가 전체 영상에서 편집에 사용할 만한 핵심 소스(Hook, Story, Insight, B-Roll)를 선별하여 
+                                                        <span className="font-bold text-indigo-600"> 프리미어 프로 타임라인(XML)</span>으로 만들어 드립니다.
+                                                    </p>
+
+                                                    {!sourceData ? (
+                                                        <div className="text-center py-10 bg-gray-50 rounded-xl border border-dashed border-gray-300">
+                                                            <p className="text-gray-500 mb-4">아직 분석된 편집 소스가 없습니다.</p>
+                                                            
+                                                            {/* 작업 상태 확인 및 버튼 렌더링 */}
+                                                            {(() => {
+                                                                const isProcessing = activeTasks.some(
+                                                                    t => t.filename === playerData.video_filename && t.type === 'source_selection'
+                                                                );
+                                                                
+                                                                return (
+                                                                    <button 
+                                                                        onClick={handleSelectSources} 
+                                                                        disabled={isProcessing}
+                                                                        className={`px-6 py-3 rounded-xl font-bold transition shadow-md flex items-center gap-2 mx-auto ${
+                                                                            isProcessing 
+                                                                            ? "bg-gray-300 text-white cursor-not-allowed" 
+                                                                            : "bg-indigo-600 text-white hover:bg-indigo-700"
+                                                                        }`}
+                                                                    >
+                                                                        {isProcessing ? (
+                                                                            <>
+                                                                                <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></span>
+                                                                                백그라운드에서 분석 중...
+                                                                            </>
+                                                                        ) : (
+                                                                            <>🔍 편집 소스 분석 시작하기</>
+                                                                        )}
+                                                                    </button>
+                                                                );
+                                                            })()}
+                                                        </div>
+                                                    ) : (
+                                                        <div className="space-y-6">
+                                                            {/* Action Buttons */}
+                                                            <div className="flex flex-col md:flex-row gap-4 bg-indigo-50 p-4 rounded-xl border border-indigo-100">
+                                                                <div className="flex-1">
+                                                                    <div className="flex justify-between items-start mb-2">
+                                                                        <div>
+                                                                            <h3 className="font-bold text-indigo-900 mb-1">🚀 편집 준비 (2-Step)</h3>
+                                                                            <p className="text-xs text-indigo-700 mb-3">
+                                                                                아래 두 파일을 <strong>반드시 같은 폴더</strong>에 다운로드 받은 후, XML 파일을 실행하세요.
+                                                                            </p>
+                                                                        </div>
+                                                                        {/* 재분석 버튼 */}
+                                                                        <button 
+                                                                            onClick={handleSelectSources}
+                                                                            className="text-xs text-indigo-400 underline hover:text-indigo-600"
+                                                                        >
+                                                                            다시 분석하기
+                                                                        </button>
+                                                                    </div>
+                                                                    
+                                                                    <div className="flex gap-2">
+                                                                        <button onClick={handleDownloadRoughCutXML} className="flex-1 bg-white border border-indigo-200 text-indigo-700 py-2 rounded-lg font-bold text-sm hover:bg-indigo-600 hover:text-white transition shadow-sm flex items-center justify-center gap-1">
+                                                                            📄 1. XML 다운로드
+                                                                        </button>
+                                                                        <button onClick={handleDownloadSourceVideo} className="flex-1 bg-indigo-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-indigo-700 transition shadow-sm flex items-center justify-center gap-1">
+                                                                            🎥 2. 원본 영상 다운로드
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Timeline Visualization */}
+                                                            <div>
+                                                                <h3 className="text-sm font-bold text-gray-600 mb-2">타임라인 미리보기</h3>
+                                                                <div className="relative w-full h-8 bg-gray-200 rounded-lg overflow-hidden flex">
+                                                                    {sourceData.map((clip, idx) => {
+                                                                        const startPct = (clip.start / totalDuration) * 100;
+                                                                        const widthPct = ((clip.end - clip.start) / totalDuration) * 100;
+                                                                        let colorClass = "bg-gray-400";
+                                                                        if (clip.category === 'Hook') colorClass = "bg-pink-500";
+                                                                        else if (clip.category === 'Story') colorClass = "bg-indigo-500";
+                                                                        else if (clip.category === 'Insight') colorClass = "bg-orange-400";
+                                                                        else if (clip.category === 'B-Roll') colorClass = "bg-purple-400";
+
+                                                                        return (
+                                                                            <div 
+                                                                                key={idx}
+                                                                                className={`absolute h-full ${colorClass} opacity-80 hover:opacity-100 transition cursor-help`}
+                                                                                style={{ left: `${startPct}%`, width: `${widthPct}%` }}
+                                                                                title={`[${clip.category}] ${clip.title}`}
+                                                                            ></div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                                <div className="flex gap-4 mt-2 text-xs text-gray-500 justify-center">
+                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-500"></span>Hook</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-500"></span>Story</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-400"></span>Insight</span>
+                                                                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-purple-400"></span>B-Roll</span>
+                                                                </div>
+                                                            </div>
+
+                                                            {/* Source List */}
+                                                            <div className="space-y-3">
+                                                                <h3 className="text-sm font-bold text-gray-600">선별된 소스 목록 ({sourceData.length}개)</h3>
+                                                                {sourceData.map((clip, idx) => {
+                                                                    let badgeColor = "bg-gray-100 text-gray-600";
+                                                                    if (clip.category === 'Hook') badgeColor = "bg-pink-100 text-pink-700 border-pink-200";
+                                                                    else if (clip.category === 'Story') badgeColor = "bg-indigo-100 text-indigo-700 border-indigo-200";
+                                                                    else if (clip.category === 'Insight') badgeColor = "bg-orange-100 text-orange-700 border-orange-200";
+                                                                    else if (clip.category === 'B-Roll') badgeColor = "bg-purple-100 text-purple-700 border-purple-200";
+
+                                                                    return (
+                                                                        <div key={idx} className="bg-white border border-gray-200 rounded-lg p-3 hover:border-indigo-300 transition flex gap-3 items-start group"
+                                                                            onClick={() => {
+                                                                                 // 해당 구간 미리보기 (비디오 시간 이동)
+                                                                                 if (videoRef.current) {
+                                                                                     videoRef.current.currentTime = clip.start;
+                                                                                     videoRef.current.play();
+                                                                                 }
+                                                                            }}
+                                                                        >
+                                                                            <div className={`shrink-0 px-2 py-1 rounded text-[10px] font-bold border ${badgeColor} w-16 text-center mt-0.5`}>
+                                                                                {clip.category}
+                                                                            </div>
+                                                                            <div className="flex-1 cursor-pointer">
+                                                                                <div className="flex justify-between items-center mb-1">
+                                                                                    <h4 className="font-bold text-gray-800 text-sm group-hover:text-indigo-600 transition">{clip.title}</h4>
+                                                                                    <span className="text-xs font-mono text-gray-400 shrink-0">
+                                                                                        {formatTime(clip.start)} ~ {formatTime(clip.end)}
+                                                                                    </span>
+                                                                                </div>
+                                                                                <p className="text-xs text-gray-500 leading-snug">{clip.reason}</p>
+                                                                            </div>
+                                                                            <button className="text-gray-300 hover:text-indigo-600 p-1">
+                                                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                                                                            </button>
+                                                                        </div>
+                                                                    );
+                                                                })}
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
                                         {/* [Add] Tab: AI Shorts */}
                                         {activeTab === 'shorts' && (
                                             <div className="p-6 md:p-8 pb-20 space-y-8 animate-fade-in">
