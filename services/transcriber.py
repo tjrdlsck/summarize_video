@@ -3,13 +3,25 @@ import subprocess
 import re
 import json
 import torch
-import mlx_whisper
 import soundfile as sf
 import numpy as np
 import stable_whisper
 import time
 import multiprocessing
 import sys
+import platform  # [Add] 플랫폼 감지용
+
+# [New] MLX Whisper (Mac용) - 조건부 임포트
+try:
+    import mlx_whisper
+except ImportError:
+    mlx_whisper = None
+
+# [New] NVIDIA Worker (Windows/Linux용) - 조건부 임포트
+try:
+    from services.transcriber_runner import run_faster_whisper_worker
+except ImportError:
+    run_faster_whisper_worker = None
 
 class TaskCancelledError(Exception):
     """작업이 사용자에 의해 취소되었을 때 발생하는 예외"""
@@ -105,9 +117,88 @@ class VideoTranscriber:
     def __init__(self, output_dir="static/results"):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
-        # Whisper 모델 설정 (Apple Silicon 최적화 모델 사용)
-        # self.model_path = "mlx-community/whisper-large-v3-mlx-4bit"
-        self.model_path = "mlx-community/whisper-large-v3-turbo-q4"
+        
+        # [New] Hardware Detection Logic
+        self.mode = "cpu"  # 기본값
+        
+        try:
+            if torch.cuda.is_available():
+                self.mode = "nvidia"
+                print(f"[Transcriber] NVIDIA GPU Detected. Mode: {self.mode}")
+            elif platform.system() == "Darwin" and platform.processor() == "arm":
+                self.mode = "mac"
+                print(f"[Transcriber] Apple Silicon Detected. Mode: {self.mode}")
+        except Exception as e:
+            print(f"[Transcriber] Hardware detection failed: {e}. Fallback to CPU.")
+
+        # Model Configuration
+        if self.mode == "mac":
+            # Mac: MLX용 모델 경로
+            self.model_path = "mlx-community/whisper-large-v3-turbo-q4"
+            # self.model_path = "mlx-community/whisper-large-v3-mlx-4bit"
+        elif self.mode == "nvidia":
+            # NVIDIA: Faster-Whisper용 모델 사이즈 문자열
+            self.model_path = "large-v3"
+        else:
+            # Fallback (CPU)
+            self.model_path = "base"
+
+    def _transcribe_nvidia(self, wav_path, progress_callback, task_manager, task_id):
+        """
+        [NVIDIA Mode] Multiprocessing을 사용하여 Faster-Whisper 워커 실행
+        """
+        print(" -> Spawning Faster-Whisper Worker (NVIDIA)...")
+        queue = multiprocessing.Queue()
+        
+        # 워커 프로세스 생성 (2단계에서 만든 함수 실행)
+        worker_process = multiprocessing.Process(
+            target=run_faster_whisper_worker,
+            args=(wav_path, self.model_path, queue, "int8") # int8 양자화 사용
+        )
+        worker_process.start()
+        
+        output = None
+        
+        # Supervisor Loop
+        while worker_process.is_alive():
+            # (A) 취소 확인
+            if task_manager and task_id and task_manager.is_cancelled(task_id):
+                worker_process.terminate()
+                worker_process.join(timeout=1)
+                if worker_process.is_alive(): worker_process.kill()
+                raise TaskCancelledError("NVIDIA inference cancelled by user")
+            
+            # (B) Queue 처리
+            while not queue.empty():
+                msg = queue.get()
+                if msg["status"] == "progress":
+                    # 워커 진행률(0~100) -> 전체 파이프라인(20~85) 매핑
+                    local_pct = msg["percent"]
+                    global_pct = 20 + int(local_pct * 0.65)
+                    if progress_callback:
+                        progress_callback(global_pct, f"자막 생성 중 (CUDA)... ({local_pct}%)")
+                
+                elif msg["status"] == "success":
+                    output = msg["data"]
+                    break
+                
+                elif msg["status"] == "error":
+                    raise Exception(f"NVIDIA Worker Error: {msg.get('message')}")
+            
+            if output: break
+            time.sleep(0.1)
+            
+        worker_process.join()
+        
+        # 프로세스가 끝났는데 output이 없는 경우 (큐 잔여 확인)
+        if not output and not queue.empty():
+             msg = queue.get()
+             if msg["status"] == "success": output = msg["data"]
+
+        if not output:
+             raise Exception("Faster-Whisper worker failed without result.")
+             
+        return output
 
     def _convert_to_16k_wav(self, input_path, task_manager=None, task_id=None):
         """
@@ -354,106 +445,132 @@ class VideoTranscriber:
     # [Modify] 시그니처 변경: task_manager와 task_id를 선택적 인자로 받음
     def transcribe(self, video_path, progress_callback=None, task_manager=None, task_id=None):
         """
-        [Main Pipeline] 프로세스 격리 + 정밀 진행률 추적이 적용된 Transcribe 메서드
+        [Main Pipeline] Hardware-aware Transcribe
+        하드웨어 모드(NVIDIA vs Mac/CPU)에 따라 최적화된 추론 엔진을 선택하여 실행합니다.
         """
-        print(f"--- [Transcriber] Start processing: {video_path} ---")
+        print(f"--- [Transcriber] Start processing ({self.mode}): {video_path} ---")
         
         self._check_cancel(task_manager, task_id)
         
-        # 1. 오디오 변환 (FFmpeg 내부에서 0~20% 진행률 자동 업데이트)
-        # progress_callback은 여기서 쓰지 않고 FFmpeg 내부 로직이 task_manager를 직접 호출함
+        # 1. 오디오 변환 (공통) - FFmpeg가 0~20% 진행률 담당
         wav_path = self._convert_to_16k_wav(video_path, task_manager, task_id)
         if not wav_path: raise Exception("Audio conversion failed")
 
         try:
             self._check_cancel(task_manager, task_id)
-
-            # [New] 오디오 길이 계산 (Whisper 진행률 계산용)
-            try:
-                audio_info = sf.info(wav_path)
-                total_duration = audio_info.duration
-            except Exception:
-                total_duration = 100 # Fallback
-
-            # 2. VAD 실행
-            if progress_callback: progress_callback(20, "음성 구간 탐지(VAD) 실행 중...")
-            vad_segments = self._get_vad_timestamps(wav_path)
-            
-            self._check_cancel(task_manager, task_id)
-            if progress_callback: progress_callback(25, "AI 자막 생성 준비 중...")
-            
-            # 3. Whisper 실행
-            print(" -> Spawning Whisper Worker Process...")
-            queue = multiprocessing.Queue()
-            
-            # [New] total_duration을 인자로 전달
-            worker_process = multiprocessing.Process(
-                target=run_whisper_worker,
-                args=(wav_path, self.model_path, queue, total_duration)
-            )
-            worker_process.start()
-            
-            # [Supervisor Loop] 자식 프로세스 감시 및 메시지 처리
             output = None
-            
-            while worker_process.is_alive():
-                # (A) 취소 확인
-                if task_manager and task_id and task_manager.is_cancelled(task_id):
-                    worker_process.terminate()
-                    worker_process.join(timeout=1)
-                    if worker_process.is_alive(): worker_process.kill()
-                    raise TaskCancelledError("Whisper inference cancelled by user")
+            vad_segments = []
+
+            # --- [Branch A: NVIDIA Mode] ---
+            if self.mode == "nvidia":
+                if progress_callback: progress_callback(20, "AI 모델 로딩 중 (CUDA)...")
                 
-                # (B) Queue 메시지 처리 (Non-blocking)
-                while not queue.empty():
-                    msg = queue.get()
-                    if msg["status"] == "progress":
-                        # Worker의 0~100%를 전체의 25~85% 구간에 매핑
-                        local_pct = msg["percent"]
-                        global_pct = 25 + int(local_pct * 0.6)
-                        
-                        if progress_callback:
-                            progress_callback(global_pct, f"자막 생성 중... ({local_pct}%)")
+                # Faster-Whisper는 내장 VAD 성능이 우수하므로 별도 VAD 단계 생략하고 바로 실행
+                # 워커 프로세스 실행 (NVIDIA 전용)
+                raw_result = self._transcribe_nvidia(wav_path, progress_callback, task_manager, task_id)
+                
+                # 결과 포맷 통일 (Stable Whisper 호환 구조로 변환)
+                output = {
+                    "segments": raw_result["segments"],
+                    "language": raw_result.get("language", "ko"),
+                    "text": raw_result.get("text", "")
+                }
+
+            # --- [Branch B: Mac / CPU Mode] ---
+            else:
+                # [New] 오디오 길이 계산 (진행률 표시용)
+                try:
+                    audio_info = sf.info(wav_path)
+                    total_duration = audio_info.duration
+                except Exception:
+                    total_duration = 100.0
+
+                # 2. VAD 실행 (Mac 모드일 때만 수행하여 환각 최소화)
+                if progress_callback: progress_callback(20, "음성 구간 탐지(VAD) 실행 중...")
+                vad_segments = self._get_vad_timestamps(wav_path)
+                
+                self._check_cancel(task_manager, task_id)
+                if progress_callback: progress_callback(25, "AI 자막 생성 준비 중...")
+                
+                # 3. Whisper 실행 (기존 Mac/MLX 로직)
+                print(" -> Spawning Whisper Worker Process (MLX)...")
+                queue = multiprocessing.Queue()
+                
+                # 기존에 정의된 run_whisper_worker 함수 실행
+                worker_process = multiprocessing.Process(
+                    target=run_whisper_worker, 
+                    args=(wav_path, self.model_path, queue, total_duration)
+                )
+                worker_process.start()
+                
+                # [Supervisor Loop for Mac] 자식 프로세스 감시 및 메시지 처리
+                while worker_process.is_alive():
+                    # (A) 취소 확인
+                    if task_manager and task_id and task_manager.is_cancelled(task_id):
+                        worker_process.terminate()
+                        worker_process.join(timeout=1)
+                        if worker_process.is_alive(): worker_process.kill()
+                        raise TaskCancelledError("Whisper inference cancelled by user")
                     
-                    elif msg["status"] == "success":
-                        output = msg["data"]
-                        break # 성공 메시지 받으면 루프 탈출 가능 (프로세스는 곧 죽음)
+                    # (B) Queue 메시지 처리
+                    while not queue.empty():
+                        msg = queue.get()
+                        if msg["status"] == "progress":
+                            # Mac Whisper 진행률(0~100) -> 전체 파이프라인(25~85) 매핑
+                            local_pct = msg["percent"]
+                            global_pct = 25 + int(local_pct * 0.6)
+                            if progress_callback: 
+                                progress_callback(global_pct, f"자막 생성 중... ({local_pct}%)")
                         
-                    elif msg["status"] == "error":
-                        raise Exception(f"Worker Error: {msg.get('message')}")
+                        elif msg["status"] == "success":
+                            output = msg["data"]
+                            break # 성공 메시지 받으면 루프 탈출 가능
+                            
+                        elif msg["status"] == "error":
+                            raise Exception(f"Worker Error: {msg.get('message')}")
+                    
+                    if output: break # 결과 받았으면 루프 종료
+                    time.sleep(0.1) # CPU 과부하 방지
+                
+                worker_process.join()
 
-                if output: break # 결과 받았으면 루프 종료
-                time.sleep(0.1) # CPU 과부하 방지
+                # 프로세스 종료 후 큐에 남은 메시지 확인
+                if not output and not queue.empty():
+                     msg = queue.get()
+                     if msg["status"] == "success": output = msg["data"]
+                     elif msg["status"] == "error": raise Exception(f"Worker Error: {msg.get('message')}")
+                
+                if not output: 
+                    raise Exception("Whisper process failed or crashed.")
 
-            # 프로세스 종료 대기
-            worker_process.join()
-
-            if not output and queue.empty():
-                 # 큐에 남은 메시지 한번 더 확인 (프로세스 종료 직전 보낸 것)
-                 if not queue.empty():
-                    msg = queue.get()
-                    if msg["status"] == "success": output = msg["data"]
-                    elif msg["status"] == "error": raise Exception(f"Worker Error: {msg.get('message')}")
-            
-            if not output:
-                 raise Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
-            
+            # --- [Common: Post Processing] ---
             # 4. 후처리 (85% ~ 100%)
             if progress_callback: progress_callback(85, "데이터 정제 및 저장 중...")
             
             raw_segments = output.get('segments', [])
-            clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
+            
+            # NVIDIA 모드가 아니면 VAD 기반 환각 필터링 적용 (Faster-Whisper는 이미 내부 VAD 적용됨)
+            if self.mode != "nvidia":
+                clean_segments = self._filter_hallucinations(raw_segments, vad_segments)
+            else:
+                clean_segments = raw_segments
+
+            # 텍스트 정제
             for seg in clean_segments:
                 if 'text' in seg: seg['text'] = self._clean_text(seg['text'])
+            
+            # 구간 중복 제거 및 시간 보정
             clean_segments = self._sanitize_segments(clean_segments)
 
-            # 저장 로직 (Stable Whisper)
+            # 저장 로직 (Stable Whisper 활용)
             composition = {
                 "text": " ".join([s['text'] for s in clean_segments]),
                 "segments": clean_segments,
                 "language": output.get("language", "ko")
             }
             result_obj = stable_whisper.WhisperResult(composition)
+            
+            # 자막 분할 규칙 적용 (가독성 향상)
             result_obj.split_by_length(max_chars=25, max_words=None)
             result_obj.split_by_gap(0.5)
 
@@ -462,7 +579,7 @@ class VideoTranscriber:
             vtt_path = os.path.join(self.output_dir, f"{base_name}.vtt")
             json_path = os.path.join(self.output_dir, f"{base_name}_transcript.json")
 
-            # [Step 1] JSON 저장 (원본 텍스트 유지 - 요약/블로그용)
+            # [Step 1] JSON 저장 (원본 텍스트 유지)
             final_data = []
             for idx, seg in enumerate(result_obj.segments, 1):
                 final_data.append({
@@ -475,12 +592,11 @@ class VideoTranscriber:
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(final_data, f, ensure_ascii=False, indent=2)
 
-            # [Step 2] 자막 파일 생성 및 후처리 (문장 부호 제거 - 자막용)
-            # stable_whisper로 자막 파일 우선 생성
+            # [Step 2] 자막 파일 생성 (SRT, VTT)
             result_obj.to_srt_vtt(srt_path, word_level=False)
             result_obj.to_srt_vtt(vtt_path, word_level=False)
 
-            # 생성된 자막 파일에서 문장 부호 제거 후 덮어쓰기
+            # 문장 부호 제거 (선택 사항)
             self._remove_punctuation_from_subtitle_file(srt_path)
             self._remove_punctuation_from_subtitle_file(vtt_path)
 

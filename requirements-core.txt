@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+yt-dlp
+google-genai
+python-dotenv
+requests
+soundfile
+numpy
+aiofiles

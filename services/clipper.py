@@ -3,8 +3,10 @@ import re
 import subprocess
 import zipfile
 import asyncio
-import uuid                     # [추가] UUID 생성을 위해 필수
-from functools import partial   # [추가] 비동기 실행 시 인자 전달을 위해 필수
+import uuid
+from functools import partial
+import platform  # [Add] 플랫폼 감지
+import torch     # [Add] CUDA 감지
 
 class VideoClipper:
     """
@@ -15,6 +17,59 @@ class VideoClipper:
     def __init__(self, temp_dir="static/temp"):
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # [New] Hardware Detection Logic
+        self.mode = "cpu"
+        try:
+            if torch.cuda.is_available():
+                self.mode = "nvidia"
+            elif platform.system() == "Darwin" and platform.processor() == "arm":
+                self.mode = "mac"
+        except Exception:
+            pass
+        
+        print(f"[Clipper] Initialized in {self.mode} mode.")
+
+    def _get_ffmpeg_video_codec_args(self):
+        """
+        [Helper] 실행 환경에 최적화된 FFmpeg 비디오 인코딩 인자를 반환합니다.
+        '원본 화질에 맞춰서 알아서 비트레이트 조절'을 위해 고정 비트레이트 대신 
+        품질 기반 가변 비트레이트(VBR) 옵션(CRF, CQ, q:v)을 사용합니다.
+        """
+        common_args = [
+            "-pix_fmt", "yuv420p",  # 모바일/웹 호환성 표준
+            "-profile:v", "main"    # 호환성 프로필
+        ]
+
+        if self.mode == "nvidia":
+            # NVIDIA NVENC: Constant Quality (CQ) 모드 기반 VBR
+            # -cq: 1(무손실) ~ 51(최악). 20~23 정도가 원본 화질 유지에 적절
+            return [
+                "-c:v", "h264_nvenc",
+                "-preset", "p4",      # 성능과 화질의 균형
+                "-rc:v", "vbr",       # 가변 비트레이트 모드 명시
+                "-cq", "23",          # 시각적 무손실에 가까운 품질 값
+                "-b:v", "0",          # 비트레이트 제한 해제 (CQ 값에 따라 자동 조절)
+                "-maxrate", "50M",    # 피크 비트레이트 안전장치 (선택사항, 충분히 크게)
+                "-bufsize", "100M"
+            ] + common_args
+            
+        elif self.mode == "mac":
+            # Apple VideoToolbox: Quality 값 기반 VBR
+            # -q:v: 0~100. 65~75 정도가 적절한 고화질.
+            return [
+                "-c:v", "h264_videotoolbox",
+                "-q:v", "70",         # 원본 수준의 고화질 (약 CRF 20~21 상당)
+            ] + common_args
+            
+        else:
+            # CPU (libx264): Constant Rate Factor (CRF)
+            # -crf: 0(무손실) ~ 51(최악). 18~23 추천.
+            return [
+                "-c:v", "libx264",
+                "-preset", "faster",
+                "-crf", "20"          # 고화질 VBR 설정
+            ] + common_args        
 
     def _seconds_to_time_str(self, seconds, separator=","):
         """
@@ -46,96 +101,78 @@ class VideoClipper:
 
     async def cut_video(self, input_path, start_sec, end_sec, output_filename="clip.mp4", task_manager=None, task_id=None):
         """
-        [Async] FFmpeg를 비동기 프로세스로 실행하며, stderr을 파싱하여 실시간 진행률을 반영합니다.
-        [Quality & Fix] 원본 화질 유지를 위해 품질 기반 인코딩(VBR)을 사용하되, Safari 호환성을 위해 yuv420p를 강제합니다.
+        [Async] FFmpeg를 사용하여 영상을 자릅니다. (가변 비트레이트 적용)
         """
         output_path = os.path.join(self.temp_dir, output_filename)
         
-        # 잘라낼 영상의 길이 (진행률 분모)
         duration = end_sec - start_sec
-        if duration <= 0: duration = 1 # 0으로 나누기 방지
+        if duration <= 0: duration = 1.0
 
         # [FFmpeg Command Configuration]
         cmd = [
             "ffmpeg", 
             "-i", input_path,
             "-ss", str(start_sec),
-            "-to", str(end_sec),
-            "-c:v", "h264_videotoolbox", # Apple Silicon 가속 (필요시 libx264로 변경)
-            
-            # [수정된 부분] 고정 비트레이트(-b:v) 대신 품질 옵션(-q:v) 사용
-            "-q:v", "65",                # 0~100 사이 값. 65는 높은 화질과 적절한 용량의 균형점 (원본 수준 유지)
-            
-            # [Safari 호환성 유지] 화질은 챙기되, 재생 호환성은 놓치지 않음
-            "-pix_fmt", "yuv420p",       # 모바일/웹 표준 색상 포맷
-            "-profile:v", "main",        # 호환성 프로필
-            
-            "-c:a", "aac", "-b:a", "192k",
+            "-to", str(end_sec)
+        ]
+        
+        # 하드웨어별 가변 비트레이트 코덱 옵션 적용
+        cmd.extend(self._get_ffmpeg_video_codec_args())
+        
+        # 오디오 및 기타 옵션
+        cmd.extend([
+            "-c:a", "aac", 
+            "-b:a", "192k",       # 오디오는 192k로 충분한 음질 확보
             "-y",
             "-hide_banner",
-            "-loglevel", "info",         # 진행률 파싱을 위해 info 레벨 필수
+            "-loglevel", "info",
             output_path
-        ]
+        ])
 
-        print(f"--- [Clipper] Starting Async Cut (High Quality): {output_filename} ---")
+        print(f"--- [Clipper] Starting Async Cut ({self.mode}, VBR): {output_filename} ---")
         
-        # 에러 발생 시 원인을 파악하기 위해 stderr 로그를 모아둘 버퍼
         stderr_log = []
 
         try:
-            # 1. 비동기 서브프로세스 생성 (stderr Pipe 연결)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE
             )
 
-            # 2. stderr 비동기 읽기 Loop (Real-time Parsing)
             while True:
-                # [Check Cancel] 작업 취소 확인
+                # [Check Cancel]
                 if task_manager and task_id and task_manager.is_cancelled(task_id):
                     try:
                         process.terminate() 
                         await process.wait() 
-                        print(f"--- [Clipper] Killed process for task {task_id}")
-                    except Exception:
-                        pass
-                    if os.path.exists(output_path):
-                        os.remove(output_path)
+                    except Exception: pass
+                    
+                    if os.path.exists(output_path): os.remove(output_path)
                     raise Exception("Clip generation cancelled by user")
 
                 try:
-                    # FFmpeg 진행률 로그 캐치 (\r)
                     line_bytes = await process.stderr.readuntil(b'\r')
                 except asyncio.IncompleteReadError as e:
                     line_bytes = e.partial
-                    if not line_bytes:
-                        break 
-                except Exception:
-                    break
+                    if not line_bytes: break 
+                except Exception: break
 
-                # 디코딩
                 line = line_bytes.decode('utf-8', errors='replace').strip()
+                if line: stderr_log.append(line)
                 
-                # 로그 버퍼에 저장 (에러 분석용)
-                if line:
-                    stderr_log.append(line)
-                
-                # time=00:00:00.00 패턴 파싱
+                # 진행률 파싱
                 if 'time=' in line:
                     match = re.search(r'time=(\d{2}:\d{2}:\d{2}\.\d+)', line)
                     if match:
                         time_str = match.group(1)
                         try:
-                            # 시:분:초.밀리초 -> 초 단위 변환
                             h, m, s = time_str.split(':')
                             current_seconds = int(h) * 3600 + int(m) * 60 + float(s)
                             
-                            # 로컬 진행률 계산
                             percent = int((current_seconds / duration) * 100)
                             percent = min(100, max(0, percent))
                             
-                            # TaskManager 업데이트 (구간: 10% -> 60%)
                             global_progress = 10 + int(percent * 0.5)
                             
                             if task_manager and task_id:
@@ -144,10 +181,8 @@ class VideoClipper:
                                     global_progress, 
                                     f"영상 자르는 중... ({percent}%)"
                                 )
-                        except Exception:
-                            pass 
+                        except Exception: pass 
 
-            # 3. 프로세스 종료 대기 및 결과 확인
             await process.wait()
             
             if process.returncode != 0:
@@ -310,14 +345,13 @@ class VideoClipper:
 
     async def merge_segments(self, input_path, segments, output_filename="shorts.mp4", sub_input_path=None, progress_callback=None, task_manager=None, task_id=None):
         """
-        [Async] 불연속적인 여러 구간을 병합합니다.
-        [Quality & Fix] 원본 화질 유지를 위해 품질 기반 VBR 인코딩을 사용하며, yuv420p 포맷으로 호환성을 보장합니다.
+        [Async] 불연속적인 여러 구간을 병합합니다. (가변 비트레이트 적용)
         """
         output_video_path = os.path.join(self.temp_dir, output_filename)
         output_sub_path = None
         output_vtt_path = None
         
-        # 1. 자막 병합 처리
+        # 1. 자막 병합 처리 (기존 로직 유지)
         if sub_input_path and os.path.exists(sub_input_path):
             try:
                 base_name = os.path.splitext(output_filename)[0]
@@ -339,9 +373,9 @@ class VideoClipper:
             except Exception as e:
                 print(f"[Clipper] Warning: Failed to merge subtitles: {e}")
 
-        # 2. 영상 병합 처리 (FFmpeg)
+        # 2. 영상 병합 처리
         total_duration = sum(seg['end'] - seg['start'] for seg in segments)
-        if total_duration <= 0: total_duration = 1
+        if total_duration <= 0: total_duration = 1.0
 
         filter_parts = []
         concat_input = ""
@@ -350,6 +384,7 @@ class VideoClipper:
             start = f"{seg['start']:.3f}"
             end = f"{seg['end']:.3f}"
             
+            # 비디오/오디오 트림 및 PTS 재설정
             filter_parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}]")
             filter_parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}]")
             concat_input += f"[v{i}][a{i}]"
@@ -363,25 +398,23 @@ class VideoClipper:
             "-i", input_path,
             "-filter_complex", filter_complex_str,
             "-map", "[outv]", 
-            "-map", "[outa]",
-            "-c:v", "h264_videotoolbox", # macOS Hardware Acceleration
-            
-            # [수정된 부분] 고정 비트레이트(-b:v) 제거 -> 품질 기반(-q:v) 적용
-            "-q:v", "65",                # 원본 수준의 고화질 유지 (VBR)
-            
-            # [Safari 호환성 유지]
-            "-pix_fmt", "yuv420p",       # 모바일/웹 표준 색상 포맷
-            "-profile:v", "main",        # 호환성 프로필
-            
+            "-map", "[outa]"
+        ]
+        
+        # 하드웨어별 가변 비트레이트 코덱 옵션 적용
+        cmd.extend(self._get_ffmpeg_video_codec_args())
+        
+        # 오디오 및 공통 옵션
+        cmd.extend([
             "-c:a", "aac", 
             "-b:a", "192k",
             "-y",
             "-hide_banner",
             "-loglevel", "info", 
             output_video_path
-        ]
+        ])
 
-        print(f"--- [Clipper] Starting Merge Segments (High Quality): {len(segments)} cuts, Duration: {total_duration:.2f}s ---")
+        print(f"--- [Clipper] Starting Merge Segments ({self.mode}, VBR): {len(segments)} cuts ---")
 
         stderr_log = []
         try:

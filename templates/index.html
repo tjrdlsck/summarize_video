@@ -1070,20 +1070,18 @@
                                                 onTimeUpdate={handleTimeUpdate}
                                                 onLoadedMetadata={(e) => setTotalDuration(e.target.duration)}
                                                 onPlay={() => {
-                                                    // [New] 숏츠 재생이 아니라면 메인 오버레이 초기화
                                                     if (!activeShortsId) setCurrentShortsSubtitle("");
                                                 }}
                                             >
-                                                {/* 직접 src 속성 대신 source 태그 사용 권장 */}
+                                                {/* [수정] encodeURIComponent 적용하여 특수문자/한글 경로 오류 방지 */}
                                                 <source
-                                                    src={`/api/stream/video/${playerData.video_filename}`}
+                                                    src={`/api/stream/video/${encodeURIComponent(playerData.video_filename)}`}
                                                     type="video/mp4"
                                                 />
                                                 <p className="text-white text-center py-10">
                                                     브라우저가 비디오 재생을 지원하지 않습니다.
                                                 </p>
 
-                                                {/* VTT 자막 트랙 (선택적) */}
                                                 {playerData.vtt_filename && (
                                                     <track
                                                         kind="subtitles"

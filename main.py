@@ -3,8 +3,10 @@ import uuid
 import asyncio
 import json
 import shutil
-import unicodedata  # [Add] 유니코드 정규화를 위해 추가
+import unicodedata
 import re
+import platform  # [Add] 시스템 정보 확인용
+import torch     # [Add] GPU 확인용
 from functools import partial
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
@@ -33,17 +35,43 @@ from services.premiere_exporter import PremiereExporter
 async def lifespan(app: FastAPI):
     """
     앱의 수명 주기(시작과 끝)를 관리하는 함수입니다.
-    기존 @app.on_event("startup")을 대체합니다.
+    서버 시작 시 하드웨어 가속 지원 여부를 체크하고 로그를 출력합니다.
     """
     # [Startup] 앱 시작 시 실행
+    print("\n" + "="*60)
+    print("       🚀 AI Video Analyst (NVIDIA Edition) v2.0       ")
+    print("="*60)
+
+    # 1. 하드웨어 감지 및 모드 출력
+    system_info = f"{platform.system()} {platform.release()} ({platform.machine()})"
+    print(f"🖥️  System: {system_info}")
+
+    try:
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
+            print(f"✅ GPU Detected: {gpu_name} (VRAM: {vram:.2f} GB)")
+            print("🔥 Performance Mode: NVIDIA Acceleration (Faster-Whisper + NVENC)")
+        elif platform.system() == "Darwin" and platform.processor() == "arm":
+            print("✅ System: Apple Silicon Detected")
+            print("🍎 Performance Mode: Mac Optimization (MLX + VideoToolbox)")
+        else:
+            print("⚠️  No Accelerator Detected.")
+            print("🐢 Performance Mode: CPU Fallback (Slow)")
+    except Exception as e:
+        print(f"⚠️  Hardware Check Error: {e}")
+        print("🐢 Performance Mode: CPU Fallback (Default)")
+
+    print("="*60 + "\n")
+
     print("--- [Lifespan] Starting Background Worker... ---")
     worker_task = asyncio.create_task(worker())
     
-    yield  # 앱이 실행되는 동안 여기서 대기 (Control Yield)
+    yield  # 앱이 실행되는 동안 대기
     
-    # [Shutdown] 앱 종료 시 실행 (필요시 자원 해제 로직 추가)
+    # [Shutdown] 앱 종료 시 실행
     print("--- [Lifespan] Shutting down... ---")
-    # 예: worker_task.cancel() 등을 여기서 수행할 수 있음
+    # 필요시 worker_task.cancel() 등 추가
 
 # --- [App Initialization] ---
 # [수정] lifespan 파라미터를 생성자에 전달
@@ -926,28 +954,24 @@ async def download_temp_file(filename: str, background_tasks: BackgroundTasks):
 @app.get("/api/stream/video/{filename}")
 async def stream_video(filename: str, request: Request, range: str = Header(None)):
     """
-    [Safari/Mobile 호환] 비디오 스트리밍 전용 엔드포인트
-    브라우저의 Range Header를 해석하여, 파일의 특정 바이트 청크(Chunk)만 전송합니다.
-    이를 통해 HTTP 206 Partial Content 응답을 구현합니다.
+    [Safari/Mobile/SSH 최적화] 비디오 스트리밍 전용 엔드포인트
+    Chunk Size를 1MB로 증설하여 네트워크 오버헤드를 줄입니다.
     """
+    # 1. 파일 경로 탐색
     video_path = os.path.join("static/videos", filename)
-    
     if not os.path.exists(video_path):
-        # 만약 원본 폴더에 없으면 숏츠 폴더(clips)도 확인 (호환성)
         video_path = os.path.join("static/clips", filename)
         if not os.path.exists(video_path):
             raise HTTPException(status_code=404, detail="Video not found")
 
     file_size = os.path.getsize(video_path)
     
-    # Range 헤더 파싱 (예: "bytes=0-")
-    # Safari는 이 처리가 없으면 영상을 절대 재생하지 않습니다.
+    # 2. Range 헤더 파싱
     byte_start = 0
     byte_end = file_size - 1
     
     if range:
         try:
-            # "bytes=0-1024" 형식을 파싱
             range_key, range_value = range.strip().split("=")
             if range_key == "bytes":
                 range_parts = range_value.split("-")
@@ -955,27 +979,29 @@ async def stream_video(filename: str, request: Request, range: str = Header(None
                 if len(range_parts) > 1 and range_parts[1]:
                     byte_end = int(range_parts[1])
         except Exception:
-            # 파싱 실패 시 전체 파일 전송 모드로 fallback
             pass
 
-    # 청크 길이 계산 ($L = E - S + 1$)
-    chunk_length = byte_end - byte_start + 1
+    # [수정] 청크 사이즈 계산: 요청된 길이와 1MB 중 작은 값 선택
+    # SSH 환경에서는 요청 횟수를 줄이는 것이 속도에 유리합니다.
+    MAX_CHUNK_SIZE = 1024 * 1024  # 1MB (기존 64KB -> 1MB 상향)
     
-    # 파일 열기 및 제너레이터 생성
+    # 브라우저가 요청한 길이
+    requested_length = byte_end - byte_start + 1
+    
+    # 실제 전송할 길이 (1MB 단위로 자름, 단 마지막 조각은 남은 만큼만)
+    chunk_length = min(MAX_CHUNK_SIZE, requested_length)
+    
+    # 실제 전송 끝 지점 재조정 (Range 헤더 응답용)
+    byte_end = byte_start + chunk_length - 1
+
+    # 3. 제너레이터 (파일 읽기)
     def iterfile():
         with open(video_path, "rb") as f:
             f.seek(byte_start)
-            # 한 번에 너무 많은 데이터를 읽지 않도록 64KB 단위로 전송
-            remaining = chunk_length
-            while remaining > 0:
-                chunk_size = min(64 * 1024, remaining)
-                data = f.read(chunk_size)
-                if not data:
-                    break
-                remaining -= len(data)
-                yield data
+            data = f.read(chunk_length)
+            yield data
 
-    # 헤더 설정
+    # 4. 헤더 설정
     headers = {
         "Content-Range": f"bytes {byte_start}-{byte_end}/{file_size}",
         "Accept-Ranges": "bytes",
@@ -985,7 +1011,7 @@ async def stream_video(filename: str, request: Request, range: str = Header(None
 
     return StreamingResponse(
         iterfile(),
-        status_code=206, # [중요] 206 Partial Content
+        status_code=206,
         headers=headers,
         media_type="video/mp4"
     )
