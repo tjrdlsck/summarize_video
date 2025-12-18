@@ -9,8 +9,7 @@ import urllib.parse
 class PremiereExporter:
     """
     영상 파일과 구간(Segment) 정보를 받아 Adobe Premiere Pro 호환 XML(FCP7 포맷)을 생성하는 클래스.
-    [Update] 경로 방식을 '상대 경로(./)'로 변경하여, XML과 영상이 같은 폴더에 있을 때 
-    100% 자동 연결되도록 개선했습니다.
+    [Fix] 오디오 샘플 레이트 불일치로 인한 다빈치 리졸브 오디오 누락 문제 해결
     """
     
     def __init__(self, output_dir="static/temp"):
@@ -19,14 +18,14 @@ class PremiereExporter:
 
     def _get_video_info(self, video_path):
         """
-        ffprobe를 사용하여 영상의 FPS, 해상도, 오디오 샘플 레이트 등을 추출합니다.
+        ffprobe를 사용하여 영상 정보를 추출하되, 
+        [Mono Test] 오디오 채널을 강제로 1로 고정하여 XML이 모노로 생성되도록 유도합니다.
         """
         try:
             cmd = [
                 "ffprobe", 
                 "-v", "error", 
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height,r_frame_rate,duration,nb_frames",
+                "-show_entries", "stream=width,height,r_frame_rate,duration,nb_frames,sample_rate,channels,bits_per_raw_sample,codec_name,codec_type",
                 "-of", "json",
                 video_path
             ]
@@ -34,45 +33,75 @@ class PremiereExporter:
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             info = json.loads(result.stdout)
             
-            stream = info['streams'][0]
-            width = int(stream['width'])
-            height = int(stream['height'])
-            
-            r_frame_rate = stream['r_frame_rate']
-            num, den = map(int, r_frame_rate.split('/'))
-            fps = num / den
-            
+            # 스트림 분류
+            v_stream = next((s for s in info['streams'] if s['codec_type'] == 'video'), None)
+            a_stream = next((s for s in info['streams'] if s['codec_type'] == 'audio'), None)
+
+            # 비디오 정보
+            width = 1920
+            height = 1080
+            fps = 30.0
+            duration_sec = 0.0
+            total_frames = 0
+
+            if v_stream:
+                width = int(v_stream.get('width', 1920))
+                height = int(v_stream.get('height', 1080))
+                
+                r_frame_rate = v_stream.get('r_frame_rate', '30/1')
+                num, den = map(int, r_frame_rate.split('/'))
+                fps = num / den if den != 0 else 30.0
+                
+                duration_sec = float(v_stream.get('duration', 0))
+                total_frames = int(v_stream.get('nb_frames', 0))
+                
+                if total_frames == 0 and duration_sec > 0:
+                    total_frames = int(duration_sec * fps)
+
             timebase = int(round(fps))
             ntsc = "TRUE" if (timebase != fps) else "FALSE"
+
+            # [Mono Force Fix] 오디오 정보 추출
+            audio_rate = 48000
+            audio_depth = 16
+            audio_channels = 1  # [강제 변경] 실제 파일이 2채널이어도 1채널로 인식시킴
             
+            if a_stream:
+                audio_rate = int(a_stream.get('sample_rate', 48000))
+                audio_depth = int(a_stream.get('bits_per_raw_sample', 16))
+                if audio_depth == 0: audio_depth = 16
+                # audio_channels = int(a_stream.get('channels', 2)) -> 사용 안 함
+
             return {
                 "width": width,
                 "height": height,
                 "fps": fps,
                 "timebase": timebase,
                 "ntsc": ntsc,
-                "duration_sec": float(stream.get('duration', 0)),
-                "total_frames": int(stream.get('nb_frames', 0))
+                "duration_sec": duration_sec,
+                "total_frames": total_frames,
+                "audio_rate": audio_rate,   
+                "audio_depth": audio_depth,
+                "audio_channels": audio_channels # 1로 고정됨
             }
             
         except Exception as e:
             print(f"[Exporter Error] Failed to probe video info: {e}")
             return {
                 "width": 1920, "height": 1080, "fps": 30.0, 
-                "timebase": 30, "ntsc": "FALSE", "duration_sec": 0, "total_frames": 0
+                "timebase": 30, "ntsc": "FALSE", "duration_sec": 0, "total_frames": 0,
+                "audio_rate": 48000, "audio_depth": 16, "audio_channels": 1 # 오류 시에도 1채널
             }
 
     def _sec_to_frame(self, seconds, fps):
         return int(round(seconds * fps))
 
     def _create_clip_item(self, idx, track_type, meta, video_name, video_uuid, relative_filename, duration_frame, current_timeline_frame, in_frame, out_frame):
-        """
-        [Helper] 클립 아이템 생성. 
-        [Fix] macOS 호환성을 위해 파일명을 URL 인코딩(Percent Encoding) 처리합니다.
-        맥은 경로 내의 특수문자나 공백 처리에 매우 엄격하므로 이 처리가 필수적입니다.
-        """
         clip_id = f"clipitem-{track_type}-{idx+1}"
+        encoded_filename = urllib.parse.quote(relative_filename)
         
+        # [수정] XML 내 오디오 정보를 메타데이터(meta) 기반으로 동적 생성 + channelcount 추가
+        # File 노드 내부의 media 정의
         media_xml = ""
         if track_type == "video":
             media_xml = f"""
@@ -82,23 +111,32 @@ class PremiereExporter:
                     <height>{meta['height']}</height>
                   </samplecharacteristics>
                 </video>
-            """
-        else:
-            media_xml = """
                 <audio>
                   <samplecharacteristics>
-                    <depth>16</depth>
-                    <samplerate>48000</samplerate>
+                    <depth>{meta['audio_depth']}</depth>
+                    <samplerate>{meta['audio_rate']}</samplerate>
+                    <channelcount>{meta['audio_channels']}</channelcount>
+                  </samplecharacteristics>
+                </audio>
+            """
+        else:
+            # 오디오 트랙용 미디어 정의도 동일하게 가져감 (Source File은 하나이므로)
+            media_xml = f"""
+                <video>
+                  <samplecharacteristics>
+                    <width>{meta['width']}</width>
+                    <height>{meta['height']}</height>
+                  </samplecharacteristics>
+                </video>
+                <audio>
+                  <samplecharacteristics>
+                    <depth>{meta['audio_depth']}</depth>
+                    <samplerate>{meta['audio_rate']}</samplerate>
+                    <channelcount>{meta['audio_channels']}</channelcount>
                   </samplecharacteristics>
                 </audio>
             """
 
-        # [핵심 변경 포인트]
-        # 1. 파일명을 URL 인코딩합니다. (예: "My Video.mp4" -> "My%20Video.mp4")
-        encoded_filename = urllib.parse.quote(relative_filename)
-        
-        # 2. file://localhost/ 뒤에 인코딩된 파일명을 붙입니다.
-        # 이렇게 하면 macOS에서도 문법적으로 완벽한 URI로 인식하여 파싱 오류를 방지합니다.
         file_node = f"""
             <file id="file-{video_uuid}">
               <name>{video_name}</name>
@@ -109,30 +147,25 @@ class PremiereExporter:
               </rate>
               <duration>{meta['total_frames']}</duration>
               <media>
-                <video>
-                  <samplecharacteristics>
-                    <width>{meta['width']}</width>
-                    <height>{meta['height']}</height>
-                  </samplecharacteristics>
-                </video>
-                <audio>
-                  <samplecharacteristics>
-                    <depth>16</depth>
-                    <samplerate>48000</samplerate>
-                  </samplecharacteristics>
-                </audio>
+                {media_xml}
               </media>
             </file>
         """
 
+        # [수정] 소스 트랙 매핑 로직 개선 (Stereo 지원)
         sourcetrack = ""
         if track_type == "audio":
-            sourcetrack = """
-            <sourcetrack>
-                <mediatype>audio</mediatype>
-                <trackindex>1</trackindex>
-            </sourcetrack>
-            """
+            # 채널 수만큼 반복하여 소스 트랙 매핑 생성
+            # 예: Stereo(2ch) -> sourcetrack 1, sourcetrack 2 생성하여 스테레오 클립으로 인식 유도
+            tracks_xml = ""
+            for ch in range(1, meta['audio_channels'] + 1):
+                tracks_xml += f"""
+                <sourcetrack>
+                    <mediatype>audio</mediatype>
+                    <trackindex>{ch}</trackindex>
+                </sourcetrack>
+                """
+            sourcetrack = tracks_xml
 
         return f"""
           <clipitem id="{clip_id}">
@@ -155,19 +188,12 @@ class PremiereExporter:
     def create_xml(self, video_path, segments, output_filename="export.xml"):
         meta = self._get_video_info(video_path)
         
-        # 1. 파일명 정제 (UUID 제거하여 원본 파일명 추출)
         server_filename = os.path.basename(video_path)
         original_filename = re.sub(r'^[0-9a-fA-F]{8}_', '', server_filename)
-        
-        # 2. 상대 경로용 파일명 준비
-        # 이전에는 fake_abs_path(절대경로)를 만들었지만, 
-        # 이제는 단순히 파일명(original_filename)만 있으면 됩니다.
-        
         video_uuid = str(uuid.uuid4())
         
         video_track_items = []
         audio_track_items = []
-        
         current_timeline_frame = 0 
         
         for idx, seg in enumerate(segments):
@@ -180,14 +206,12 @@ class PremiereExporter:
             
             if duration_frame <= 0: continue
 
-            # 비디오 클립 (파일명만 전달)
             v_item = self._create_clip_item(
                 idx, "video", meta, original_filename, video_uuid, original_filename,
                 duration_frame, current_timeline_frame, in_frame, out_frame
             )
             video_track_items.append(v_item)
             
-            # 오디오 클립 (파일명만 전달)
             a_item = self._create_clip_item(
                 idx, "audio", meta, original_filename, video_uuid, original_filename,
                 duration_frame, current_timeline_frame, in_frame, out_frame
@@ -249,35 +273,195 @@ class PremiereExporter:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(final_xml_str)
             
-        print(f"--- [Exporter] XML Generated (Relative Path): {output_path} ---")
+        print(f"--- [Exporter] XML Generated: {output_path} ---")
         return output_path
-    # [Add] 프리미어 프로 라벨 색상 매핑 헬퍼
-    def _get_label_index(self, category):
-        """
-        카테고리에 따른 프리미어 프로 라벨 색상 인덱스를 반환합니다.
-        (0: Violet, 1: Iris, 2: Caribbean, 3: Lavender, 4: Cerulean, 
-         5: Forest, 6: Rose, 7: Mango, 8: Purple)
-        """
-        mapping = {
-            "Hook": 6,      # Rose (Red/Pink)
-            "Story": 1,     # Iris (Blue)
-            "Insight": 7,   # Mango (Orange)
-            "B-Roll": 3,    # Lavender (Purple)
-        }
-        return mapping.get(category, 0) # Default: Violet
 
-    # [Add] 러프컷용 클립 아이템 생성 헬퍼 (마커, 라벨, 트랙 지원)
-    def _create_rough_clip_item(self, idx, track_type, meta, video_name, video_uuid, relative_filename, start_sec, end_sec, current_tl_frame, category=None, title=None, reason=None):
+    def _get_label_index(self, category):
+        mapping = {
+            "Hook": 6, "Story": 1, "Insight": 7, "B-Roll": 3
+        }
+        return mapping.get(category, 0)
+
+    def _get_default_video_filters(self, duration_frame):
+        """
+        [Helper] 다빈치 리졸브(Timeline 1.xml) 스타일의 기본 비디오 필터(Motion, Crop, Opacity)를 생성합니다.
+        """
+        return f"""
+            <compositemode>normal</compositemode>
+            <filter>
+                <enabled>TRUE</enabled>
+                <start>0</start>
+                <end>{duration_frame}</end>
+                <effect>
+                    <name>Basic Motion</name>
+                    <effectid>basic</effectid>
+                    <effecttype>motion</effecttype>
+                    <mediatype>video</mediatype>
+                    <effectcategory>motion</effectcategory>
+                    <parameter>
+                        <name>Scale</name>
+                        <parameterid>scale</parameterid>
+                        <value>100</value>
+                        <valuemin>0</valuemin>
+                        <valuemax>10000</valuemax>
+                    </parameter>
+                    <parameter>
+                        <name>Center</name>
+                        <parameterid>center</parameterid>
+                        <value>
+                            <horiz>0</horiz>
+                            <vert>0</vert>
+                        </value>
+                    </parameter>
+                    <parameter>
+                        <name>Rotation</name>
+                        <parameterid>rotation</parameterid>
+                        <value>0</value>
+                        <valuemin>-100000</valuemin>
+                        <valuemax>100000</valuemax>
+                    </parameter>
+                    <parameter>
+                        <name>Anchor Point</name>
+                        <parameterid>centerOffset</parameterid>
+                        <value>
+                            <horiz>0</horiz>
+                            <vert>0</vert>
+                        </value>
+                    </parameter>
+                </effect>
+            </filter>
+            <filter>
+                <enabled>TRUE</enabled>
+                <start>0</start>
+                <end>{duration_frame}</end>
+                <effect>
+                    <name>Crop</name>
+                    <effectid>crop</effectid>
+                    <effecttype>motion</effecttype>
+                    <mediatype>video</mediatype>
+                    <effectcategory>motion</effectcategory>
+                    <parameter>
+                        <name>left</name>
+                        <parameterid>left</parameterid>
+                        <value>0</value>
+                        <valuemin>0</valuemin>
+                        <valuemax>100</valuemax>
+                    </parameter>
+                    <parameter>
+                        <name>right</name>
+                        <parameterid>right</parameterid>
+                        <value>0</value>
+                        <valuemin>0</valuemin>
+                        <valuemax>100</valuemax>
+                    </parameter>
+                    <parameter>
+                        <name>top</name>
+                        <parameterid>top</parameterid>
+                        <value>0</value>
+                        <valuemin>0</valuemin>
+                        <valuemax>100</valuemax>
+                    </parameter>
+                    <parameter>
+                        <name>bottom</name>
+                        <parameterid>bottom</parameterid>
+                        <value>0</value>
+                        <valuemin>0</valuemin>
+                        <valuemax>100</valuemax>
+                    </parameter>
+                </effect>
+            </filter>
+            <filter>
+                <enabled>TRUE</enabled>
+                <start>0</start>
+                <end>{duration_frame}</end>
+                <effect>
+                    <name>Opacity</name>
+                    <effectid>opacity</effectid>
+                    <effecttype>motion</effecttype>
+                    <mediatype>video</mediatype>
+                    <effectcategory>motion</effectcategory>
+                    <parameter>
+                        <name>opacity</name>
+                        <parameterid>opacity</parameterid>
+                        <value>100</value>
+                        <valuemin>0</valuemin>
+                        <valuemax>100</valuemax>
+                    </parameter>
+                </effect>
+            </filter>
+        """
+    
+    def _get_default_audio_filters(self, duration_frame):
+        """
+        [Helper] 다빈치 리졸브(Timeline 1.xml) 스타일의 기본 오디오 필터(Levels, Pan)를 생성합니다.
+        """
+        return f"""
+            <filter>
+                <enabled>TRUE</enabled>
+                <start>0</start>
+                <end>{duration_frame}</end>
+                <effect>
+                    <name>Audio Levels</name>
+                    <effectid>audiolevels</effectid>
+                    <effecttype>audiolevels</effecttype>
+                    <mediatype>audio</mediatype>
+                    <effectcategory>audiolevels</effectcategory>
+                    <parameter>
+                        <name>Level</name>
+                        <parameterid>level</parameterid>
+                        <value>1</value>
+                        <valuemin>0.00001</valuemin>
+                        <valuemax>1000</valuemax>
+                    </parameter>
+                </effect>
+            </filter>
+            <filter>
+                <enabled>TRUE</enabled>
+                <start>0</start>
+                <end>{duration_frame}</end>
+                <effect>
+                    <name>Audio Pan</name>
+                    <effectid>audiopan</effectid>
+                    <effecttype>audiopan</effecttype>
+                    <mediatype>audio</mediatype>
+                    <effectcategory>audiopan</effectcategory>
+                    <parameter>
+                        <name>Pan</name>
+                        <parameterid>pan</parameterid>
+                        <value>0</value>
+                        <valuemin>-1</valuemin>
+                        <valuemax>1</valuemax>
+                    </parameter>
+                </effect>
+            </filter>
+        """
+
+    # [수정] 러프컷 생성 메서드도 동적 오디오 정보 반영
+    def _create_rough_clip_item(self, 
+                                clip_id, 
+                                track_type, 
+                                meta, 
+                                video_name, 
+                                video_uuid, 
+                                relative_filename, 
+                                start_sec, 
+                                end_sec, 
+                                current_tl_frame, 
+                                category=None, 
+                                title=None, 
+                                reason=None, 
+                                audio_channel_index=1,
+                                link_data=None):
+        
         in_frame = self._sec_to_frame(start_sec, meta['fps'])
         out_frame = self._sec_to_frame(end_sec, meta['fps'])
         duration_frame = out_frame - in_frame
         
         if duration_frame <= 0: return ""
 
-        clip_id = f"clipitem-{track_type}-{uuid.uuid4().hex[:8]}"
         encoded_filename = urllib.parse.quote(relative_filename)
 
-        # 미디어 노드 (Video/Audio 공통)
+        # File Node (Timeline 1.xml 스타일: audio channelcount 명시 등)
         file_node = f"""
             <file id="file-{video_uuid}">
               <name>{video_name}</name>
@@ -287,8 +471,17 @@ class PremiereExporter:
                 <ntsc>{meta['ntsc']}</ntsc>
               </rate>
               <duration>{meta['total_frames']}</duration>
+              <timecode>
+                <string>00:00:00:00</string>
+                <displayformat>NDF</displayformat>
+                <rate>
+                    <timebase>{meta['timebase']}</timebase>
+                    <ntsc>{meta['ntsc']}</ntsc>
+                </rate>
+              </timecode>
               <media>
                 <video>
+                  <duration>{meta['total_frames']}</duration>
                   <samplecharacteristics>
                     <width>{meta['width']}</width>
                     <height>{meta['height']}</height>
@@ -296,62 +489,72 @@ class PremiereExporter:
                 </video>
                 <audio>
                   <samplecharacteristics>
-                    <depth>16</depth>
-                    <samplerate>48000</samplerate>
+                    <depth>{meta['audio_depth']}</depth>
+                    <samplerate>{meta['audio_rate']}</samplerate>
+                    <channelcount>{meta['audio_channels']}</channelcount>
                   </samplecharacteristics>
                 </audio>
               </media>
             </file>
         """
 
-        # 메타데이터 (라벨 색상, 마커)
+        # Labels & Markers (기존 로직 유지)
         labels_xml = ""
         marker_xml = ""
-        
         if track_type == "video" and category:
-            # 1. 라벨 색상
             label_idx = self._get_label_index(category)
+            # Resolve는 <labels> 태그를 덜 엄격하게 처리하지만 호환성을 위해 유지하거나 제거 가능
+            # Timeline 1.xml에는 labels가 없으므로 여기서는 제거하지 않고 유지하되, 
+            # 필요하다면 labels_xml = "" 로 비워도 됩니다.
             labels_xml = f"<labels><label2>{label_idx}</label2></labels>"
-            
-            # 2. 마커 (선정 이유)
             if title and reason:
+                safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                safe_reason = reason.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                 marker_xml = f"""
                 <marker>
-                    <name>[{category}] {title}</name>
-                    <comment>{reason}</comment>
+                    <name>[{category}] {safe_title}</name>
+                    <comment>{safe_reason}</comment>
                     <in>{in_frame}</in>
                     <out>{in_frame}</out>
                 </marker>
                 """
 
-        # 트랙별 특성
-        media_specific = ""
+        # Sourcetrack (Timeline 1.xml 스타일)
         sourcetrack = ""
-        
-        if track_type == "video":
-            media_specific = f"""
-                <video>
-                  <samplecharacteristics>
-                    <width>{meta['width']}</width>
-                    <height>{meta['height']}</height>
-                  </samplecharacteristics>
-                </video>
-            """
-        else: # audio
-            media_specific = """
-                <audio>
-                  <samplecharacteristics>
-                    <depth>16</depth>
-                    <samplerate>48000</samplerate>
-                  </samplecharacteristics>
-                </audio>
-            """
-            sourcetrack = """
+        if track_type == "audio":
+            sourcetrack = f"""
             <sourcetrack>
                 <mediatype>audio</mediatype>
+                <trackindex>{audio_channel_index}</trackindex>
+            </sourcetrack>
+            """
+        else:
+            sourcetrack = f"""
+            <sourcetrack>
+                <mediatype>video</mediatype>
                 <trackindex>1</trackindex>
             </sourcetrack>
             """
+
+        # Link XML (Timeline 1.xml 스타일)
+        link_xml = ""
+        if link_data:
+            for link_item in link_data:
+                # mediatype 명시가 Resolve 호환성에 도움이 됨
+                m_type = link_item.get('mediatype', 'video') 
+                link_xml += f"""
+                <link>
+                    <linkclipref>{link_item['id']}</linkclipref>
+                    <mediatype>{m_type}</mediatype>
+                </link>
+                """
+
+        # [핵심] Filters 추가
+        filters_xml = ""
+        if track_type == "video":
+            filters_xml = self._get_default_video_filters(duration_frame)
+        elif track_type == "audio":
+            filters_xml = self._get_default_audio_filters(duration_frame)
 
         return f"""
           <clipitem id="{clip_id}">
@@ -367,90 +570,130 @@ class PremiereExporter:
             <in>{in_frame}</in>
             <out>{out_frame}</out>
             {file_node}
+            {filters_xml}
             {labels_xml}
             {marker_xml}
             {sourcetrack}
+            {link_xml}
           </clipitem>
         """
 
-    # [Add] AI 선별 소스 전용 XML 생성 메서드 (메인 기능)
     def create_rough_cut_xml(self, video_path, selected_segments, output_filename="rough_cut.xml"):
-        """
-        V1 트랙: 원본 전체 (참고용)
-        V2 트랙: AI 선별 클립 (색상 라벨링됨)
-        """
         meta = self._get_video_info(video_path)
         
-        # 파일명 처리 (UUID 제거)
         server_filename = os.path.basename(video_path)
         original_filename = re.sub(r'^[0-9a-fA-F]{8}_', '', server_filename)
-        video_uuid = str(uuid.uuid4()) # XML 내부에서 파일 식별용
+        video_uuid = str(uuid.uuid4())
 
-        # --- Track V1: 원본 전체 (배경) ---
-        v1_items = []
-        a1_items = []
-        # 원본 전체를 0초부터 끝까지 배치
-        full_duration_frame = meta['total_frames']
+        # V1: Full, A1: Full-L, A2: Full-R
+        v1_items, a1_items, a2_items = [], [], []
+        # V2: Cut, A3: Cut-L, A4: Cut-R
+        v2_items, a3_items, a4_items = [], [], []
+
+        # --- 1. 원본(Full) 트랙 생성 ---
+        full_dur = meta['duration_sec']
         
-        # V1 비디오
-        v1_clip = self._create_rough_clip_item(
-            0, "video", meta, original_filename, video_uuid, original_filename,
-            0, meta['duration_sec'], 0 # start=0, end=duration, tl_start=0
-        )
-        # V1 오디오
-        a1_clip = self._create_rough_clip_item(
-            0, "audio", meta, original_filename, video_uuid, original_filename,
-            0, meta['duration_sec'], 0
-        )
+        id_v1 = f"clipitem-video-full"
+        id_a1 = f"clipitem-audio-full-L"
+        id_a2 = f"clipitem-audio-full-R"
         
-        # 투명도 50% 적용을 위한 filter 추가 (V1)
-        # FCP7 XML에서 Opacity는 <filter> 태그로 처리하지만, 
-        # 복잡도를 줄이기 위해 여기서는 생략하고 클립만 배치합니다. (편집자가 직접 조정)
-        v1_items.append(v1_clip)
-        a1_items.append(a1_clip)
+        link_full = [
+            {'id': id_v1, 'mediatype': 'video', 'trackindex': 1},
+            {'id': id_a1, 'mediatype': 'audio', 'trackindex': 1},
+            {'id': id_a2, 'mediatype': 'audio', 'trackindex': 2}
+        ]
 
+        v1_items.append(self._create_rough_clip_item(
+            id_v1, "video", meta, original_filename, video_uuid, original_filename, 0, full_dur, 0,
+            link_data=link_full
+        ))
+        
+        # A1 -> Source Track 1
+        a1_items.append(self._create_rough_clip_item(
+            id_a1, "audio", meta, original_filename, video_uuid, original_filename, 0, full_dur, 0,
+            audio_channel_index=1, link_data=link_full
+        ))
+        
+        # A2 -> Source Track 1 (or 2 if file has multiple tracks, but here we mirror Timeline 1 logic)
+        a2_items.append(self._create_rough_clip_item(
+            id_a2, "audio", meta, original_filename, video_uuid, original_filename, 0, full_dur, 0,
+            audio_channel_index=1, link_data=link_full
+        ))
 
-        # --- Track V2: AI 선별 클립 ---
-        v2_items = []
-        a2_items = []
-        current_tl_frame = 0 # V2 트랙의 타임라인 헤드 위치
-
+        # --- 2. 편집(Cut) 트랙 생성 ---
+        current_tl_frame = 0
+        
         for idx, seg in enumerate(selected_segments):
-            # 클립 생성
-            v_item = self._create_rough_clip_item(
-                idx, "video", meta, original_filename, video_uuid, original_filename,
+            suffix = f"{idx}"
+            id_v2 = f"clipitem-v2-{suffix}"
+            id_a3 = f"clipitem-a3-{suffix}"
+            id_a4 = f"clipitem-a4-{suffix}"
+            
+            link_cut = [
+                {'id': id_v2, 'mediatype': 'video', 'trackindex': 2},
+                {'id': id_a3, 'mediatype': 'audio', 'trackindex': 3},
+                {'id': id_a4, 'mediatype': 'audio', 'trackindex': 4}
+            ]
+
+            # V2 Item
+            v2_items.append(self._create_rough_clip_item(
+                id_v2, "video", meta, original_filename, video_uuid, original_filename,
                 seg['start'], seg['end'], current_tl_frame,
-                category=seg['category'], title=seg['title'], reason=seg['reason']
-            )
-            a_item = self._create_rough_clip_item(
-                idx, "audio", meta, original_filename, video_uuid, original_filename,
-                seg['start'], seg['end'], current_tl_frame
-            )
+                category=seg['category'], title=seg['title'], reason=seg['reason'],
+                link_data=link_cut
+            ))
             
-            v2_items.append(v_item)
-            a2_items.append(a_item)
+            # A3 Item
+            a3_items.append(self._create_rough_clip_item(
+                id_a3, "audio", meta, original_filename, video_uuid, original_filename,
+                seg['start'], seg['end'], current_tl_frame,
+                audio_channel_index=1, 
+                link_data=link_cut
+            ))
             
-            # 다음 클립 배치 위치 계산
+            # A4 Item
+            a4_items.append(self._create_rough_clip_item(
+                id_a4, "audio", meta, original_filename, video_uuid, original_filename,
+                seg['start'], seg['end'], current_tl_frame,
+                audio_channel_index=1, 
+                link_data=link_cut
+            ))
+            
             in_f = self._sec_to_frame(seg['start'], meta['fps'])
             out_f = self._sec_to_frame(seg['end'], meta['fps'])
             current_tl_frame += (out_f - in_f)
 
-        # XML 조립
+        # XML Assembly (Timeline 1.xml Style)
+        full_duration_frame = meta['total_frames']
+        timeline_duration = max(full_duration_frame, current_tl_frame)
+        
+        # [수정] Version 5 & Timecode block 추가
         header = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<!DOCTYPE xmeml>',
-            '<xmeml version="4">',
+            '<xmeml version="5">',
             '  <sequence>',
-            '    <name>AI_Smart_Rough_Cut</name>',
-            f'    <duration>{max(full_duration_frame, current_tl_frame)}</duration>',
+            '    <name>AI_Smart_Rough_Cut_Resolve</name>',
+            f'    <duration>{timeline_duration}</duration>',
             '    <rate>',
             f'      <timebase>{meta["timebase"]}</timebase>',
             f'      <ntsc>{meta["ntsc"]}</ntsc>',
             '    </rate>',
+            '    <in>-1</in>',
+            '    <out>-1</out>',
+            '    <timecode>',
+            '      <string>01:00:00:00</string>',
+            '      <frame>216000</frame>',
+            '      <displayformat>NDF</displayformat>',
+            '      <rate>',
+            f'        <timebase>{meta["timebase"]}</timebase>',
+            f'        <ntsc>{meta["ntsc"]}</ntsc>',
+            '      </rate>',
+            '    </timecode>',
             '    <media>'
         ]
 
-        # Video Tracks (V1, V2)
+        # Video Tracks
         video_block = [
             '      <video>',
             '        <format>',
@@ -464,14 +707,12 @@ class PremiereExporter:
             '            <pixelaspectratio>square</pixelaspectratio>',
             '          </samplecharacteristics>',
             '        </format>',
-            # Track V1 (Original)
-            '        <track>',
+            '        <track>', # V1
             '          <enabled>TRUE</enabled>',
             '          <locked>FALSE</locked>',
             *v1_items,
             '        </track>',
-            # Track V2 (Selected)
-            '        <track>',
+            '        <track>', # V2
             '          <enabled>TRUE</enabled>',
             '          <locked>FALSE</locked>',
             *v2_items,
@@ -479,18 +720,28 @@ class PremiereExporter:
             '      </video>'
         ]
 
-        # Audio Tracks (A1, A2) - 영상 트랙과 1:1 매칭
+        # Audio Tracks
         audio_block = [
             '      <audio>',
-            '        <track>',
+            '        <track>', # A1
             '          <enabled>TRUE</enabled>',
             '          <locked>FALSE</locked>',
             *a1_items,
             '        </track>',
-            '        <track>',
+            '        <track>', # A2
             '          <enabled>TRUE</enabled>',
             '          <locked>FALSE</locked>',
             *a2_items,
+            '        </track>',
+            '        <track>', # A3
+            '          <enabled>TRUE</enabled>',
+            '          <locked>FALSE</locked>',
+            *a3_items,
+            '        </track>',
+            '        <track>', # A4
+            '          <enabled>TRUE</enabled>',
+            '          <locked>FALSE</locked>',
+            *a4_items,
             '        </track>',
             '      </audio>'
         ]
@@ -507,5 +758,5 @@ class PremiereExporter:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(final_xml_str)
             
-        print(f"--- [Exporter] Rough Cut XML Generated: {output_path} ---")
+        print(f"--- [Exporter] Rough Cut XML Generated (Resolve Style): {output_path} ---")
         return output_path
