@@ -2,4 +2,7 @@
 mlx-whisper
 stable-ts
 torch
+torchvision
 torchaudio
+# --- [VLM Inference for Apple Silicon] ---
+mlx-vlm

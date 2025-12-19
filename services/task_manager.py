@@ -13,12 +13,21 @@ class TaskManager:
         self.cancel_events = {}
 
     def _load_tasks(self):
-        """파일에서 작업 목록을 불러옵니다."""
+        """파일에서 작업 목록을 불러옵니다. 깨진 파일 발견 시 백업 후 초기화합니다."""
         if os.path.exists(self.persistence_file):
             try:
                 with open(self.persistence_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-            except Exception:
+            except Exception as e:
+                print(f"[TaskManager] Error loading tasks.json: {e}")
+                # [Fix] 깨진 파일 백업 (데이터 손실 방지)
+                try:
+                    backup_name = self.persistence_file + ".corrupted"
+                    if os.path.exists(backup_name): os.remove(backup_name)
+                    os.rename(self.persistence_file, backup_name)
+                    print(f"[TaskManager] Corrupted file backed up to: {backup_name}")
+                except Exception as backup_err:
+                    print(f"[TaskManager] Failed to backup corrupted file: {backup_err}")
                 return {}
         return {}
 

@@ -29,25 +29,21 @@ class TextRefiner:
         if not raw_text or len(raw_text.strip()) < 10:
             return "내용이 너무 짧아 요약할 수 없습니다."
 
-        # 프롬프트 엔지니어링: 전문 에디터 페르소나 부여 + 문법 규칙 강화
+        # 프롬프트 엔지니어링: 스타일 가이드라인 대폭 강화
         prompt = f"""
-        You are a professional blog editor. 
+        You are a professional blog editor specializing in high-engagement web content.
         Your task is to refine the following raw spoken text into a highly readable, structured Markdown format.
 
-        ### Guidelines:
-        1. **Title**: Start with a level 3 header (`###`) using the provided chapter title: "{chapter_title}".
-        2. **Structure**: Break down the text into logical paragraphs. Use bullet points (`-`) for lists.
-        3. **Highlight**: Use bold (`**`) for key terms or important sentences.
-        4. **Quote**: If there is a key message or insight, use a Blockquote (`>`).
-        5. **Tone**: Polite, engaging, and professional (maintain the original meaning but fix speech errors).
-        6. **Language**: **Korean (한국어)** only.
+        ### [Style Guidelines - STRICT]:
+        1. **Conciseness**: Keep sentences short (under 60 characters where possible). Avoid excessive conjunctions.
+        2. **Active Voice**: Use active voice. Avoid passive or translation-style phrasing (e.g., 'It is done by...' -> 'I did...').
+        3. **Structure**: 
+           - Start with a level 3 header (`###`) for the title: "{chapter_title}".
+           - Use bullet points (`-`) for lists to improve readability.
+           - Use **bold** for key concepts, but NEVER put spaces inside bold markers (e.g., `**Word**`, not `** Word **`).
+           - Use Blockquotes (`>`) for key insights or summary sentences.
+        4. **Tone**: Polite, engaging, and professional Korean (Friendly '해요체').
         
-        ### Formatting Rules (Strict):
-        - **NEVER** put spaces inside bold markers. 
-        - Wrong: ** Key Point **
-        - Right: **Key Point**
-        - Ensure quotes inside bold are tight: **'Word'** (not ** ' Word ' **).
-
         ### Raw Text:
         {raw_text}
         """

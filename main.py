@@ -18,6 +18,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
+import time  # [추가] time.sleep() 사용을 위해 필요
+import gc    # [추가] gc.collect() 사용을 위해 필요
 
 # [Custom Services]
 from services.downloader import VideoDownloader
@@ -29,7 +31,7 @@ from services.refiner import TextRefiner
 from services.shorts_maker import ShortsMaker
 from services.premiere_exporter import PremiereExporter
 from services.source_selector import SourceSelector 
-
+from services.vision_analyzer import VisionAnalyzer
 
 # --- [Lifespan Manager] ---
 @asynccontextmanager
@@ -127,6 +129,7 @@ clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 �
 shorts_maker = ShortsMaker()
 premiere_exporter = PremiereExporter(output_dir="static/temp")
 source_selector = SourceSelector()
+vision_analyzer = VisionAnalyzer()
 
 # --- [Pydantic Models] ---
 class AnalyzeRequest(BaseModel):
@@ -145,13 +148,6 @@ class ClipRequest(BaseModel):
 
 class ShortsGenerateRequest(BaseModel):
     filename: str  # 원본 영상 파일명
-
-class ShortsGenerateRequest(BaseModel):
-    filename: str  # 원본 영상 파일명
-
-class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청 모델
-    video_filename: str
-    clip_id: str
 
 class PremiereExportRequest(BaseModel): 
     video_filename: str
@@ -201,178 +197,125 @@ def remove_temp_files(file_paths: list):
 
 async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
     """
-    [Background] 영상 분석 통합 파이프라인 (Real-time Progress 적용)
-    구간 계획:
-    - 0~10%: 다운로드
-    - 10~70%: 오디오 변환 및 자막 생성 (Transcriber)
-    - 70~90%: 요약 및 챕터 생성 (Summarizer)
-    - 90~100%: 블로그 글 윤문 (Refiner)
+    [Background - Multimodal Orchestration] 통합 영상 분석 파이프라인 (Updated)
+    - 샷(Shot) 기반 시각 분석 결과와 오디오 대본을 결합하여 마스터 요약을 생성합니다.
     """
     video_filename = req.filename 
     display_title = req.custom_title
     
-    # 정리 함수 (에러 시 호출용 + 사전 정리용)
     def cleanup_files(filename):
         if not filename: return
         try:
             base_name = os.path.splitext(filename)[0]
             targets = [
-                # 원본 영상은 다운로드 실패시에만 지워야 하므로 여기서는 제외하거나 주의 필요
-                # 여기서는 결과물 위주로 삭제
                 os.path.join("static/results", f"{base_name}.srt"),      
                 os.path.join("static/results", f"{base_name}.vtt"),      
                 os.path.join("static/results", f"{base_name}_transcript.json"), 
                 os.path.join("static/results", f"{base_name}_summary.json"),
+                os.path.join("static/results", f"{base_name}_vision.json"), # 비전 파일 추가
                 os.path.join("static/results", f"{base_name}_temp.wav")
             ]
             for path in targets:
-                if os.path.exists(path): 
-                    os.remove(path)
-                    print(f"[Cleanup] Removed old file: {path}")
-        except Exception:
-            pass
+                if os.path.exists(path): os.remove(path)
+        except Exception: pass
 
     try:
         loop = asyncio.get_running_loop()
-        
-        # [Start]
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
-        task_manager.update_progress(task_id, 0, "작업 시작...")
+        task_manager.update_progress(task_id, 0, "멀티모달 분석 파이프라인 가동...")
         
-        # [Pre-cleanup] 기존 분석 데이터가 있다면 선제 삭제 (재분석 시)
-        if video_filename:
-            cleanup_files(video_filename)
+        if video_filename: cleanup_files(video_filename)
         
         # --- Phase 1: Video Preparation (0~10%) ---
         if req.url:
             task_manager.update_progress(task_id, 1, "영상 다운로드 중...")
-            
             def dl_callback(percent, msg):
-                # 0~100 -> 1~10% 매핑
                 scaled = 1 + int(percent * 0.09)
                 loop.call_soon_threadsafe(task_manager.update_progress, task_id, scaled, msg)
 
             result = await loop.run_in_executor(
                 None, 
-                partial(
-                    downloader.download_from_url, 
-                    req.url, 
-                    progress_callback=dl_callback,
-                    task_manager=task_manager,
-                    task_id=task_id
-                )
+                partial(downloader.download_from_url, req.url, progress_callback=dl_callback, task_manager=task_manager, task_id=task_id)
             )
-            
             if result["status"] == "error": raise Exception(result["message"])
             video_filename = result["filename"]
-            
             if not display_title and result.get("meta") and result["meta"].get("title"):
                 display_title = result["meta"]["title"]
 
-        if task_manager.is_cancelled(task_id): raise TaskCancelledError()
-
         video_path = os.path.join("static/videos", video_filename)
-        if not os.path.exists(video_path): raise FileNotFoundError(f"File not found: {video_filename}")
-        
-        # 제목 보정
         if not display_title:
-            raw_name = video_filename
-            clean_name = re.sub(r'^[0-9a-fA-F]{8}_', '', raw_name)
-            display_title = os.path.splitext(clean_name)[0].replace("_", " ").strip()
+            display_title = os.path.splitext(re.sub(r'^[0-9a-fA-F]{8}_', '', video_filename))[0].replace("_", " ").strip()
 
-        # --- Phase 2: Transcription (10~70%) ---
-        task_manager.update_progress(task_id, 10, "오디오 변환 준비 중...")
+        # --- Phase 2: Transcription (10~40%) ---
+        task_manager.update_progress(task_id, 10, "오디오 자막 생성 및 분석 중...")
+        progress_wrapper_stt = TaskProgressWrapper(task_manager, task_id, start_offset=10, scale_factor=0.3)
         
-        # Transcriber용 진행률 래퍼 생성 (10%에서 시작, 전체의 60% 비중)
-        progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=10, scale_factor=0.6)
-        
-        def transcriber_callback(local_percent, msg):
-            loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
-
-        # Transcriber 실행
         transcribe_result = await loop.run_in_executor(
             None,
-            partial(
-                transcriber.transcribe, 
-                video_path, 
-                progress_callback=transcriber_callback,
-                task_manager=progress_wrapper,
-                task_id=task_id            
-            )
+            partial(transcriber.transcribe, video_path, 
+                    progress_callback=lambda p, m: progress_wrapper_stt.update_progress(task_id, p, m),
+                    task_manager=progress_wrapper_stt, task_id=task_id)
         )
-        
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
-        if transcribe_result.get("status") == "error": raise Exception("Transcription failed")
         segments = transcribe_result["segments"]
 
-        # --- Phase 3: Summarization (70~90%) ---
-        task_manager.update_progress(task_id, 70, "내용 구조화 및 요약 중 (LLM)...")
-        
-        def summarizer_callback(msg):
-             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 75, msg)
+        # --- Phase 3: Visual Analysis (40~70%) ---
+        # [핵심] 샷 기반의 구조화된 비전 데이터를 추출합니다.
+        torch.cuda.empty_cache()
+        gc.collect()
+        time.sleep(1)
 
-        summary_result = await loop.run_in_executor(
-            None,
-            partial(
-                summarizer.summarize, 
-                segments, 
-                video_filename, 
-                custom_title=display_title,
-                status_callback=summarizer_callback
-            )
-        )
+        task_manager.update_progress(task_id, 40, "샷(Shot) 기반 시각적 맥락 분석 시작 (Action/Mood/Text)...")
         
-        if summary_result.get("error"): raise Exception(summary_result["error"])
+        # [수정] VisionAnalyzer는 0~100%를 보고하므로, Wrapper를 통해 40~70%로 매핑합니다.
+        progress_wrapper_vision = TaskProgressWrapper(task_manager, task_id, start_offset=40, scale_factor=0.3)
+
+        visual_descriptions = await loop.run_in_executor(
+            None,
+            partial(vision_analyzer.analyze_video, video_path, task_manager=progress_wrapper_vision, task_id=task_id)
+        )
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
 
-        # --- Phase 4: Refining Content (90~100%) ---
-        task_manager.update_progress(task_id, 90, "블로그 포스팅 작성 중...")
+        # --- Phase 4: Multimodal Master Summarization (70~90%) ---
+        task_manager.update_progress(task_id, 70, "시각-청각 데이터 융합 및 마스터 지식 베이스 구축...")
         
-        chapters = summary_result.get("chapters", [])
-        total_chaps = len(chapters)
-        sorted_segments = sorted(segments, key=lambda x: x['start'])
+        # [수정] 대본과 구조화된 비전 데이터를 결합하여 마스터 JSON 생성
+        summary_result = await loop.run_in_executor(
+            None,
+            partial(summarizer.summarize, segments, visual_descriptions, video_filename, 
+                    custom_title=display_title, status_callback=lambda m: task_manager.update_progress(task_id, 75, m))
+        )
+        if summary_result.get("error"): raise Exception(summary_result["error"])
 
+        # --- Phase 5: Refining Blog Content (90~100%) ---
+        task_manager.update_progress(task_id, 90, "최종 블로그 포스팅 윤문 중...")
+        chapters = summary_result.get("chapters", [])
         for i, chapter in enumerate(chapters):
             if task_manager.is_cancelled(task_id): raise TaskCancelledError()
+            current_progress = 90 + int((i / len(chapters)) * 9)
+            task_manager.update_progress(task_id, current_progress, f"포스팅 다듬는 중... ({i+1}/{len(chapters)})")
 
-            # 90~99% 구간 매핑
-            current_progress = 90 + int((i / total_chaps) * 9)
-            task_manager.update_progress(task_id, current_progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
-
-            # 챕터에 해당하는 텍스트 추출
-            c_start = chapter['time']['start']
-            c_end = chapter['time']['end']
-            chapter_text_list = [
-                s['text'] for s in sorted_segments 
-                if s['start'] >= c_start and s['start'] < c_end
-            ]
-            raw_text_chunk = " ".join(chapter_text_list)
+            c_start, c_end = chapter['time']['start'], chapter['time']['end']
+            # 해당 챕터 구간의 대본 추출
+            raw_text_chunk = " ".join([s['text'] for s in segments if s['start'] >= c_start and s['start'] < c_end])
             
-            # 윤문 (Refine)
-            refined_md = await loop.run_in_executor(
-                None,
-                partial(refiner.refine_chapter, raw_text_chunk, chapter['title'])
-            )
+            # [Refiner] 챕터 제목과 내용을 바탕으로 마크다운 생성
+            refined_md = await loop.run_in_executor(None, partial(refiner.refine_chapter, raw_text_chunk, chapter['title']))
             chapter['blog_content'] = refined_md
 
-        # 결과 저장
+        # 최종 마스터 파일 업데이트 저장
         base_name = os.path.splitext(video_filename)[0]
         json_path = os.path.join("static/results", f"{base_name}_summary.json")
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(summary_result, f, ensure_ascii=False, indent=2)
 
-        # --- Phase 5: Finish ---
         task_manager.complete_task(task_id, summary_result)
-        print(f"[{task_id}] Analysis Completed: {video_filename}")
 
     except TaskCancelledError:
-        print(f"[{task_id}] Task Cancelled by User.")
-        # 다운로드 중 취소된 경우에만 영상 삭제 고려 (여기서는 결과물만 정리)
         cleanup_files(video_filename)
         task_manager.fail_task(task_id, "취소됨")
-
     except Exception as e:
-        print(f"[{task_id}] Analysis Failed: {e}")
+        print(f"[{task_id}] Error: {e}")
         cleanup_files(video_filename)
         task_manager.fail_task(task_id, str(e))
 
@@ -507,43 +450,43 @@ async def run_clip_pipeline(task_id: str, req: ClipRequest):
 # [Modify] run_shorts_pipeline 함수를 아래 코드로 통째로 교체하세요.
 async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
     """
-    [Background] AI 숏츠 생성 파이프라인 (Updated)
-    - 3분 이내 숏츠 생성
-    - Video + SRT + VTT(New) 생성 및 관리
+    [Background - Multimodal Enabled] AI 숏츠 생성 파이프라인 (Updated)
+    - _summary.json(Master Data)을 로드하여 시각적 정보를 포함한 하이라이트 추출
+    - Video + SRT + VTT 생성 및 관리
     """
     temp_files = [] 
     base_name = os.path.splitext(req.filename)[0]
     
     try:
-        task_manager.update_progress(task_id, 0, "AI 숏츠 기획 시작...")
+        task_manager.update_progress(task_id, 0, "AI 숏츠 기획 시작 (멀티모달 분석)...")
         
-        # 1. 데이터 로드
-        transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
-        srt_path = os.path.join("static/results", f"{base_name}.srt") 
+        # 1. 데이터 로드 (의존성 변경: transcript -> summary)
+        # [핵심 변경] 비전 데이터가 포함된 마스터 파일인 _summary.json을 우선적으로 참조합니다.
         summary_path = os.path.join("static/results", f"{base_name}_summary.json")
+        srt_path = os.path.join("static/results", f"{base_name}.srt") 
 
-        if not os.path.exists(transcript_path):
-            raise FileNotFoundError("분석 데이터가 없습니다.")
+        if not os.path.exists(summary_path):
+            # 마스터 데이터가 없으면 분석을 먼저 수행해야 함을 알림
+            raise FileNotFoundError("분석 데이터(Master Summary)가 없습니다. 먼저 영상 분석을 완료해주세요.")
         
-        with open(transcript_path, 'r', encoding='utf-8') as f: transcripts = json.load(f)
+        with open(summary_path, 'r', encoding='utf-8') as f: 
+            master_data = json.load(f)
         
-        video_title = req.filename
-        if os.path.exists(summary_path):
-            with open(summary_path, 'r', encoding='utf-8') as f:
-                video_title = json.load(f).get("video_title", req.filename)
+        video_title = master_data.get("video_title", req.filename)
 
-        # 2. LLM 기획 (0~30%)
+        # 2. LLM 멀티모달 기획 (0~30%)
         if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
-        task_manager.update_progress(task_id, 10, "AI가 하이라이트 구간 선별 중...")
+        task_manager.update_progress(task_id, 10, "AI가 화면과 내용을 종합하여 하이라이트 선별 중...")
         
         loop = asyncio.get_running_loop()
+        # [핵심 변경] shorts_maker에게 단순 대본이 아닌 통합 마스터 데이터를 전달합니다.
         candidates = await loop.run_in_executor(
             None, 
-            partial(shorts_maker.make_shorts_candidates, transcripts, video_title)
+            partial(shorts_maker.make_shorts_candidates, master_data, video_title)
         )
         
         if not candidates: raise Exception("AI가 숏츠 구간을 찾지 못했습니다.")
-        task_manager.update_progress(task_id, 30, f"{len(candidates)}개의 숏츠 기획안 생성 완료.")
+        task_manager.update_progress(task_id, 30, f"{len(candidates)}개의 멀티모달 숏츠 기획안 생성 완료.")
 
         # 3. 렌더링 및 패키징 (30~90%)
         PHASE_START, PHASE_END = 30, 90
@@ -560,16 +503,14 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
                 global_progress = int(current_base_progress + (local_percent / 100.0) * slot_weight)
                 task_manager.update_progress(task_id, global_progress, f"숏츠 {idx+1}/{len(candidates)} 제작 중... ({local_percent}%)")
 
-            # 파일명 정리
             safe_title = re.sub(r'[\\/*?:"<>|]', "", cand['title']).replace(" ", "_")
             video_filename = f"AI_Shorts_{idx+1}_{safe_title}.mp4"
             
-            # [Update] merge_segments가 {video, subtitle, subtitle_vtt} 딕셔너리를 반환함
             merge_result = await clipper.merge_segments(
                 video_path,
                 cand['segments'],
-                output_filename=video_filename, # 임시 폴더에 생성됨
-                sub_input_path=srt_path,        # 원본 자막 전달
+                output_filename=video_filename,
+                sub_input_path=srt_path,
                 progress_callback=ffmpeg_callback,
                 task_manager=task_manager,
                 task_id=task_id
@@ -577,21 +518,18 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
             
             generated_video = merge_result['video']
             generated_sub = merge_result['subtitle']
-            generated_vtt = merge_result['subtitle_vtt'] # [New] VTT 경로
+            generated_vtt = merge_result['subtitle_vtt']
             
             if generated_video and os.path.exists(generated_video):
-                # 1) MP4 이동 -> static/clips
                 final_video_path = os.path.join("static/clips", video_filename)
                 shutil.move(generated_video, final_video_path)
                 
-                # 2) SRT 이동
                 final_sub_path = None
                 if generated_sub and os.path.exists(generated_sub):
                     sub_filename = video_filename.replace(".mp4", ".srt")
                     final_sub_path = os.path.join("static/clips", sub_filename)
                     shutil.move(generated_sub, final_sub_path)
                     
-                # 3) [New] VTT 이동 (웹 플레이어용)
                 final_vtt_filename = None
                 if generated_vtt and os.path.exists(generated_vtt):
                     vtt_filename = video_filename.replace(".mp4", ".vtt")
@@ -599,33 +537,28 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
                     shutil.move(generated_vtt, final_vtt_path)
                     final_vtt_filename = vtt_filename
 
-                # 4) ZIP 압축 (다운로드용: MP4 + SRT)
                 zip_filename = video_filename.replace(".mp4", ".zip")
                 files_to_zip = [final_video_path]
                 if final_sub_path: files_to_zip.append(final_sub_path)
                 
-                # ZIP 생성
                 zip_path = await loop.run_in_executor(
                     None,
                     partial(clipper.create_zip, files_to_zip, zip_filename, "static/clips")
                 )
 
-                # 메타데이터 생성
                 results.append({
                     "clip_id": str(uuid.uuid4()),
                     "title": cand['title'],
                     "reason": cand['reason'],
                     "filename_video": video_filename,
                     "filename_zip": zip_filename,
-                    "filename_vtt": final_vtt_filename, # [New] VTT 파일명 저장
+                    "filename_vtt": final_vtt_filename,
                     "duration": cand['total_duration'],
                     "segments": cand['segments'],
                     "created_at": datetime.now().isoformat(),
                     "download_url": f"/static/clips/{zip_filename}",
                     "preview_url": f"/static/clips/{video_filename}"
                 })
-            else:
-                print(f"[Warning] Failed to render shorts candidate {idx+1}")
 
         # 4. 메타데이터 저장
         task_manager.update_progress(task_id, 90, "메타데이터 저장 중...")
@@ -646,7 +579,6 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
             json.dump(existing_data, f, ensure_ascii=False, indent=2)
 
         task_manager.complete_task(task_id, {"count": len(results), "message": "완료"})
-        print(f"[{task_id}] AI Shorts Completed: {len(results)}")
 
     except Exception as e:
         print(f"[{task_id}] Shorts Pipeline Failed: {e}")
@@ -659,49 +591,47 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
 
 async def run_source_selection_pipeline(task_id: str, req: SourceSelectionRequest):
     """
-    [Background] 편집 소스 선별 파이프라인
-    - Transcript 로드 -> 비디오 길이 확인 -> LLM 분석 -> 결과 저장
-    [Update] 기존 결과 파일 선제 삭제 로직 추가
+    [Background - Multimodal Enabled] 편집 소스 선별 파이프라인
+    - Master Summary 로드 -> 비디오 길이 확인 -> 멀티모달 LLM 분석 -> 결과 저장
     """
     try:
-        task_manager.update_progress(task_id, 0, "편집 소스 분석 시작...")
+        task_manager.update_progress(task_id, 0, "편집 소스 멀티모달 분석 시작...")
         
         base_name = os.path.splitext(req.filename)[0]
-        transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+        # [핵심 변경] 단순 대본이 아닌, 비전 정보가 포함된 마스터 요약 파일을 로드합니다.
+        summary_path = os.path.join("static/results", f"{base_name}_summary.json")
         video_path = os.path.join("static/videos", req.filename)
         output_path = os.path.join("static/results", f"{base_name}_selected_sources.json")
 
-        # [Pre-cleanup] 기존 결과가 있다면 삭제 (재분석 시 데이터 혼동 방지)
         if os.path.exists(output_path):
-            try:
-                os.remove(output_path)
-                print(f"[{task_id}] Removed old source selection file: {output_path}")
+            try: os.remove(output_path)
             except Exception: pass
 
         # 1. 필수 파일 확인
-        if not os.path.exists(transcript_path):
-            raise FileNotFoundError("분석 데이터(Transcript)가 없습니다. 먼저 영상 분석을 완료해주세요.")
+        if not os.path.exists(summary_path):
+            raise FileNotFoundError("분석 데이터(Master Summary)가 없습니다. 먼저 영상 분석을 완료해주세요.")
         
         if not os.path.exists(video_path):
             raise FileNotFoundError("원본 영상 파일이 없습니다.")
 
-        # 2. 데이터 로드
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            transcripts = json.load(f)
+        # 2. 마스터 데이터 로드
+        with open(summary_path, 'r', encoding='utf-8') as f:
+            master_data = json.load(f)
 
-        # 3. 비디오 길이 정보 획득 (PremiereExporter 유틸 사용)
+        # 3. 비디오 길이 정보 획득
         loop = asyncio.get_running_loop()
         meta = await loop.run_in_executor(None, premiere_exporter._get_video_info, video_path)
         duration_sec = meta.get("duration_sec", 0)
 
         if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
 
-        # 4. 소스 선별 실행 (LLM 수행 - 오래 걸림)
+        # 4. 소스 선별 실행 (LLM 수행)
+        # [핵심 변경] source_selector에게 master_data를 전달합니다.
         result = await loop.run_in_executor(
             None, 
             partial(
                 source_selector.select_sources, 
-                transcripts, 
+                master_data, 
                 duration_sec,
                 task_manager=task_manager,
                 task_id=task_id
@@ -715,13 +645,11 @@ async def run_source_selection_pipeline(task_id: str, req: SourceSelectionReques
 
         # 5. 결과 저장
         task_manager.update_progress(task_id, 98, "결과 파일 쓰는 중...")
-        
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(result["results"], f, ensure_ascii=False, indent=2)
 
         # 6. 완료 처리
         task_manager.complete_task(task_id, {"count": result["total_groups"], "message": "분석 완료"})
-        print(f"[{task_id}] Source Selection Completed: {len(result['results'])} items")
 
     except Exception as e:
         print(f"[{task_id}] Source Selection Failed: {e}")

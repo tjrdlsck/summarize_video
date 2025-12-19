@@ -22,27 +22,41 @@ class ShortsMaker:
         text = re.sub(r"```\s*", "", text)
         return text.strip()
 
-    # [수정] 기존 make_shorts_candidates 메서드를 아래 코드로 교체하세요.
-    def make_shorts_candidates(self, transcripts, video_title):
+    def make_shorts_candidates(self, master_data, video_title):
         """
-        [Update] 숏츠 길이를 최대 3분(180초)으로 확장하고, 
-        생성된 후보군의 총 길이가 제한을 넘지 않는지 검증하는 로직을 추가했습니다.
+        [Strategic Multimodal Selection] 
+        마스터 데이터를 분석하여 AIDA 모델과 Hook-Retention-Payoff 공식에 기반한 쇼츠 후보를 추출합니다.
         """
         if not self.api_key:
             print("[ShortsMaker] Error: API Key missing")
             return []
 
-        # 1. 입력 데이터 준비
-        input_data = "\n".join([f"[{t['id']}] {t['start']:.2f}~{t['end']:.2f}: {t['text']}" for t in transcripts])
+        # 1. 멀티모달 컨텍스트 데이터 정제
+        refined_context = []
+        for chap in master_data.get('chapters', []):
+            chap_text = (
+                f"### [구간: {chap['time']['start']:.1f}s ~ {chap['time']['end']:.1f}s]\n"
+                f"- 요약: {chap['summary']}\n"
+            )
+            if chap.get('visual_context'):
+                visuals = " | ".join([
+                    f"화면({v['action']}), 자막({v['text']}), 분위기({v['mood']})" 
+                    for v in chap['visual_context']
+                ])
+                chap_text += f"- 시각 정보: {visuals}\n"
+            
+            refined_context.append(chap_text)
         
-        # 2. Output Schema 정의
+        context_body = "\n".join(refined_context)
+        
+        # 2. 구조화된 출력 스키마 정의
         candidates_schema = {
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
                 "properties": {
-                    "title": {"type": "STRING", "description": "시선을 끄는 숏츠 제목"},
-                    "reason": {"type": "STRING", "description": "바이럴 소구점 설명"},
+                    "title": {"type": "STRING", "description": "시청자를 유혹하는 숏츠 제목"},
+                    "reason": {"type": "STRING", "description": "바이럴 전략적 근거"},
                     "segments": {
                         "type": "ARRAY",
                         "items": {
@@ -59,28 +73,24 @@ class ShortsMaker:
             }
         }
 
-        # 3. 프롬프트 수정 (60초 -> 180초)
-        prompt = f"""
-        You are an expert video editor specializing in viral Shorts/Reels.
-        Your task is to identify the **top 3 most engaging segments** from the provided transcript.
-        Video Title: {video_title}
-
-        ### Requirements:
-        1. **Format**: Vertical Short-form video (Reels/Shorts/TikTok).
-        2. **Duration**: Each candidate must be between **15 seconds and 180 seconds (3 minutes)**.
-        3. **Flow**: Combine non-adjacent segments if they are logically connected (Jump Cuts), but ensure the audio flows naturally.
-        4. **Hook**: The beginning must be attention-grabbing.
-
-        ### Input Transcript:
-        {input_data}
-        """
+        # 3. 전략적 쇼츠 기획 지시문 (Updated with Constraints)
+        system_instruction = (
+            "당신은 유튜브 쇼츠(Shorts) 전문 전략가이자 에디터입니다.\n"
+            "제공된 [멀티모달 분석 데이터]를 심층 분석하여, '킬러 콘텐츠' 구간 3개를 발굴하세요.\n\n"
+            "### [필수 분석 프레임워크]:\n"
+            "1. **The Hook (0~3초)**: 시각적 임팩트나 호기심 자극이 강한 구간.\n"
+            "2. **AIDA 모델**: Attention -> Interest -> Desire -> Action의 흐름.\n"
+            "3. **Visual Reward**: 말이 많은 구간보다 시각 정보(Visual Scenes)가 풍부한 구간 우대.\n\n"
+            "### [CRITICAL CONSTRAINTS - 절대 준수]:\n"
+            "1. **Audio Continuity (오디오 완결성)**: 구간의 시작(Start)과 끝(End)은 반드시 **문장이 온전히 끝나는 시점**이어야 합니다. 말이 중간에 뚝 끊기지 않도록 앞뒤로 1~2초의 여유(Buffer)를 두고 잡으세요.\n"
+            "2. **No Context Cuts**: 대화의 맥락이 이해될 수 있도록 충분한 길이를 확보하세요 (최소 15초 이상 권장)."
+        )
 
         try:
             client = genai.Client(api_key=self.api_key)
-            
             response = client.models.generate_content(
                 model=self.model_name,
-                contents=prompt,
+                contents=f"{system_instruction}\n\n### [영상 제목: {video_title}]\n### [멀티모달 분석 데이터]:\n{context_body}",
                 config=types.GenerateContentConfig(
                     temperature=0.4,
                     response_mime_type="application/json",
@@ -90,9 +100,9 @@ class ShortsMaker:
             
             candidates = json.loads(response.text)
             
-            # 4. 논리적 유효성 검증 및 길이 트리밍 (Hard Limit: 180s)
+            # 4. 유효성 검증 및 구간 트리밍 (Max 3min Limit)
             valid_candidates = []
-            MAX_DURATION = 180.0  # 최대 3분
+            MAX_DURATION = 180.0
 
             for item in candidates:
                 if not item.get('segments'): continue
@@ -102,18 +112,12 @@ class ShortsMaker:
                 
                 for seg in item['segments']:
                     s, e = float(seg['start']), float(seg['end'])
-                    
-                    # 역행하거나 너무 짧은 구간 제외
                     if e <= s or (e - s) < 0.5: continue
                     
-                    # 현재 세그먼트의 길이
                     seg_duration = e - s
-                    
-                    # 최대 길이를 초과하는지 확인
                     if current_total_duration + seg_duration > MAX_DURATION:
-                        # 남은 시간만큼만 자르고 루프 종료
                         remaining = MAX_DURATION - current_total_duration
-                        if remaining > 1.0: # 최소 1초 이상 남았을 때만 추가
+                        if remaining > 1.0:
                             validated_segments.append({"start": s, "end": s + remaining})
                             current_total_duration += remaining
                         break
@@ -121,14 +125,14 @@ class ShortsMaker:
                         validated_segments.append({"start": s, "end": e})
                         current_total_duration += seg_duration
                 
-                if validated_segments and current_total_duration >= 10.0: # 최소 10초 이상인 것만
+                if validated_segments and current_total_duration >= 10.0:
                     item['segments'] = validated_segments
                     item['total_duration'] = current_total_duration
                     valid_candidates.append(item)
             
-            print(f"[ShortsMaker] Generated {len(valid_candidates)} candidates (Max 3 min).")
+            print(f"[ShortsMaker] Strategic Multimodal Planning Complete. Generated {len(valid_candidates)} candidates.")
             return valid_candidates
 
         except Exception as e:
-            print(f"[ShortsMaker Error] {e}")
+            print(f"[ShortsMaker Error] AI Planning Failed: {e}")
             return []

@@ -1,5 +1,16 @@
 -r requirements-core.txt
 faster-whisper
 torch
+torchvision
 torchaudio
 stable-ts
+# --- [VLM Inference for NVIDIA] ---
+transformers>=4.45.0
+accelerate
+bitsandbytes
+optimum
+# 1. 기본 의존성 및 Torch 설치
+# pip install -r requirements-nvidia.txt
+# 2. 빌드 보조 도구 설치 (flash-attn 컴파일에 필수)
+# pip install packaging ninja
+# pip install flash-attn --no-build-isolation

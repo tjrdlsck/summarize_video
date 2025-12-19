@@ -8,3 +8,7 @@ requests
 soundfile
 numpy
 aiofiles
+# --- [Vision & Image Processing] ---
+Pillow
+opencv-python
+scenedetect

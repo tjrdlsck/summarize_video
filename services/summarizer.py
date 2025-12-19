@@ -113,12 +113,13 @@ class VideoSummarizer:
         )
         return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
-    # [Update] 기존 summarize 메서드를 교체하세요.
-    def summarize(self, segments, video_filename, custom_title=None, status_callback=None):
+    def summarize(self, segments, visual_descriptions, video_filename, custom_title=None, status_callback=None):
         """
-        Gemini 1.5/2.0의 JSON Mode를 사용하여 정확한 챕터 데이터를 생성합니다.
-        Regex 파싱이 필요 없어 훨씬 안정적입니다.
-        [Fix] 챕터 제목의 Markdown 문법 제거 및 가독성 높은 제목 처리 추가
+        [Multimodal Master Fusion] 
+        오디오 대본과 구조화된 비전 데이터를 결합하여 영상의 마스터 지식 베이스를 생성합니다.
+        
+        입력:
+        - visual_descriptions: 1단계에서 생성된 [{'start', 'end', 'action', 'mood', 'text'}, ...] 구조체
         """
         if not self.api_key:
             return {"error": "GOOGLE_API_KEY is missing in .env"}
@@ -126,23 +127,34 @@ class VideoSummarizer:
         total_lines = len(segments)
         if total_lines == 0: return {"error": "Empty segments"}
 
-        print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini (JSON Mode) ---")
-        if status_callback: status_callback("Gemini가 내용을 정밀 분석 중 (JSON Mode)...")
+        print(f"--- [Summarizer] Fusing Multimodal Data for {video_filename} ---")
+        if status_callback: status_callback("멀티모달 데이터 정렬 및 마스터 요약 생성 중...")
 
         tracker = UsageTracker()
         
-        # 프롬프트 구성
-        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
-        script_text = "\n".join(lines)
+        # 1. 시공간적 데이터 정렬 (Temporal Alignment for Prompting)
+        combined_script = []
+        visual_ptr = 0
         
-        # JSON 스키마 정의
+        for seg in segments:
+            while visual_ptr < len(visual_descriptions) and visual_descriptions[visual_ptr]['start'] <= seg['start']:
+                v = visual_descriptions[visual_ptr]
+                v_cue = f"[시각적 상황: {v['action']} | 분위기: {v['mood']} | 화면자막: {v['text']}]"
+                combined_script.append(v_cue)
+                visual_ptr += 1
+            
+            combined_script.append(f"{seg['id']} | {seg['text']}")
+
+        script_text = "\n".join(combined_script)
+        
+        # 2. 고도화된 JSON 스키마 정의
         response_schema = {
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
                 "properties": {
-                    "title": {"type": "STRING", "description": "챕터 제목"},
-                    "summary": {"type": "STRING", "description": "상세 내용 요약"},
+                    "title": {"type": "STRING", "description": "챕터의 핵심 제목"},
+                    "summary": {"type": "STRING", "description": "상황과 대사가 포함된 상세 요약"},
                     "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
                     "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
                 },
@@ -150,19 +162,22 @@ class VideoSummarizer:
             }
         }
 
+        # 3. 멀티모달 컨텍스트 인지 지시문 (Updated)
         system_instruction = (
-            "당신은 영상 콘텐츠 분석 AI입니다. 대본을 읽고 논리적인 '챕터'로 나누어 JSON으로 출력하세요.\n"
-            "규칙 1: 영상의 시작(ID:1)부터 끝까지 빈틈없이 커버해야 합니다.\n"
-            "규칙 2: start_id와 end_id는 제공된 스크립트의 ID를 참조합니다.\n"
-            "규칙 3: 한국어로 작성하세요."
+            "당신은 영상 멀티모달 분석 전문가이자 전문 블로그 에디터입니다.\n"
+            "제공된 데이터(오디오 대본 + 시각적 상황)를 분석하여 마스터 요약을 작성하세요.\n\n"
+            "### [핵심 작성 규칙]:\n"
+            "1. **Noise Filtering (중요)**: 영상 내용과 무관한 유튜버의 상투적 멘트('구독/좋아요 눌러주세요', '알림 설정', '광고 보고 오시죠')는 요약에서 **철저히 제외**하세요.\n"
+            "2. **Tone & Manner**: 독자에게 친절하게 설명하는 **'해요체'**를 사용하세요. (예: '~했습니다' -> '~했어요', '~임' -> '~이에요')\n"
+            "3. **Visual Context**: [시각적 상황] 정보를 활용하여, 화자가 말하는 '이것', '저 장면'이 무엇인지 구체적으로 서술하세요.\n"
+            "4. **Logical Flow**: 단순 나열이 아닌, 기승전결이 있는 논리적 챕터로 구성하세요."
         )
 
         try:
             client = genai.Client(api_key=self.api_key)
-            
             response = client.models.generate_content(
                 model=self.model_name,
-                contents=f"{system_instruction}\n\n[Script]:\n{script_text}",
+                contents=f"{system_instruction}\n\n[Integrated Multimodal Script]:\n{script_text}",
                 config=types.GenerateContentConfig(
                     temperature=0.2,
                     response_mime_type="application/json", 
@@ -170,11 +185,9 @@ class VideoSummarizer:
                 )
             )
             tracker.update(response)
-            
-            # JSON 파싱
             final_chapters = json.loads(response.text)
             
-            # ID -> Time 매핑 & [New] 챕터 제목 정제
+            # 4. [New] 챕터별 시각적 맥락 매핑 (Visual Context Mapping)
             mapped_result = []
             for chap in final_chapters:
                 s_idx = max(0, min(chap['start_id'] - 1, total_lines - 1))
@@ -183,43 +196,43 @@ class VideoSummarizer:
                 start_time = segments[s_idx]['start']
                 end_time = segments[e_idx]['end']
                 
-                # [Fix] 챕터 제목 내 불필요한 마크다운(**, __) 제거
-                # 예: "**서론**" -> "서론"
-                clean_chapter_title = re.sub(r'\*\*|__', '', chap['title']).strip()
+                chapter_visuals = [
+                    v for v in visual_descriptions 
+                    if not (v['end'] < start_time or v['start'] > end_time)
+                ]
                 
                 mapped_result.append({
-                    "title": clean_chapter_title, # 정제된 제목 사용
+                    "title": re.sub(r'\*\*|__', '', chap['title']).strip(),
                     "summary": chap['summary'],
                     "time": {
                         "start": start_time,
                         "end": end_time,
                         "start_formatted": self._format_time(start_time),
                         "end_formatted": self._format_time(end_time)
-                    }
+                    },
+                    "visual_context": chapter_visuals
                 })
 
-            # [Fix] display_title이 이미 정제되어 넘어오므로 그대로 사용
+            # 5. 최종 마스터 데이터 구조화 및 저장
             display_title = custom_title if custom_title and custom_title.strip() else video_filename
-
             result_data = {
                 "video_source": video_filename,
                 "video_title": display_title,
                 "total_chapters": len(mapped_result),
                 "token_usage": tracker.get_report(),
-                "chapters": mapped_result
+                "chapters": mapped_result,
+                "raw_visual_data": visual_descriptions
             }
 
-            # 저장
             base_name = os.path.splitext(video_filename)[0]
             output_path = os.path.join(self.output_dir, f"{base_name}_summary.json")
-            
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(result_data, f, ensure_ascii=False, indent=2)
                 
             return result_data
 
         except Exception as e:
-            print(f"[Error] Summarization failed: {e}")
+            print(f"[Summarizer Error] Fusion failed: {e}")
             return {"error": str(e)}
         
     def _format_time(self, seconds):

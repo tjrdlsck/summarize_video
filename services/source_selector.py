@@ -15,43 +15,44 @@ class SourceSelector:
         # 복잡한 지시를 잘 따르는 고성능 모델 사용
         self.model_name = "gemini-2.5-flash" 
 
-    def select_sources(self, transcripts, video_duration, task_manager=None, task_id=None):
+    def select_sources(self, master_data, video_duration, task_manager=None, task_id=None):
         """
-        메인 파이프라인 (Updated):
-        - TaskManager와 연동하여 진행률 보고 및 취소 감지 기능 추가
+        [Professional Source Selection] 
+        마스터 데이터를 정량 평가하여 고가치 편집 소스(Hook, Story, Insight, B-Roll)를 선별합니다.
+        
+        입력:
+        - master_data: Summarizer가 생성한 멀티모달 통합 JSON
         """
         if not self.api_key:
             return {"error": "API Key missing"}
 
-        # [1] 시작 (0~10%)
+        # 1. 상태 보고 및 준비 (0~10%)
         if task_manager and task_id:
             if task_manager.is_cancelled(task_id): return {"error": "Cancelled"}
-            task_manager.update_progress(task_id, 5, "편집 소스 분석 준비 중...")
+            task_manager.update_progress(task_id, 5, "멀티모달 소스 정밀 평가 준비 중...")
 
-        # [2] LLM 분석 요청 (10~80%)
-        # 가장 시간이 오래 걸리는 작업입니다.
+        # 2. LLM 절대 점수제 분석 (10~80%)
         if task_manager and task_id:
-            task_manager.update_progress(task_id, 10, "AI가 영상의 맥락을 분석 중입니다 (LLM)...")
+            task_manager.update_progress(task_id, 15, "수석 편집자 AI가 각 구간의 편집 가치를 채점 중입니다...")
 
-        candidates = self._analyze_with_llm(transcripts)
+        # [핵심] 마스터 데이터를 기반으로 한 정밀 추론 호출
+        candidates = self._analyze_with_llm(master_data)
         
-        # LLM 호출 후 취소 확인 (긴 작업 직후 확인 필수)
         if task_manager and task_id and task_manager.is_cancelled(task_id):
             return {"error": "Cancelled by user"}
 
         if not candidates:
             return {"error": "AI analysis failed or returned empty result"}
 
-        # [3] 후처리 및 병합 (80~95%)
+        # 3. 고가치 소스 최적화 및 필터링 (80~100%)
         if task_manager and task_id:
-            task_manager.update_progress(task_id, 80, "선별된 소스를 최적화(Merge/Padding) 중...")
+            task_manager.update_progress(task_id, 85, "7점 이상의 고가치 소스 구간 확정 중...")
             
-        # LLM은 ID만 반환하므로, 시간 계산을 위해 transcripts 원본 데이터가 필요합니다.
-        processed_groups = self._process_candidates(candidates, video_duration, transcripts)
+        # [Fix] LLM이 이미 초(seconds) 단위를 반환하므로 transcripts 인자 없이 처리
+        processed_groups = self._process_candidates(candidates, video_duration)
         
-        # [4] 완료 임박
         if task_manager and task_id:
-            task_manager.update_progress(task_id, 95, "결과 저장 중...")
+            task_manager.update_progress(task_id, 100, "편집 소스 선별 및 채점 완료")
 
         return {
             "status": "success",
@@ -59,19 +60,27 @@ class SourceSelector:
             "results": processed_groups
         }
 
-    def _analyze_with_llm(self, transcripts):
+    def _analyze_with_llm(self, master_data):
         """
-        Gemini에게 스크립트를 주고 구간 선별을 요청합니다.
-        (프롬프트 최적화 유지)
+        [Chief Editor Reasoning] 
+        영상과 내용을 1-10점 척도로 절대 평가하여 최적의 소스를 선별합니다.
         """
-        # 입력 데이터 포맷팅 (ID | Time | Text)
-        script_lines = [
-            f"[{t['id']}] {t['start']:.1f}s ~ {t['end']:.1f}s: {t['text']}" 
-            for t in transcripts
-        ]
-        input_text = "\n".join(script_lines)
+        # 마스터 데이터로부터 멀티모달 컨텍스트 구성
+        source_context = []
+        for chap in master_data.get('chapters', []):
+            info = (
+                f"### [시간: {chap['time']['start']:.1f}s ~ {chap['time']['end']:.1f}s]\n"
+                f"- 내용: {chap['summary']}\n"
+            )
+            if chap.get('visual_context'):
+                visuals = " | ".join([f"동작({v['action']}), 자막({v['text']})" for v in chap['visual_context']])
+                info += f"- 시각: {visuals}\n"
+            
+            source_context.append(info)
 
-        # JSON 스키마 정의
+        input_text = "\n---\n".join(source_context)
+
+        # JSON 스키마 (채점 결과 포함)
         response_schema = {
             "type": "ARRAY",
             "items": {
@@ -80,34 +89,40 @@ class SourceSelector:
                     "category": {
                         "type": "STRING", 
                         "enum": ["Hook", "Story", "Insight", "B-Roll"],
-                        "description": "편집 용도 분류"
+                        "description": "Footage type"
                     },
-                    "title": {"type": "STRING", "description": "구간 제목 (5단어 이내)"},
-                    "reason": {"type": "STRING", "description": "선정 이유"},
-                    "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
-                    "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
+                    "score": {"type": "INTEGER", "description": "편집 가치 점수 (1-10)"},
+                    "title": {"type": "STRING", "description": "소체 제목"},
+                    "reason": {"type": "STRING", "description": "선정 이유 (시각적/내용적 강점)"},
+                    "start": {"type": "NUMBER", "description": "시작 시간(초)"},
+                    "end": {"type": "NUMBER", "description": "종료 시간(초)"}
                 },
-                "required": ["category", "title", "reason", "start_id", "end_id"]
+                "required": ["category", "score", "title", "reason", "start", "end"]
             }
         }
 
-        # 프롬프트 설계
+        # 수석 편집자 페르소나 및 점수제 지시문 (Updated with Anchor Examples)
         prompt = f"""
-        You are a professional Video Editor assistant. 
-        Analyze the transcript below and select key segments for a 'Rough Cut'.
-        
-        ### Categories (Select based on these types):
-        1. **Hook**: Highly engaging moments within the first 20% of the video or climax teasers. (Label Color: Rose)
-        2. **Story**: Main narrative arcs or episodes. (Label Color: Iris)
-        3. **Insight**: Key information, lessons, or clear messages. (Label Color: Mango)
-        4. **B-Roll**: Reactions, funny moments, or mood setters suitable for inserts. (Label Color: Lavender)
+        당신은 다큐멘터리 및 예능 전문 수석 편집자(Chief Editor)입니다. 
+        제공된 '멀티모달 분석 데이터'의 각 구간을 전문적 관점에서 평가하여 **7점 이상**인 고가치 소스만 추출하세요.
 
-        ### Rules:
-        - Select continuous chunks using `start_id` and `end_id`.
-        - Do NOT select everything. Pick only the usable parts (Top 30-40%).
-        - Ignore filler words or silence.
+        ### [전문 편집자 평가 지표]:
+        1. **Hook (오프닝)**: 시각적으로 시선을 끌거나, 첫 3초 안에 시청자를 사로잡을 수 있는가?
+        2. **Story (내러티브)**: 정보 전달이 명확하고 문맥의 흐름이 자연스러운가?
+        3. **Insight (정보)**: 핵심 통찰을 담고 있으며, 화면에 중요한 자막/데이터가 나타나는가?
+        4. **B-Roll (인서트 가치)**: 오디오보다 시각적 묘사(Visual)가 훌륭하여 인서트 컷으로 쓰기 좋은가?
 
-        ### Input Transcript:
+        ### [채점 기준표 (Anchor Examples) - 필독]:
+        - **10점 (Perfect)**: 도파민이 터지는 강력한 액션 장면, 또는 핵심 반전이 드러나는 결정적 순간. (무조건 씀)
+        - **7~8점 (Great)**: 내용이 알차고 화면 구도가 안정적임. 컷 편집에 필수적인 구간.
+        - **5점 (Average)**: 평범한 대화나 설명. 특별한 매력은 없지만 흐름상 필요할 수 있음.
+        - **3점 이하 (Bad)**: 화면 변화가 거의 없고, 의미 없는 추임새나 반복 어구만 가득한 구간. (버림)
+
+        ### [선별 규칙]:
+        - 반드시 위 '채점 기준표'에 근거하여 냉정하게 평가하세요.
+        - **오직 7점 이상인 구간만** 결과에 포함시키세요.
+
+        ### 분석 데이터:
         {input_text}
         """
 
@@ -122,33 +137,30 @@ class SourceSelector:
                     response_schema=response_schema
                 )
             )
-            return json.loads(response.text)
+            # 7점 이상 필터링은 프롬프트에서도 지시했지만, 코드 레벨에서 한 번 더 보장합니다.
+            results = json.loads(response.text)
+            return [res for res in results if res.get('score', 0) >= 7]
 
         except Exception as e:
-            print(f"[SourceSelector] LLM Error: {e}")
+            print(f"[SourceSelector Error] Chief Editor Reasoning Failed: {e}")
             return []
 
-    def _process_candidates(self, candidates, video_duration, transcripts):
+    def _process_candidates(self, candidates, video_duration):
         """
         [핵심 알고리즘]
-        1. ID를 실제 시간(Time)으로 변환
+        1. LLM이 반환한 초(seconds) 단위를 기반으로 처리
         2. 앞뒤 패딩(+5초) 추가
         3. 겹치거나 인접한(2초 이내) 구간 병합
         """
         raw_segments = []
         
-        # ID로 transcript 조회 최적화를 위한 딕셔너리 생성
-        trans_map = {t['id']: t for t in transcripts}
-
         for cand in candidates:
-            s_id = cand.get('start_id')
-            e_id = cand.get('end_id')
+            # LLM은 이미 초(seconds) 단위를 반환함
+            start_time = cand.get('start')
+            end_time = cand.get('end')
             
-            if s_id not in trans_map or e_id not in trans_map:
+            if start_time is None or end_time is None:
                 continue
-                
-            start_time = trans_map[s_id]['start']
-            end_time = trans_map[e_id]['end']
             
             # 패딩 적용 (앞뒤 5초)
             padded_start = max(0, start_time - 5.0)
@@ -156,6 +168,7 @@ class SourceSelector:
             
             raw_segments.append({
                 "category": cand['category'],
+                "score": cand.get('score', 7),
                 "title": cand['title'],
                 "reason": cand['reason'],
                 "start": padded_start,
@@ -187,7 +200,7 @@ class SourceSelector:
             if is_same_category and is_adjacent:
                 # 병합 수행: 끝나는 시간을 더 긴 쪽으로 연장
                 last['end'] = max(last['end'], current['end'])
-                # (선택) 이유는 합치거나, 첫 번째 이유를 대표로 사용
+                # 이유는 첫 번째 이유를 유지하거나 병합 가능
             else:
                 merged.append(current)
 
