@@ -36,7 +36,7 @@ class TextRefiner:
 
         # 프롬프트 엔지니어링: 타임스탬프 기반 문단 분리 및 수직 나열 강제
         prompt = f"""
-        You are an expert AI blog editor specializing in video content analysis.
+        You are an expert AI blog editor specializing in Christian sermon content analysis.
         Convert the following raw script into a professional, engaging Korean blog post.
 
         ### [TASK]
@@ -44,25 +44,25 @@ class TextRefiner:
         The most important goal is **READABILITY** and **VERTICAL LISTING** of information.
 
         ### [CONSTRAINTS - CRITICAL]
-        1. **Paragraph per Timestamp**: Every single timestamp `[MM:SS]` MUST start a NEW paragraph.
-        2. **No Inline Timestamps**: NEVER place a timestamp in the middle of a sentence. 
-        3. **No Hallucination**: NEVER place timestamps inside bold (`**`), blockquotes (`>`), or bullet points (`-`). 
+        1. **Paragraph per Timestamp**: Every single paragraph MUST start with a timestamp `[MM:SS]`.
+        2. **NO Bullet Points**: Do NOT use bullet points (`-`, `*`, `•`) at the start of any line. Strictly forbidden.
+        3. **No Inline Timestamps**: NEVER place a timestamp in the middle of a sentence. 
+        4. **No Hallucination**: NEVER place timestamps inside bold (`**`) or blockquotes (`>`). 
            - Right: `[01:23] **Key Point**: Description sentence.`
            - Wrong: `**[01:23] Key Point**: Description.**`
            - Wrong: `- [01:23] Detail.`
-        4. **Structure**: Each timestamped entry should stand alone. Use bullet points (`-`) only for minor sub-details *below* a timestamped paragraph.
         5. **Style**: Use level 3 header (`###`) for the chapter title. Use bold (`**`) for emphasis on key terms.
 
         ### [EXAMPLE]
-        Input: [00:12] 안녕하세요 [00:15] 오늘은 파이썬에 대해 [00:18] 알아보겠습니다.
+        Input: [00:12] 오늘 함께 나눌 말씀은 [00:15] 요한복음 3장 16절입니다. [00:18] 하나님이 세상을 사랑하사 독생자를 주셨으니.
         Output: 
-        ### 파이썬 코딩 강의
+        ### 하나님이 세상을 사랑하사
         
-        [00:12] **인사 및 소개**: 영상 분석 전문가와 함께하는 파이썬 강의에 오신 것을 환영합니다.
+        [00:12] **성경 본문 선포**: 오늘 예배를 통해 함께 나눌 하나님의 말씀은 신약 성경 요한복음의 핵심 구절입니다.
         
-        [00:15] **주제 선정**: 오늘은 프로그래밍의 기초인 파이썬의 핵심 개념을 다룹니다.
+        [00:15] **본문 읽기**: 요한복음 3장 16절 말씀을 함께 합독하며 하나님의 사랑을 깊이 묵상하는 시간을 갖습니다.
         
-        [00:18] **강의 목표**: 이 영상을 통해 기본적인 문법과 환경 설정을 마스터할 수 있습니다.
+        [00:18] **설교의 시작**: "하나님이 세상을 이처럼 사랑하사 독생자를 주셨으니"라는 말씀으로 설교의 포문을 엽니다.
 
         ### [INPUT DATA]
         - Chapter Title: {chapter_title}
@@ -101,7 +101,21 @@ class TextRefiner:
             # 4. 리스트 기호(-) 바로 뒤에 타임스탬프가 붙어 있는 경우 분리
             refined_text = re.sub(r'-\s*(\[\d{2}:\d{2}\])', r'\n\1', refined_text)
 
-            # 5. 중복된 타임스탬프가 한 줄에 있는 경우 첫 번째만 유지
+            # 5. [New] 글머리 기호(Bullet Points) 및 환각 라인 제거
+            # (A) 불렛 포인트 뒤에 타임스탬프가 있는 경우 -> 불렛만 제거 (예: "- [00:00]" -> "[00:00]")
+            refined_text = re.sub(r'^\s*[-*•]\s*(\[\d{2}:\d{2}\])', r'\1', refined_text, flags=re.MULTILINE)
+
+            # (B) 라인 단위 필터링: 불렛으로 시작하지만 타임스탬프가 없는 라인(요약문 등) 삭제
+            final_lines = []
+            for line in refined_text.split('\n'):
+                stripped = line.strip()
+                # 불렛 기호로 시작하고, 라인 내에 타임스탬프가 없는 경우 -> 스킵 (환각)
+                if re.match(r'^\s*[-*•]', stripped) and not re.search(r'\[\d{2}:\d{2}\]', stripped):
+                    continue
+                final_lines.append(line)
+            refined_text = '\n'.join(final_lines)
+
+            # 6. 중복된 타임스탬프가 한 줄에 있는 경우 첫 번째만 유지
             def remove_duplicate_ts(line: str) -> str:
                 """한 줄에 여러 타임스탬프가 있을 경우 첫 번째만 남기고 정리합니다."""
                 ts_list = re.findall(r'\[\d{2}:\d{2}\]', line)
@@ -117,7 +131,7 @@ class TextRefiner:
             lines = [remove_duplicate_ts(line) for line in refined_text.split('\n')]
             refined_text = '\n'.join(lines)
 
-            # 6. 최종 공백 및 과도한 줄바꿈 정리 (3개 이상 -> 2개)
+            # 7. 최종 공백 및 과도한 줄바꿈 정리 (3개 이상 -> 2개)
             refined_text = re.sub(r'\n{3,}', '\n\n', refined_text)
 
             return refined_text.strip()
