@@ -21,7 +21,7 @@ class TextRefiner:
     def refine_chapter(self, raw_text, chapter_title=""):
         """
         챕터별 텍스트를 입력받아 구조화된 Markdown 형식으로 반환합니다.
-        [Update] 마크다운 문법 오류(공백 등)를 정규식으로 자동 교정하는 로직 추가
+        [Update] 타임스탬프 보존 + 리스트/인용구/강조 효과 전량 복구
         """
         if not self.client:
             return "API Key missing."
@@ -29,26 +29,28 @@ class TextRefiner:
         if not raw_text or len(raw_text.strip()) < 10:
             return "내용이 너무 짧아 요약할 수 없습니다."
 
-        # 프롬프트 엔지니어링: 전문 에디터 페르소나 부여 + 문법 규칙 강화
+        # 프롬프트 엔지니어링: 전문 에디터 페르소나 + 시각적 효과 + 타임스탬프 규칙
         prompt = f"""
         You are a professional blog editor. 
         Your task is to refine the following raw spoken text into a highly readable, structured Markdown format.
 
         ### Guidelines:
         1. **Title**: Start with a level 3 header (`###`) using the provided chapter title: "{chapter_title}".
-        2. **Structure**: Break down the text into logical paragraphs. Use bullet points (`-`) for lists.
-        3. **Highlight**: Use bold (`**`) for key terms or important sentences.
-        4. **Quote**: If there is a key message or insight, use a Blockquote (`>`).
-        5. **Tone**: Polite, engaging, and professional (maintain the original meaning but fix speech errors).
-        6. **Language**: **Korean (한국어)** only.
+        2. **Structure**: Break down the text into logical paragraphs. Use **bullet points (`-`)** for lists or step-by-step explanations.
+        3. **Timestamps**: Keep timestamps (e.g., [00:12]) from the raw text. 
+           - Place them at the very beginning of a sentence or paragraph.
+           - Format: `[MM:SS]`.
+           - **CRITICAL**: Timestamps must be OUTSIDE of any bold (`**`) or quote (`>`) markers.
+        4. **Highlight**: Use **bold (`**`)** for key terms or important sentences.
+        5. **Insight**: Use **Blockquotes (`>`)** for key messages, quotes, or deep insights.
+        6. **Tone**: Polite, engaging, and professional Korean.
         
-        ### Formatting Rules (Strict):
+        ### Formatting Rules:
         - **NEVER** put spaces inside bold markers. 
-        - Wrong: ** Key Point **
-        - Right: **Key Point**
-        - Ensure quotes inside bold are tight: **'Word'** (not ** ' Word ' **).
+        - Right: `[01:23] **중요한 문장입니다.**`
+        - Wrong: `** [01:23] 중요한 문장입니다. **`
 
-        ### Raw Text:
+        ### Raw Text with Timestamps:
         {raw_text}
         """
 
@@ -58,23 +60,26 @@ class TextRefiner:
                 model=self.model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.3, # 사실 기반 유지를 위해 온도를 낮춤
+                    temperature=0.2,
                 )
             )
             
             refined_text = response.text.strip()
             
-            # --- [Regex Healing] 마크다운 문법 강제 교정 ---
+            # --- [Regex Healing] 마크다운 문법 및 타임스탬프 교정 ---
             
-            # 1. 굵은 글씨 내부 공백 제거: "** 텍스트 **" -> "**텍스트**"
-            # (?<=...) 등의 룩비하인드 대신 안전한 그룹 치환 사용
+            # 1. 굵은 글씨 내부 공백 제거
             refined_text = re.sub(r'\*\*\s+(.+?)\s+\*\*', r'**\1**', refined_text)
             
-            # 2. 굵은 글씨 내부의 따옴표 공백 제거: "** ' 텍스트 ' **" -> "**'텍스트'**"
+            # 2. 굵은 글씨 내부의 따옴표 공백 제거
             refined_text = re.sub(r"\*\*\s*['\"](.+?)['\"]\s*\*\*", r"**'\1'**", refined_text)
+
+            # 3. 타임스탬프 형식 표준화
+            refined_text = re.sub(r'\[(\d):(\d+)\]', r'[0\1:\2]', refined_text)
+            refined_text = re.sub(r'\[(\d+):(\d)\]', r'[\1:0\2]', refined_text)
             
-            # 3. 불필요한 이중 별표 제거 (가끔 ****텍스트**** 형태로 나올 때)
-            refined_text = re.sub(r'\*{4,}(.+?)\*{4,}', r'**\1**', refined_text)
+            # 4. 강조 표시 안으로 잘못 들어간 타임스탬프를 밖으로 꺼내기
+            refined_text = re.sub(r'\*\*(\[\d{2}:\d{2}\])\s*(.*?)\*\*', r'\1 **\2**', refined_text)
 
             return refined_text
 

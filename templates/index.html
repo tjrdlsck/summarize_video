@@ -97,6 +97,39 @@
             /* Gray-700 */
         }
 
+        /* [New] Inline Timestamp Style */
+        .timestamp-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            background-color: #f3f4f6; /* Gray-100 */
+            color: #4f46e5; /* Indigo-600 */
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.75rem;
+            font-weight: 700;
+            padding: 2px 6px;
+            border-radius: 6px;
+            margin-right: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid #e5e7eb;
+            vertical-align: middle;
+            user-select: none;
+        }
+
+        .timestamp-link:hover {
+            background-color: #4f46e5;
+            color: white;
+            border-color: #4f46e5;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 4px rgba(79, 70, 229, 0.2);
+        }
+
+        .timestamp-link::before {
+            content: '▶';
+            font-size: 0.6rem;
+        }
+
         .markdown-body ul {
             list-style-type: disc;
             padding-left: 1.5rem;
@@ -729,6 +762,14 @@
                     videoRef.current.play();
                 }
             };
+
+            // [New] 전역 창에 seek 함수 노출 (마크다운 내부의 onclick에서 접근 가능하게 함)
+            useEffect(() => {
+                window.seekFromTimestamp = (seconds) => {
+                    seekVideo(seconds);
+                };
+            }, [playerData]);
+
             const formatTime = (s) => {
                 if (!s && s !== 0) return "0:00";
                 const m = Math.floor(s / 60);
@@ -1617,11 +1658,25 @@
                                                                 <span className="text-sm text-gray-400 font-medium">Chapter {idx + 1}</span>
                                                             </div>
 
-                                                            {/* [핵심 변경] Markdown 렌더링 영역 */}
+                                                            {/* [핵심 변경] Markdown 렌더링 영역 + 타임스탬프 파싱 */}
                                                             {chapter.blog_content ? (
                                                                 <div
                                                                     className="markdown-body prose-custom"
-                                                                    dangerouslySetInnerHTML={{ __html: marked.parse(chapter.blog_content) }}
+                                                                    dangerouslySetInnerHTML={{ 
+                                                                        __html: (() => {
+                                                                            // 1. 먼저 마크다운을 HTML로 변환
+                                                                            let html = marked.parse(chapter.blog_content);
+                                                                            
+                                                                            // 2. HTML 내에서 [MM:SS] 또는 [M:SS] 패턴을 찾아 버튼으로 치환
+                                                                            // 정규식: \[(\d{1,2}):(\d{2})\]
+                                                                            html = html.replace(/\[(\d{1,2}):(\d{2})\]/g, (match, min, sec) => {
+                                                                                const totalSeconds = parseInt(min) * 60 + parseInt(sec);
+                                                                                return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${min}:${sec}</span>`;
+                                                                            });
+                                                                            
+                                                                            return html;
+                                                                        })()
+                                                                    }}
                                                                 />
                                                             ) : (
                                                                 // 하위 호환성: blog_content가 없는 구버전 데이터는 기존 방식대로 표시

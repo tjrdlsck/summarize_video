@@ -276,13 +276,22 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
             current_progress = 90 + int((i / total_chaps) * 9)
             task_manager.update_progress(task_id, current_progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
 
-            # 챕터에 해당하는 텍스트 추출
+            # 챕터에 해당하는 텍스트 추출 (타임스탬프 주입 버전)
             c_start = chapter['time']['start']
             c_end = chapter['time']['end']
-            chapter_text_list = [
-                s['text'] for s in sorted_segments 
-                if s['start'] >= c_start and s['start'] < c_end
-            ]
+            
+            chapter_text_list = []
+            last_ts = -20.0 # 초기값 (최소 10초 간격 유도)
+            
+            for s in sorted_segments:
+                if s['start'] >= c_start and s['start'] < c_end:
+                    # 10초 이상 간격이 벌어지면 타임스탬프 삽입
+                    if s['start'] - last_ts >= 10.0:
+                        m, sec = divmod(int(s['start']), 60)
+                        chapter_text_list.append(f"[{m:02}:{sec:02}]")
+                        last_ts = s['start']
+                    chapter_text_list.append(s['text'])
+            
             raw_text_chunk = " ".join(chapter_text_list)
             
             # 윤문 (Refine)
@@ -627,13 +636,22 @@ async def run_blog_regeneration_pipeline(task_id: str, req: RegenerateBlogReques
             progress = int((i / total_chaps) * 100)
             task_manager.update_progress(task_id, progress, f"블로그 다시 작성 중... ({i+1}/{total_chaps})")
 
-            # 챕터 구간 텍스트 추출
+            # 챕터 구간 텍스트 추출 (타임스탬프 주입 버전)
             c_start = chapter['time']['start']
             c_end = chapter['time']['end']
-            chapter_text_list = [
-                s['text'] for s in sorted_segments 
-                if s['start'] >= c_start and s['start'] < c_end
-            ]
+            
+            chapter_text_list = []
+            last_ts = -20.0 # 초기값
+            
+            for s in sorted_segments:
+                if s['start'] >= c_start and s['start'] < c_end:
+                    # 10초 이상 간격이 벌어지면 타임스탬프 삽입
+                    if s['start'] - last_ts >= 10.0:
+                        m, sec = divmod(int(s['start']), 60)
+                        chapter_text_list.append(f"[{m:02}:{sec:02}]")
+                        last_ts = s['start']
+                    chapter_text_list.append(s['text'])
+            
             raw_text_chunk = " ".join(chapter_text_list)
             
             # 윤문 (Refine)
