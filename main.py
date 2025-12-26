@@ -98,8 +98,8 @@ class ClipRequest(BaseModel):
 class ShortsGenerateRequest(BaseModel):
     filename: str  # 원본 영상 파일명
 
-class ShortsGenerateRequest(BaseModel):
-    filename: str  # 원본 영상 파일명
+class RegenerateBlogRequest(BaseModel): # [New] 블로그 재생성 요청 모델
+    filename: str
 
 class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청 모델
     video_filename: str
@@ -593,6 +593,67 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
                 try: os.remove(f)
                 except: pass
 
+async def run_blog_regeneration_pipeline(task_id: str, req: RegenerateBlogRequest):
+    """
+    [Background] 블로그 뷰 재생성 파이프라인
+    - 기존 챕터와 자막 데이터를 사용하여 블로그 윤문만 다시 수행
+    """
+    base_name = os.path.splitext(req.filename)[0]
+    transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+    summary_path = os.path.join("static/results", f"{base_name}_summary.json")
+
+    try:
+        task_manager.update_progress(task_id, 0, "블로그 재생성 준비 중...")
+        
+        if not os.path.exists(transcript_path) or not os.path.exists(summary_path):
+            raise FileNotFoundError("기존 분석 데이터가 존재하지 않습니다.")
+
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            segments = json.load(f)
+        with open(summary_path, 'r', encoding='utf-8') as f:
+            summary_data = json.load(f)
+
+        chapters = summary_data.get("chapters", [])
+        if not chapters:
+            raise ValueError("요약된 챕터 정보가 없습니다.")
+
+        total_chaps = len(chapters)
+        sorted_segments = sorted(segments, key=lambda x: x['start'])
+        loop = asyncio.get_running_loop()
+
+        for i, chapter in enumerate(chapters):
+            if task_manager.is_cancelled(task_id): raise TaskCancelledError()
+
+            progress = int((i / total_chaps) * 100)
+            task_manager.update_progress(task_id, progress, f"블로그 다시 작성 중... ({i+1}/{total_chaps})")
+
+            # 챕터 구간 텍스트 추출
+            c_start = chapter['time']['start']
+            c_end = chapter['time']['end']
+            chapter_text_list = [
+                s['text'] for s in sorted_segments 
+                if s['start'] >= c_start and s['start'] < c_end
+            ]
+            raw_text_chunk = " ".join(chapter_text_list)
+            
+            # 윤문 (Refine)
+            refined_md = await loop.run_in_executor(
+                None,
+                partial(refiner.refine_chapter, raw_text_chunk, chapter['title'])
+            )
+            chapter['blog_content'] = refined_md
+
+        # 결과 업데이트 저장
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summary_data, f, ensure_ascii=False, indent=2)
+
+        task_manager.complete_task(task_id, summary_data)
+        print(f"[{task_id}] Blog Regeneration Completed: {req.filename}")
+
+    except Exception as e:
+        print(f"[{task_id}] Blog Regeneration Failed: {e}")
+        task_manager.fail_task(task_id, str(e))
+
 async def worker():
     print("--- [Worker] Analysis Worker Started ---")
     while True:
@@ -606,9 +667,10 @@ async def worker():
                     await run_analysis_pipeline(task_id, req)
                 elif isinstance(req, ClipRequest):
                     await run_clip_pipeline(task_id, req)
-                # [Add] 숏츠 생성 요청 처리 추가
                 elif isinstance(req, ShortsGenerateRequest):
                     await run_shorts_pipeline(task_id, req)
+                elif isinstance(req, RegenerateBlogRequest):
+                    await run_blog_regeneration_pipeline(task_id, req)
                     
         except Exception as e:
             print(f"[Worker Error] {e}")
@@ -654,6 +716,21 @@ async def start_processing(req: AnalyzeRequest):
         "task_id": task_id, 
         "message": f"Task queued. Position: {job_queue.qsize()}"
     }
+
+@app.post("/api/blog/regenerate")
+async def regenerate_blog(req: RegenerateBlogRequest):
+    """
+    [Async] 블로그 뷰 재생성 요청
+    """
+    task_id = str(uuid.uuid4())
+    
+    # Task Manager 등록 (type="blog_regeneration")
+    task_manager.add_task(task_id, req.filename, task_type="blog_regeneration")
+    
+    # Queue에 작업 추가
+    await job_queue.put((task_id, req))
+    
+    return {"task_id": task_id, "message": "Blog regeneration queued"}
 
 @app.get("/api/tasks")
 async def get_active_tasks():
