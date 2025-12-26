@@ -97,8 +97,15 @@ class VideoSummarizer:
         self.model_name = "gemini-2.5-flash"  # Cost-effective high performance model
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def _create_prompt(self, segments):
-        """LLM에게 던질 경량화된 스크립트(ID | Text) 생성"""
+    def _create_prompt(self, segments: list[dict]) -> str:
+        """LLM에게 전달할 경량화된 스크립트 데이터를 생성합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+
+        Returns:
+            ID와 텍스트가 결합된 문자열 형태의 스크립트 데이터.
+        """
         lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
         script_text = "\n".join(lines)
         
@@ -113,12 +120,23 @@ class VideoSummarizer:
         )
         return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
-    # [Update] 기존 summarize 메서드를 교체하세요.
-    def summarize(self, segments, video_filename, custom_title=None, status_callback=None):
-        """
-        Gemini 1.5/2.0의 JSON Mode를 사용하여 정확한 챕터 데이터를 생성합니다.
-        Regex 파싱이 필요 없어 훨씬 안정적입니다.
-        [Fix] 챕터 제목의 Markdown 문법 제거 및 가독성 높은 제목 처리 추가
+    def summarize(
+        self, 
+        segments: list[dict], 
+        video_filename: str, 
+        custom_title: str = None, 
+        status_callback: callable = None
+    ) -> dict:
+        """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+            video_filename: 원본 영상 파일명.
+            custom_title: 사용자가 지정한 영상 제목 (선택 사항).
+            status_callback: 진행 상태를 보고할 콜백 함수 (선택 사항).
+
+        Returns:
+            요약 결과, 챕터 리스트, 토큰 사용량 등이 포함된 결과 딕셔너리.
         """
         if not self.api_key:
             return {"error": "GOOGLE_API_KEY is missing in .env"}
@@ -174,7 +192,7 @@ class VideoSummarizer:
             # JSON 파싱
             final_chapters = json.loads(response.text)
             
-            # ID -> Time 매핑 & [New] 챕터 제목 정제
+            # ID -> Time 매핑 & 챕터 제목 정제
             mapped_result = []
             for chap in final_chapters:
                 s_idx = max(0, min(chap['start_id'] - 1, total_lines - 1))
@@ -183,12 +201,11 @@ class VideoSummarizer:
                 start_time = segments[s_idx]['start']
                 end_time = segments[e_idx]['end']
                 
-                # [Fix] 챕터 제목 내 불필요한 마크다운(**, __) 제거
-                # 예: "**서론**" -> "서론"
+                # 챕터 제목 내 불필요한 마크다운(**, __) 제거
                 clean_chapter_title = re.sub(r'\*\*|__', '', chap['title']).strip()
                 
                 mapped_result.append({
-                    "title": clean_chapter_title, # 정제된 제목 사용
+                    "title": clean_chapter_title,
                     "summary": chap['summary'],
                     "time": {
                         "start": start_time,
@@ -198,7 +215,6 @@ class VideoSummarizer:
                     }
                 })
 
-            # [Fix] display_title이 이미 정제되어 넘어오므로 그대로 사용
             display_title = custom_title if custom_title and custom_title.strip() else video_filename
 
             result_data = {
@@ -222,8 +238,15 @@ class VideoSummarizer:
             print(f"[Error] Summarization failed: {e}")
             return {"error": str(e)}
         
-    def _format_time(self, seconds):
-        """초(seconds)를 HH:MM:SS 형식의 문자열로 변환"""
+    def _format_time(self, seconds: float) -> str:
+        """초(seconds)를 HH:MM:SS 형식의 문자열로 변환합니다.
+
+        Args:
+            seconds: 변환할 초 단위 시간.
+
+        Returns:
+            HH:MM:SS 형식의 시간 문자열.
+        """
         m, s = divmod(int(seconds), 60)
         h, m = divmod(m, 60)
         return f"{h:02}:{m:02}:{s:02}"
