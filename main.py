@@ -285,10 +285,10 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
             
             for s in sorted_segments:
                 if s['start'] >= c_start and s['start'] < c_end:
-                    # 10초 이상 간격이 벌어지면 타임스탬프 삽입
-                    if s['start'] - last_ts >= 10.0:
+                    # [Fix] 5초 이상 간격으로 단축하고, 줄바꿈을 넣어 문맥 분리
+                    if s['start'] - last_ts >= 5.0:
                         m, sec = divmod(int(s['start']), 60)
-                        chapter_text_list.append(f"[{m:02}:{sec:02}]")
+                        chapter_text_list.append(f"\n[{m:02}:{sec:02}]")
                         last_ts = s['start']
                     chapter_text_list.append(s['text'])
             
@@ -645,10 +645,10 @@ async def run_blog_regeneration_pipeline(task_id: str, req: RegenerateBlogReques
             
             for s in sorted_segments:
                 if s['start'] >= c_start and s['start'] < c_end:
-                    # 10초 이상 간격이 벌어지면 타임스탬프 삽입
-                    if s['start'] - last_ts >= 10.0:
+                    # [Fix] 5초 이상 간격으로 단축하고, 줄바꿈을 넣어 문맥 분리
+                    if s['start'] - last_ts >= 5.0:
                         m, sec = divmod(int(s['start']), 60)
-                        chapter_text_list.append(f"[{m:02}:{sec:02}]")
+                        chapter_text_list.append(f"\n[{m:02}:{sec:02}]")
                         last_ts = s['start']
                     chapter_text_list.append(s['text'])
             

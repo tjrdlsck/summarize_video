@@ -34,43 +34,60 @@ class TextRefiner:
         if not raw_text or len(raw_text.strip()) < 10:
             return "내용이 너무 짧아 요약할 수 없습니다."
 
-        # 프롬프트 엔지니어링: 타임스탬프 기반 문단 분리 및 수직 나열 강제
+        # 프롬프트 엔지니어링: 설교 특화 블로그 포스팅 엔진 (Sermon-to-Blog Engine)
         prompt = f"""
-        You are an expert AI blog editor specializing in Christian sermon content analysis.
-        Convert the following raw script into a professional, engaging Korean blog post.
+        You are an expert AI blog editor and theologian specializing in Christian sermon analysis.
+        Your goal is to transform a raw sermon transcript into a spiritually deep, well-structured, and readable Korean blog post.
 
-        ### [TASK]
-        Refine the raw text into a structured Markdown format. 
-        The most important goal is **READABILITY** and **VERTICAL LISTING** of information.
+        ### [CORE MISSIONS]
+        1. **Fact-Based Refining (사실 기반 윤문)**: Your output must be strictly based on the provided [INPUT DATA]. Do NOT invent stories, theological theories, or names (e.g., Calvin, Luther) unless they are explicitly mentioned in the input.
+        2. **Spoken to Written (문어체 변환)**: Convert casual spoken language into professional, respectful Korean (문어체). Use "~입니다", "~하십시오" style.
+        3. **Bible Verse Enrichment (성경 본문 보강)**: Whenever a Bible verse is mentioned (e.g., "John 3:16"), you MUST provide the full text of that verse in a blockquote format (`>`).
+        4. **Timestamp Integration**: Start major paragraphs with the corresponding timestamp `[MM:SS]` from the input to maintain the link with the video.
 
-        ### [CONSTRAINTS - CRITICAL]
-        1. **Paragraph per Timestamp**: Every single paragraph MUST start with a timestamp `[MM:SS]`.
-        2. **NO Bullet Points**: Do NOT use bullet points (`-`, `*`, `•`) at the start of any line. Strictly forbidden.
-        3. **No Inline Timestamps**: NEVER place a timestamp in the middle of a sentence. 
-        4. **No Hallucination**: NEVER place timestamps inside bold (`**`) or blockquotes (`>`). 
-           - Right: `[01:23] **Key Point**: Description sentence.`
-           - Wrong: `**[01:23] Key Point**: Description.**`
-           - Wrong: `- [01:23] Detail.`
-        5. **Style**: Use level 3 header (`###`) for the chapter title. Use bold (`**`) for emphasis on key terms.
+        ### [STRICT DATA RULES - CRITICAL]
+        1. **NO HALLUCINATION**: Do not add any information not present in the source text.
+        2. **TIMESTAMP FIDELITY**: **ONLY** use timestamps that appear in the [INPUT DATA]. Do NOT create fake timestamps like [00:00] if they are not in the input.
+        3. **CHRONOLOGICAL ORDER**: Do not reorder the content. Follow the flow of the input script.
+
+        ### [CONSTRAINTS]
+        - **Readability**: Use double newlines between paragraphs.
+        - **Structure**: Use `####` headers for main points (e.g., "First", "Second").
+        - **Timestamp Placement**: Place the timestamp at the very beginning of the line.
+          - Right: `[01:23] **Subheading**: Content...`
+          - Wrong: `**[01:23] Subheading**...`
 
         ### [EXAMPLE]
-        Input: [00:12] 오늘 함께 나눌 말씀은 [00:15] 요한복음 3장 16절입니다. [00:18] 하나님이 세상을 사랑하사 독생자를 주셨으니.
+        Input: 
+        [00:10] 자 오늘 말씀은 창세기 1장 1절입니다
+        [00:15] 태초에 하나님이 천지를 창조하시니라
+        [00:20] 이 말씀이 얼마나 놀랍습니까
+        [05:30] 첫째로 생각할 건 창조의 목적입니다
+        [05:35] 바로 사랑 때문이죠
+
         Output: 
-        ### 하나님이 세상을 사랑하사
+        ### 천지 창조의 신비
+
+        [00:10] **성경 본문 선포**: 오늘 우리가 함께 나눌 말씀은 창세기의 시작입니다.
         
-        [00:12] **성경 본문 선포**: 오늘 예배를 통해 함께 나눌 하나님의 말씀은 신약 성경 요한복음의 핵심 구절입니다.
+        [00:15] **성경 읽기**:
+        > [성경 본문] 창세기 1:1: "태초에 하나님이 천지를 창조하시니라"
         
-        [00:15] **본문 읽기**: 요한복음 3장 16절 말씀을 함께 합독하며 하나님의 사랑을 깊이 묵상하는 시간을 갖습니다.
+        [00:20] **말씀의 경이로움**: 이 선포는 우리에게 큰 놀라움을 줍니다. 하나님께서 세상을 만드셨다는 사실이 믿음의 기초가 됩니다.
+
+        #### 1. 창조의 목적: 사랑
+
+        [05:30] **첫 번째 대지**: 설교자는 창조의 가장 중요한 목적을 탐구합니다.
         
-        [00:18] **설교의 시작**: "하나님이 세상을 이처럼 사랑하사 독생자를 주셨으니"라는 말씀으로 설교의 포문을 엽니다.
+        [05:35] **사랑의 동기**: 하나님께서 세상을 지으신 이유는 바로 사랑 때문입니다.
 
         ### [INPUT DATA]
         - Chapter Title: {chapter_title}
-        - Raw Script:
+        - Raw Script (Timestamped):
         {raw_text}
 
         ### [OUTPUT]
-        (Write the refined blog post in Korean, ensuring double newlines between timestamped paragraphs)
+        (Write the refined blog post in Korean. Adhere strictly to the timestamps provided above.)
         """
 
         try:
@@ -79,7 +96,7 @@ class TextRefiner:
                 model=self.model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.1,
+                    temperature=0.1, # 사실 기반 유지를 위해 낮음
                     top_p=0.95,
                 )
             )
@@ -95,21 +112,16 @@ class TextRefiner:
             refined_text = re.sub(r'(\*\*|>)\s*(\[\d{2}:\d{2}\])', r'\2 \1', refined_text)
 
             # 3. 모든 타임스탬프 앞에 강제로 두 줄의 줄바꿈(\n\n)을 삽입하여 문단을 분리
-            # 가독성을 위해 타임스탬프가 나오는 즉시 이전 문맥과 단절시킵니다.
             refined_text = re.sub(r'\s*(\[\d{2}:\d{2}\])', r'\n\n\1', refined_text)
 
             # 4. 리스트 기호(-) 바로 뒤에 타임스탬프가 붙어 있는 경우 분리
             refined_text = re.sub(r'-\s*(\[\d{2}:\d{2}\])', r'\n\1', refined_text)
 
             # 5. [New] 글머리 기호(Bullet Points) 및 환각 라인 제거
-            # (A) 불렛 포인트 뒤에 타임스탬프가 있는 경우 -> 불렛만 제거 (예: "- [00:00]" -> "[00:00]")
-            refined_text = re.sub(r'^\s*[-*•]\s*(\[\d{2}:\d{2}\])', r'\1', refined_text, flags=re.MULTILINE)
-
-            # (B) 라인 단위 필터링: 불렛으로 시작하지만 타임스탬프가 없는 라인(요약문 등) 삭제
             final_lines = []
             for line in refined_text.split('\n'):
                 stripped = line.strip()
-                # 불렛 기호로 시작하고, 라인 내에 타임스탬프가 없는 경우 -> 스킵 (환각)
+                # 불렛 기호로 시작하고, 라인 내에 타임스탬프가 없는 경우 -> 스킵 (환각 가능성 높음)
                 if re.match(r'^\s*[-*•]', stripped) and not re.search(r'\[\d{2}:\d{2}\]', stripped):
                     continue
                 final_lines.append(line)
@@ -117,21 +129,17 @@ class TextRefiner:
 
             # 6. 중복된 타임스탬프가 한 줄에 있는 경우 첫 번째만 유지
             def remove_duplicate_ts(line: str) -> str:
-                """한 줄에 여러 타임스탬프가 있을 경우 첫 번째만 남기고 정리합니다."""
                 ts_list = re.findall(r'\[\d{2}:\d{2}\]', line)
                 if len(ts_list) > 1:
                     first_ts = ts_list[0]
-                    # 모든 타임스탬프를 제거한 후 순수 텍스트만 추출
                     content = re.sub(r'\[\d{2}:\d{2}\]', '', line).strip()
-                    # 첫 번째 타임스탬프와 텍스트 결합
                     return f"{first_ts} {content}"
                 return line
 
-            # 각 줄별로 중복 타임스탬프 제거 처리
             lines = [remove_duplicate_ts(line) for line in refined_text.split('\n')]
             refined_text = '\n'.join(lines)
 
-            # 7. 최종 공백 및 과도한 줄바꿈 정리 (3개 이상 -> 2개)
+            # 7. 최종 공백 및 과도한 줄바꿈 정리
             refined_text = re.sub(r'\n{3,}', '\n\n', refined_text)
 
             return refined_text.strip()
