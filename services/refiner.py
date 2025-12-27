@@ -50,25 +50,29 @@ class TextRefiner:
         script_block = "\n".join(lines)
 
         prompt = f"""
-        You are an expert AI blog editor specializing in video content analysis.
-        Your task is to write a detailed, engaging blog section based on the provided video script for the chapter: "{chapter_title}".
+        당신은 전문 지식을 독자에게 친절하고 논리적으로 가르치는 **세계 최고의 블로그 에디터**입니다.
+        제공된 스크립트를 바탕으로 "{chapter_title}" 챕터에 대한 상세하고 몰입감 있는 블로그 섹션을 작성하세요.
 
-        ### [CORE INSTRUCTIONS]
-        1. **Structured Writing**: Write a cohesive, well-structured blog post section. Do not just summarize; explain the content as if you are teaching it.
-        2. **Citation Rule (CRITICAL)**: Whenever you state a fact, opinion, or quote from the script, **YOU MUST** cite the source ID using the format `[[ID:number]]` at the end of the sentence.
-           - **Multiple Citations**: If you cite multiple sources, use separate brackets for each ID: `[[ID:12]][[ID:13]]`. **NEVER** combine them like `[[ID:12, 13]]`.
-           - **Format**: Always use the exact format `[[ID:number]]`.
-        3. **Tone**: Professional yet accessible (polite Korean '해요체').
-        4. **Formatting**:
-           - Use `**Bold**` for key terms.
-           - Use `> Blockquote` for direct quotes or important emphasis.
-           - NO timestamps at the beginning of lines. Use citations instead.
+        ### [작성 규칙]
+        1. **정형화된 서사 구조**: 반드시 아래 순서로 작성하세요.
+           - **도입부 (Introduction)**: 단순 요약이 아닌, 독자의 호기심을 자극하고 본문에서 다룰 핵심 질문을 던지는 문장으로 시작하세요.
+           - **본문 (Body)**: 내용을 논리적인 흐름에 따라 상세히 설명하세요. 필요시 소제목을 활용하세요.
+           - **맺음말 (Conclusion)**: 내용을 갈무리하며 독자에게 깊은 통찰이나 생각할 거리를 던지는 문장으로 마무리하세요.
+        
+        2. **시각적 강조 (Highlighting)**:
+           - **키워드**: 문맥상 중요한 핵심 단어나 고유 명사는 반드시 `**굵게**` 표시하세요. (섹션당 5~7개 권장)
+           - **핵심 메시지**: 해당 섹션의 결론이나 가장 중요한 문장 1~2개는 반드시 `<mark>핵심 문장</mark>` 태그로 감싸세요.
 
-        ### [INPUT SCRIPT]
+        3. **인용 규칙 (Citation)**: 사실, 의견, 인용구 뒤에는 반드시 출처 ID를 `[[ID:number]]` 형식으로 남기세요.
+           - 예: 이 현상은 과학적으로 증명되었습니다 [[ID:12]].
+           - 여러 개 인용 시: [[ID:12]][[ID:13]] (쉼표 사용 금지)
+
+        4. **문체 및 언어**: 한국어로 작성하며, 전문적이면서도 친절한 '해요체'를 사용하세요.
+
+        ### [입력 스크립트 데이터]
         {script_block}
 
-        ### [OUTPUT]
-        (Write the blog section in Korean with citations)
+        ### [출력 마크다운]
         """
 
         try:
