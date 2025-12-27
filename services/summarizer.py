@@ -120,6 +120,114 @@ class VideoSummarizer:
         )
         return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
+    def _create_blog_prompt(self, segments: list[dict]) -> str:
+        """블로그 포스트 생성을 위한 프롬프트를 생성합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+
+        Returns:
+            블로그 작성 지시사항과 스크립트 데이터가 포함된 프롬프트 문자열.
+        """
+        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
+        script_text = "\n".join(lines)
+        
+        system_instruction = (
+            "당신은 전문 콘텐츠 에디터입니다. 제공된 스크립트를 바탕으로 독자가 읽기 편한 **블로그 포스트**를 작성하세요.\n"
+            "**절대 시간 순서대로 단순히 나열하지 마세요.** 주제별로 내용을 재구성하세요.\n\n"
+            "**필수 작성 규칙:**\n"
+            "1. **구조**: 매력적인 제목 -> 서론(흥미 유발) -> 본론(소제목으로 구분된 핵심 내용 3~4개) -> 결론(요약 및 제언).\n"
+            "2. **인용(Citation)**: 본문의 내용이 스크립트의 특정 부분에 기반할 때, 문장 끝에 반드시 `[[ID:숫자]]` 형식으로 출처를 남기세요.\n"
+            "   - **주의**: 여러 개의 출처를 인용할 경우 반드시 `[[ID:1]][[ID:2]]`와 같이 개별적으로 작성하세요. `[[ID:1, 2]]`와 같이 쉼표로 연결하지 마세요.\n"
+            "3. **강조**: 핵심 키워드나 중요한 문장은 `**굵게**` 표시하세요.\n"
+            "4. **어조**: 친절하고 전문적인 블로거의 말투(해요체)를 사용하세요."
+        )
+        return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
+
+    def generate_blog_post(
+        self, 
+        segments: list[dict], 
+        video_filename: str, 
+        status_callback: callable = None
+    ) -> dict:
+        """Gemini를 사용하여 주제 중심의 블로그 포스트를 생성합니다.
+
+        타임스탬프를 인용(`[[ID:숫자]]`) 형태로 받아 실제 시간으로 치환합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+            video_filename: 원본 영상 파일명.
+            status_callback: 진행 상태 콜백.
+
+        Returns:
+            블로그 포스트 내용과 메타데이터가 포함된 딕셔너리.
+        """
+        if not self.api_key:
+            return {"error": "GOOGLE_API_KEY is missing in .env"}
+        
+        if not segments:
+            return {"error": "Empty segments"}
+
+        print(f"--- [Summarizer] Generating Blog Post for {video_filename} ---")
+        if status_callback: status_callback("Gemini가 블로그 포스트를 작성 중입니다...")
+
+        tracker = UsageTracker()
+        prompt = self._create_blog_prompt(segments)
+
+        try:
+            client = genai.Client(api_key=self.api_key)
+            
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3, # 창의성 약간 부여
+                )
+            )
+            tracker.update(response)
+            
+            blog_content = response.text
+            
+            # --- Post-Processing: 인용 ID를 타임스탬프로 치환 ---
+            def replace_match(match):
+                try:
+                    seg_id = int(match.group(1))
+                    idx = seg_id - 1
+                    if 0 <= idx < len(segments):
+                        start_time = segments[idx]['start']
+                        time_str = self._format_time(start_time)
+                        return f" `({time_str})`" 
+                except:
+                    pass
+                return ""
+
+            # 1. 다양한 형태의 ID 인용구 치환
+            inter_content = re.sub(r'\[*ID:\s*(\d+)\s*\]*', replace_match, blog_content)
+            
+            # 2. 잔여물 제거 (Heuristic Cleanup)
+            refined_content = re.sub(r'[, \d]*\]+', '', inter_content)
+            refined_content = refined_content.replace("[[", "").replace("]]", "").strip()
+            
+            result_data = {
+                "video_source": video_filename,
+                "type": "blog_post",
+                "token_usage": tracker.get_report(),
+                "content": refined_content
+            }
+
+            # 저장
+            base_name = os.path.splitext(video_filename)[0]
+            output_path = os.path.join(self.output_dir, f"{base_name}_blog.json")
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(result_data, f, ensure_ascii=False, indent=2)
+                
+            return result_data
+
+        except Exception as e:
+            print(f"[Error] Blog generation failed: {e}")
+            return {"error": str(e)}
+
     def summarize(
         self, 
         segments: list[dict], 

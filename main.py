@@ -267,6 +267,8 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         
         chapters = summary_result.get("chapters", [])
         total_chaps = len(chapters)
+        
+        # 정렬된 세그먼트 (이진 탐색이나 효율적 필터링을 위해)
         sorted_segments = sorted(segments, key=lambda x: x['start'])
 
         for i, chapter in enumerate(chapters):
@@ -276,28 +278,25 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
             current_progress = 90 + int((i / total_chaps) * 9)
             task_manager.update_progress(task_id, current_progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
 
-            # 챕터에 해당하는 텍스트 추출 (타임스탬프 주입 버전)
+            # 챕터에 해당하는 세그먼트 추출
             c_start = chapter['time']['start']
             c_end = chapter['time']['end']
             
-            chapter_text_list = []
-            last_ts = -20.0 # 초기값 (최소 10초 간격 유도)
+            # [Updated] 텍스트가 아닌 세그먼트 리스트 자체를 추출
+            chapter_segments = [
+                s for s in sorted_segments 
+                if s['start'] >= c_start and s['start'] < c_end
+            ]
             
-            for s in sorted_segments:
-                if s['start'] >= c_start and s['start'] < c_end:
-                    # [Fix] 5초 이상 간격으로 단축하고, 줄바꿈을 넣어 문맥 분리
-                    if s['start'] - last_ts >= 5.0:
-                        m, sec = divmod(int(s['start']), 60)
-                        chapter_text_list.append(f"\n[{m:02}:{sec:02}]")
-                        last_ts = s['start']
-                    chapter_text_list.append(s['text'])
-            
-            raw_text_chunk = " ".join(chapter_text_list)
-            
-            # 윤문 (Refine)
+            # 윤문 (Refine) - 인용 기능을 위해 segments 전달
             refined_md = await loop.run_in_executor(
                 None,
-                partial(refiner.refine_chapter, raw_text_chunk, chapter['title'])
+                partial(
+                    refiner.refine_chapter, 
+                    raw_text="", # 이제 raw_text 대신 segments를 사용하므로 빈 값 전달 가능 (혹은 호환성 위해 텍스트 전달)
+                    chapter_title=chapter['title'],
+                    segments=chapter_segments # [New] 세그먼트 전달
+                )
             )
             chapter['blog_content'] = refined_md
 
@@ -320,6 +319,7 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         print(f"[{task_id}] Analysis Failed: {e}")
         cleanup_files(video_filename)
         task_manager.fail_task(task_id, str(e))
+
 
 # --- [Background Pipeline] ---
 async def run_clip_pipeline(task_id: str, req: ClipRequest):
@@ -605,7 +605,8 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
 async def run_blog_regeneration_pipeline(task_id: str, req: RegenerateBlogRequest):
     """
     [Background] 블로그 뷰 재생성 파이프라인
-    - 기존 챕터와 자막 데이터를 사용하여 블로그 윤문만 다시 수행
+    - 기존 챕터와 자막 데이터를 사용하여 블로그 윤문만 다시 수행 (Chapter-wise)
+    - [Updated] 인용(Citation) 모드를 위해 segments 정보를 refiner에 전달
     """
     base_name = os.path.splitext(req.filename)[0]
     transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
@@ -636,28 +637,25 @@ async def run_blog_regeneration_pipeline(task_id: str, req: RegenerateBlogReques
             progress = int((i / total_chaps) * 100)
             task_manager.update_progress(task_id, progress, f"블로그 다시 작성 중... ({i+1}/{total_chaps})")
 
-            # 챕터 구간 텍스트 추출 (타임스탬프 주입 버전)
+            # 챕터에 해당하는 세그먼트 추출
             c_start = chapter['time']['start']
             c_end = chapter['time']['end']
             
-            chapter_text_list = []
-            last_ts = -20.0 # 초기값
+            # [Updated] 텍스트 청크가 아닌 세그먼트 리스트 자체를 추출
+            chapter_segments = [
+                s for s in sorted_segments 
+                if s['start'] >= c_start and s['start'] < c_end
+            ]
             
-            for s in sorted_segments:
-                if s['start'] >= c_start and s['start'] < c_end:
-                    # [Fix] 5초 이상 간격으로 단축하고, 줄바꿈을 넣어 문맥 분리
-                    if s['start'] - last_ts >= 5.0:
-                        m, sec = divmod(int(s['start']), 60)
-                        chapter_text_list.append(f"\n[{m:02}:{sec:02}]")
-                        last_ts = s['start']
-                    chapter_text_list.append(s['text'])
-            
-            raw_text_chunk = " ".join(chapter_text_list)
-            
-            # 윤문 (Refine)
+            # 윤문 (Refine) - 인용 기능을 위해 segments 전달
             refined_md = await loop.run_in_executor(
                 None,
-                partial(refiner.refine_chapter, raw_text_chunk, chapter['title'])
+                partial(
+                    refiner.refine_chapter, 
+                    raw_text="", 
+                    chapter_title=chapter['title'],
+                    segments=chapter_segments
+                )
             )
             chapter['blog_content'] = refined_md
 

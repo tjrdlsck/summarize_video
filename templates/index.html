@@ -1667,9 +1667,9 @@
                                                                             // 1. 먼저 마크다운을 HTML로 변환
                                                                             let html = marked.parse(chapter.blog_content);
                                                                             
-                                                                            // 2. HTML 내에서 [MM:SS] 또는 [M:SS] 패턴을 찾아 버튼으로 치환
-                                                                            // 정규식: \[(\d{1,2}):(\d{2})\]
-                                                                            html = html.replace(/\[(\d{1,2}):(\d{2})\]/g, (match, min, sec) => {
+                                                                            // 2. HTML 내에서 [MM:SS] 또는 (MM:SS) 패턴을 찾아 버튼으로 치환
+                                                                            // [Modified] 정규식 개선: 대괄호/괄호를 모두 지원하고 내부 공백 허용
+                                                                            html = html.replace(/[\(\[]\s*(\d{1,2}):(\d{2})\s*[\)\]]/g, (match, min, sec) => {
                                                                                 const totalSeconds = parseInt(min) * 60 + parseInt(sec);
                                                                                 return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${min}:${sec}</span>`;
                                                                             });
