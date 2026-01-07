@@ -8,3 +8,5 @@ gemma.py
 sermon_output.md
 tasks.json
 .gemini/
+test.mp4
+debug_transcribe.py

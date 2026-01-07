@@ -79,7 +79,8 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration):
             verbose=True,  # [중요] True여야 타임스탬프 로그가 출력되어 Hook이 작동함
             word_timestamps=True,
             condition_on_previous_text=False,
-            temperature=(0.0, 0.2, 0.4) 
+            temperature=(0.0, 0.2, 0.4),
+            initial_prompt="이 영상은 한국 교회의 기독교 목사님 설교 영상입니다. 성경 말씀, 기도, 하나님, 예수님, 은혜, 아멘, 할렐루야 등의 기독교 용어가 포함되어 있습니다."
         )
         
         # stdout 복구
@@ -128,11 +129,19 @@ class VideoTranscriber:
         except Exception:
             print("[Transcriber] Failed to get duration via ffprobe, progress will be inaccurate.")
 
-        # 2. FFmpeg 변환 시작
+        # 2. FFmpeg 변환 시작 (Audio Preprocessing 적용)
+        # - highpass=f=200: 웅웅거리는 저음 노이즈(Rumble) 제거
+        # - lowpass=f=8000: 치찰음 등 고주파 노이즈 제거
+        # - afftdn=nf=-25: FFT 기반 노이즈 제거 (White Noise 감소)
+        # - loudnorm: 음량을 방송 표준(-16 LUFS)으로 정규화하여 작은 소리 증폭
         cmd = [
             "ffmpeg", "-i", input_path,
-            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-vn",
-            output_wav, "-y", "-hide_banner", "-loglevel", "info" # [Change] info 레벨이어야 time= 로그가 나옴
+            "-vn", 
+            "-ac", "1", 
+            "-ar", "16000",
+            "-af", "highpass=f=200,lowpass=f=8000,afftdn=nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-c:a", "pcm_s16le", 
+            output_wav, "-y", "-hide_banner", "-loglevel", "info"
         ]
         
         try:
