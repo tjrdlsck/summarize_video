@@ -274,19 +274,26 @@ class VideoSummarizer:
                 "type": "OBJECT",
                 "properties": {
                     "title": {"type": "STRING", "description": "챕터 제목"},
+                    "type": {
+                        "type": "STRING", 
+                        "enum": ["Scripture_Reading", "Sermon", "Prayer", "Greeting"],
+                        "description": "챕터의 성격 (성경 봉독, 설교, 기도, 인사 등)"
+                    },
                     "summary": {"type": "STRING", "description": "상세 내용 요약"},
                     "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
                     "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
                 },
-                "required": ["title", "summary", "start_id", "end_id"]
+                "required": ["title", "type", "summary", "start_id", "end_id"]
             }
         }
 
         system_instruction = (
-            "당신은 영상 콘텐츠 분석 AI입니다. 대본을 읽고 논리적인 '챕터'로 나누어 JSON으로 출력하세요.\n"
+            "당신은 기독교 영상 콘텐츠 분석 AI입니다. 대본을 읽고 논리적인 '챕터'로 나누어 JSON으로 출력하세요.\n"
+            "특히 '성경 봉독(Scripture_Reading)' 구간을 정확하게 찾아내는 것이 매우 중요합니다.\n"
             "규칙 1: 영상의 시작(ID:1)부터 끝까지 빈틈없이 커버해야 합니다.\n"
-            "규칙 2: start_id와 end_id는 제공된 스크립트의 ID를 참조합니다.\n"
-            "규칙 3: 한국어로 작성하세요."
+            "규칙 2: 성경 봉독 구간은 시작 구절부터 마지막 '아멘' 혹은 종료 문구까지 하나의 챕터로 묶으세요.\n"
+            "규칙 3: start_id와 end_id는 제공된 스크립트의 ID를 참조합니다.\n"
+            "규칙 4: 모든 텍스트는 한국어로 작성하세요."
         )
 
         try:

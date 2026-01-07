@@ -471,15 +471,27 @@ class VideoTranscriber:
             vtt_path = os.path.join(self.output_dir, f"{base_name}.vtt")
             json_path = os.path.join(self.output_dir, f"{base_name}_transcript.json")
 
-            # [Step 1] JSON 저장 (원본 텍스트 유지 - 요약/블로그용)
+            # [Step 1] JSON 저장 (원본 텍스트 유지 및 단어 단위 데이터 포함)
             final_data = []
             for idx, seg in enumerate(result_obj.segments, 1):
-                final_data.append({
+                segment_info = {
                     "id": idx,
                     "start": seg.start,
                     "end": seg.end,
-                    "text": seg.text.strip()
-                })
+                    "text": seg.text.strip(),
+                    "words": [] # 단어 단위 데이터 추가
+                }
+                
+                # 각 세그먼트 내의 단어들 정보 추출
+                if hasattr(seg, 'words') and seg.words:
+                    for w in seg.words:
+                        segment_info["words"].append({
+                            "word": w.word.strip(),
+                            "start": w.start,
+                            "end": w.end
+                        })
+                
+                final_data.append(segment_info)
 
             with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(final_data, f, ensure_ascii=False, indent=2)

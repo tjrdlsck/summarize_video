@@ -48,6 +48,7 @@ class VideoClipper:
         """
         [Async] FFmpeg를 비동기 프로세스로 실행하며, stderr을 파싱하여 실시간 진행률을 반영합니다.
         [Quality & Fix] 원본 화질 유지를 위해 품질 기반 인코딩(VBR)을 사용하되, Safari 호환성을 위해 yuv420p를 강제합니다.
+        [New] 오디오 끊김 방지를 위해 Fade-in/out 필터를 적용합니다.
         """
         output_path = os.path.join(self.temp_dir, output_filename)
         
@@ -55,12 +56,20 @@ class VideoClipper:
         duration = end_sec - start_sec
         if duration <= 0: duration = 1 # 0으로 나누기 방지
 
+        # [FFmpeg Filter Configuration]
+        # 오디오 페이드 적용 (시작 0.1초 인, 종료 0.2초 아웃)
+        fade_duration_in = 0.1
+        fade_duration_out = 0.2
+        audio_filter = f"afade=t=in:st=0:d={fade_duration_in},afade=t=out:st={duration - fade_duration_out}:d={fade_duration_out}"
+
         # [FFmpeg Command Configuration]
         cmd = [
             "ffmpeg", 
             "-i", input_path,
             "-ss", str(start_sec),
             "-to", str(end_sec),
+            "-filter_complex", f"[0:a]{audio_filter}[af]", # 오디오 필터 적용
+            "-map", "0:v", "-map", "[af]",                 # 비디오는 그대로, 오디오는 필터 거친 것 사용
             "-c:v", "h264_videotoolbox", # Apple Silicon 가속 (필요시 libx264로 변경)
             
             # [수정된 부분] 고정 비트레이트(-b:v) 대신 품질 옵션(-q:v) 사용
@@ -77,7 +86,7 @@ class VideoClipper:
             output_path
         ]
 
-        print(f"--- [Clipper] Starting Async Cut (High Quality): {output_filename} ---")
+        print(f"--- [Clipper] Starting Async Cut (High Quality + Fade): {output_filename} ---")
         
         # 에러 발생 시 원인을 파악하기 위해 stderr 로그를 모아둘 버퍼
         stderr_log = []
@@ -312,6 +321,7 @@ class VideoClipper:
         """
         [Async] 불연속적인 여러 구간을 병합합니다.
         [Quality & Fix] 원본 화질 유지를 위해 품질 기반 VBR 인코딩을 사용하며, yuv420p 포맷으로 호환성을 보장합니다.
+        [New] 각 구간의 연결부 오디오 끊김 방지를 위해 개별 Fade 필터를 적용합니다.
         """
         output_video_path = os.path.join(self.temp_dir, output_filename)
         output_sub_path = None
@@ -346,12 +356,23 @@ class VideoClipper:
         filter_parts = []
         concat_input = ""
         
+        # 페이드 설정
+        f_in = 0.1
+        f_out = 0.2
+
         for i, seg in enumerate(segments):
             start = f"{seg['start']:.3f}"
             end = f"{seg['end']:.3f}"
+            duration = seg['end'] - seg['start']
             
+            # 비디오 트림
             filter_parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}]")
-            filter_parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{i}]")
+            
+            # [New] 오디오 트림 + 페이드 인/아웃 적용
+            # 각 세그먼트가 독립적으로 0초부터 시작하는 PTS를 가지므로 st=0 및 st=duration-f_out 사용 가능
+            audio_fade = f"afade=t=in:st=0:d={f_in},afade=t=out:st={max(0, duration-f_out)}:d={f_out}"
+            filter_parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,{audio_fade}[a{i}]")
+            
             concat_input += f"[v{i}][a{i}]"
 
         filter_parts.append(f"{concat_input}concat=n={len(segments)}:v=1:a=1[outv][outa]")
@@ -381,7 +402,7 @@ class VideoClipper:
             output_video_path
         ]
 
-        print(f"--- [Clipper] Starting Merge Segments (High Quality): {len(segments)} cuts, Duration: {total_duration:.2f}s ---")
+        print(f"--- [Clipper] Starting Merge Segments (High Quality + Audio Refinement): {len(segments)} cuts ---")
 
         stderr_log = []
         try:

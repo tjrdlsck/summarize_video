@@ -81,10 +81,17 @@ shorts_maker = ShortsMaker()
 premiere_exporter = PremiereExporter(output_dir="static/temp")
 
 # --- [Pydantic Models] ---
-class AnalyzeRequest(BaseModel):
+class TranscriptionRequest(BaseModel):
     url: Optional[str] = None      # 유튜브 URL
     filename: Optional[str] = None # 업로드된 파일명
     custom_title: Optional[str] = None # [New] 사용자가 지정한 영상 제목
+
+class SummaryRequest(BaseModel):
+    filename: str
+    custom_title: Optional[str] = None
+
+class BlogGenerationRequest(BaseModel):
+    filename: str
 
 class UpdateTitleRequest(BaseModel): # [New] 제목 수정 요청용 모델
     title: str
@@ -97,9 +104,6 @@ class ClipRequest(BaseModel):
 
 class ShortsGenerateRequest(BaseModel):
     filename: str  # 원본 영상 파일명
-
-class RegenerateBlogRequest(BaseModel): # [New] 블로그 재생성 요청 모델
-    filename: str
 
 class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청 모델
     video_filename: str
@@ -139,19 +143,16 @@ def remove_temp_files(file_paths: list):
             except Exception as e:
                 print(f"[Cleanup Error] Failed to delete {path}: {e}")
 
-async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
+async def run_transcription_pipeline(task_id: str, req: TranscriptionRequest):
     """
-    [Background] 영상 분석 통합 파이프라인 (Real-time Progress 적용)
-    구간 계획:
-    - 0~10%: 다운로드
-    - 10~70%: 오디오 변환 및 자막 생성 (Transcriber)
-    - 70~90%: 요약 및 챕터 생성 (Summarizer)
-    - 90~100%: 블로그 글 윤문 (Refiner)
+    [Background] 1단계: 영상 다운로드 및 자막 생성 (STT) 파이프라인
+    - 다운로드 -> 오디오 변환 -> Whisper STT
+    - Gemini 분석이나 블로그 생성은 수행하지 않음.
     """
     video_filename = req.filename 
     display_title = req.custom_title
     
-    # 정리 함수
+    # 정리 함수 (에러 발생 시)
     def cleanup_files(filename):
         if not filename: return
         try:
@@ -161,7 +162,6 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
                 os.path.join("static/results", f"{base_name}.srt"),      
                 os.path.join("static/results", f"{base_name}.vtt"),      
                 os.path.join("static/results", f"{base_name}_transcript.json"), 
-                os.path.join("static/results", f"{base_name}_summary.json"),
                 os.path.join("static/results", f"{base_name}_temp.wav")
             ]
             for path in targets:
@@ -176,13 +176,13 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
         task_manager.update_progress(task_id, 0, "작업 시작...")
         
-        # --- Phase 1: Video Preparation (0~10%) ---
+        # --- Phase 1: Video Preparation (0~20%) ---
         if req.url:
             task_manager.update_progress(task_id, 1, "영상 다운로드 중...")
             
             def dl_callback(percent, msg):
-                # 0~100 -> 1~10% 매핑
-                scaled = 1 + int(percent * 0.09)
+                # 0~100 -> 1~20% 매핑
+                scaled = 1 + int(percent * 0.19)
                 loop.call_soon_threadsafe(task_manager.update_progress, task_id, scaled, msg)
 
             result = await loop.run_in_executor(
@@ -213,102 +213,47 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
             clean_name = re.sub(r'^[0-9a-fA-F]{8}_', '', raw_name)
             display_title = os.path.splitext(clean_name)[0].replace("_", " ").strip()
 
-        # --- Phase 2: Transcription (10~70%) ---
-        # [Change] 시뮬레이션 제거, 리얼타임 진행률 적용
-        task_manager.update_progress(task_id, 10, "오디오 변환 준비 중...")
+        # --- Phase 2: Transcription (20~100%) ---
+        task_manager.update_progress(task_id, 20, "오디오 변환 및 자막 생성 중...")
         
-        # Transcriber용 진행률 래퍼 생성 (10%에서 시작, 전체의 60% 비중)
-        # Transcriber 내부의 0~100% 진행률이 -> 전체 파이프라인의 10~70%로 자동 변환됨
-        progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=10, scale_factor=0.6)
+        # Transcriber용 진행률 래퍼 생성 (20%에서 시작, 전체의 80% 비중)
+        progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=20, scale_factor=0.8)
         
-        # 콜백 함수 정의 (Wrapper 사용)
         def transcriber_callback(local_percent, msg):
             loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
 
-        # Transcriber 실행 (wrapper를 task_manager로 전달하여 내부의 direct call도 커버)
         transcribe_result = await loop.run_in_executor(
             None,
             partial(
                 transcriber.transcribe, 
                 video_path, 
                 progress_callback=transcriber_callback,
-                task_manager=progress_wrapper, # [Injection] Wrapper 주입
+                task_manager=progress_wrapper,
                 task_id=task_id            
             )
         )
         
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
         if transcribe_result.get("status") == "error": raise Exception("Transcription failed")
-        segments = transcribe_result["segments"]
-
-        # --- Phase 3: Summarization (70~90%) ---
-        task_manager.update_progress(task_id, 70, "내용 구조화 및 요약 중 (LLM)...")
         
-        # LLM Callback
-        def summarizer_callback(msg):
-             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 75, msg)
-
-        summary_result = await loop.run_in_executor(
-            None,
-            partial(
-                summarizer.summarize, 
-                segments, 
-                video_filename, 
-                custom_title=display_title,
-                status_callback=summarizer_callback
-            )
-        )
-        
-        if summary_result.get("error"): raise Exception(summary_result["error"])
-        if task_manager.is_cancelled(task_id): raise TaskCancelledError()
-
-        # --- Phase 4: Refining Content (90~100%) ---
-        task_manager.update_progress(task_id, 90, "블로그 포스팅 작성 중...")
-        
-        chapters = summary_result.get("chapters", [])
-        total_chaps = len(chapters)
-        
-        # 정렬된 세그먼트 (이진 탐색이나 효율적 필터링을 위해)
-        sorted_segments = sorted(segments, key=lambda x: x['start'])
-
-        for i, chapter in enumerate(chapters):
-            if task_manager.is_cancelled(task_id): raise TaskCancelledError()
-
-            # 90~99% 구간 매핑
-            current_progress = 90 + int((i / total_chaps) * 9)
-            task_manager.update_progress(task_id, current_progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
-
-            # 챕터에 해당하는 세그먼트 추출
-            c_start = chapter['time']['start']
-            c_end = chapter['time']['end']
-            
-            # [Updated] 텍스트가 아닌 세그먼트 리스트 자체를 추출
-            chapter_segments = [
-                s for s in sorted_segments 
-                if s['start'] >= c_start and s['start'] < c_end
-            ]
-            
-            # 윤문 (Refine) - 인용 기능을 위해 segments 전달
-            refined_md = await loop.run_in_executor(
-                None,
-                partial(
-                    refiner.refine_chapter, 
-                    raw_text="", # 이제 raw_text 대신 segments를 사용하므로 빈 값 전달 가능 (혹은 호환성 위해 텍스트 전달)
-                    chapter_title=chapter['title'],
-                    segments=chapter_segments # [New] 세그먼트 전달
-                )
-            )
-            chapter['blog_content'] = refined_md
-
-        # 결과 저장
+        # 자막 생성 완료 후 메타데이터(JSON) 초기화 (분석 전 단계임을 표시)
         base_name = os.path.splitext(video_filename)[0]
-        json_path = os.path.join("static/results", f"{base_name}_summary.json")
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(summary_result, f, ensure_ascii=False, indent=2)
+        summary_path = os.path.join("static/results", f"{base_name}_summary.json")
+        
+        # 아직 요약은 없지만, 제목 정보 등을 담은 기본 JSON 생성
+        initial_data = {
+            "video_source": video_filename,
+            "video_title": display_title,
+            "total_chapters": 0,
+            "chapters": [],
+            "status": "transcribed_only" # 상태 표시
+        }
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(initial_data, f, ensure_ascii=False, indent=2)
 
-        # --- Phase 5: Finish ---
-        task_manager.complete_task(task_id, summary_result)
-        print(f"[{task_id}] Analysis Completed: {video_filename}")
+        # --- Phase 3: Finish ---
+        task_manager.complete_task(task_id, {"status": "success", "message": "자막 생성 완료", "video_title": display_title})
+        print(f"[{task_id}] Transcription Completed: {video_filename}")
 
     except TaskCancelledError:
         print(f"[{task_id}] Task Cancelled by User.")
@@ -316,12 +261,129 @@ async def run_analysis_pipeline(task_id: str, req: AnalyzeRequest):
         task_manager.fail_task(task_id, "취소됨")
 
     except Exception as e:
-        print(f"[{task_id}] Analysis Failed: {e}")
+        print(f"[{task_id}] Transcription Failed: {e}")
         cleanup_files(video_filename)
         task_manager.fail_task(task_id, str(e))
 
+async def run_summary_pipeline(task_id: str, req: SummaryRequest):
+    """
+    [Background] 2단계: AI 챕터 분석 및 요약 파이프라인
+    - 기존 자막(Transcript) 데이터를 기반으로 Gemini 분석 수행.
+    """
+    base_name = os.path.splitext(req.filename)[0]
+    transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+    
+    try:
+        task_manager.update_progress(task_id, 0, "AI 분석 시작...")
+        
+        if not os.path.exists(transcript_path):
+            raise FileNotFoundError("자막 데이터가 없습니다. 먼저 자막 생성을 진행해주세요.")
+            
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            segments = json.load(f)
 
-# --- [Background Pipeline] ---
+        loop = asyncio.get_running_loop()
+        
+        # --- Summarization (0~100%) ---
+        task_manager.update_progress(task_id, 10, "Gemini가 내용을 분석하고 있습니다...")
+        
+        def summarizer_callback(msg):
+             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 50, msg)
+
+        summary_result = await loop.run_in_executor(
+            None,
+            partial(
+                summarizer.summarize, 
+                segments, 
+                req.filename, 
+                custom_title=req.custom_title,
+                status_callback=summarizer_callback
+            )
+        )
+        
+        if summary_result.get("error"): raise Exception(summary_result["error"])
+        if task_manager.is_cancelled(task_id): raise TaskCancelledError()
+
+        # 완료
+        task_manager.complete_task(task_id, summary_result)
+        print(f"[{task_id}] Summary Completed: {req.filename}")
+
+    except TaskCancelledError:
+        print(f"[{task_id}] Summary Task Cancelled.")
+        task_manager.fail_task(task_id, "취소됨")
+    except Exception as e:
+        print(f"[{task_id}] Summary Failed: {e}")
+        task_manager.fail_task(task_id, str(e))
+
+async def run_blog_pipeline(task_id: str, req: BlogGenerationRequest):
+    """
+    [Background] 3단계: 블로그 포스트 생성 파이프라인
+    - 챕터별 내용을 바탕으로 블로그 글을 작성(윤문)합니다.
+    """
+    base_name = os.path.splitext(req.filename)[0]
+    transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+    summary_path = os.path.join("static/results", f"{base_name}_summary.json")
+
+    try:
+        task_manager.update_progress(task_id, 0, "블로그 작성 준비 중...")
+        
+        if not os.path.exists(transcript_path) or not os.path.exists(summary_path):
+            raise FileNotFoundError("필수 데이터(자막 또는 분석 결과)가 없습니다.")
+
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            segments = json.load(f)
+        with open(summary_path, 'r', encoding='utf-8') as f:
+            summary_data = json.load(f)
+
+        chapters = summary_data.get("chapters", [])
+        if not chapters:
+            raise ValueError("분석된 챕터가 없습니다. AI 분석을 먼저 실행해주세요.")
+
+        total_chaps = len(chapters)
+        sorted_segments = sorted(segments, key=lambda x: x['start'])
+        loop = asyncio.get_running_loop()
+
+        for i, chapter in enumerate(chapters):
+            if task_manager.is_cancelled(task_id): raise TaskCancelledError()
+
+            progress = int((i / total_chaps) * 100)
+            task_manager.update_progress(task_id, progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
+
+            # 챕터에 해당하는 세그먼트 추출
+            c_start = chapter['time']['start']
+            c_end = chapter['time']['end']
+            
+            chapter_segments = [
+                s for s in sorted_segments 
+                if s['start'] >= c_start and s['start'] < c_end
+            ]
+            
+            # 윤문 (Refine)
+            refined_md = await loop.run_in_executor(
+                None,
+                partial(
+                    refiner.refine_chapter, 
+                    raw_text="", 
+                    chapter_title=chapter['title'],
+                    segments=chapter_segments
+                )
+            )
+            chapter['blog_content'] = refined_md
+
+        # 결과 업데이트 저장
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            json.dump(summary_data, f, ensure_ascii=False, indent=2)
+
+        task_manager.complete_task(task_id, summary_data)
+        print(f"[{task_id}] Blog Generation Completed: {req.filename}")
+
+    except TaskCancelledError:
+        print(f"[{task_id}] Blog Task Cancelled.")
+        task_manager.fail_task(task_id, "취소됨")
+    except Exception as e:
+        print(f"[{task_id}] Blog Generation Failed: {e}")
+        task_manager.fail_task(task_id, str(e))
+
 async def run_clip_pipeline(task_id: str, req: ClipRequest):
     """
     [Background] 영상 클립 생성 파이프라인
@@ -455,6 +517,7 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
     [Background] AI 숏츠 생성 파이프라인 (Updated)
     - 3분 이내 숏츠 생성
     - Video + SRT + VTT(New) 생성 및 관리
+    - 성경 봉독 구간 보호 로직 적용
     """
     temp_files = [] 
     base_name = os.path.splitext(req.filename)[0]
@@ -470,21 +533,25 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
         if not os.path.exists(transcript_path):
             raise FileNotFoundError("분석 데이터가 없습니다.")
         
-        with open(transcript_path, 'r', encoding='utf-8') as f: transcripts = json.load(f)
+        with open(transcript_path, 'r', encoding='utf-8') as f: 
+            transcripts = json.load(f)
         
         video_title = req.filename
+        chapters = None
         if os.path.exists(summary_path):
             with open(summary_path, 'r', encoding='utf-8') as f:
-                video_title = json.load(f).get("video_title", req.filename)
+                summary_data = json.load(f)
+                video_title = summary_data.get("video_title", req.filename)
+                chapters = summary_data.get("chapters") # 챕터 메타데이터 로드
 
         # 2. LLM 기획 (0~30%)
         if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
-        task_manager.update_progress(task_id, 10, "AI가 하이라이트 구간 선별 중...")
+        task_manager.update_progress(task_id, 10, "AI가 하이라이트 구간 선별 중 (성경 구간 보호 적용)...")
         
         loop = asyncio.get_running_loop()
         candidates = await loop.run_in_executor(
             None, 
-            partial(shorts_maker.make_shorts_candidates, transcripts, video_title)
+            partial(shorts_maker.make_shorts_candidates, transcripts, video_title, chapters=chapters)
         )
         
         if not candidates: raise Exception("AI가 숏츠 구간을 찾지 못했습니다.")
@@ -602,74 +669,6 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
                 try: os.remove(f)
                 except: pass
 
-async def run_blog_regeneration_pipeline(task_id: str, req: RegenerateBlogRequest):
-    """
-    [Background] 블로그 뷰 재생성 파이프라인
-    - 기존 챕터와 자막 데이터를 사용하여 블로그 윤문만 다시 수행 (Chapter-wise)
-    - [Updated] 인용(Citation) 모드를 위해 segments 정보를 refiner에 전달
-    """
-    base_name = os.path.splitext(req.filename)[0]
-    transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
-    summary_path = os.path.join("static/results", f"{base_name}_summary.json")
-
-    try:
-        task_manager.update_progress(task_id, 0, "블로그 재생성 준비 중...")
-        
-        if not os.path.exists(transcript_path) or not os.path.exists(summary_path):
-            raise FileNotFoundError("기존 분석 데이터가 존재하지 않습니다.")
-
-        with open(transcript_path, 'r', encoding='utf-8') as f:
-            segments = json.load(f)
-        with open(summary_path, 'r', encoding='utf-8') as f:
-            summary_data = json.load(f)
-
-        chapters = summary_data.get("chapters", [])
-        if not chapters:
-            raise ValueError("요약된 챕터 정보가 없습니다.")
-
-        total_chaps = len(chapters)
-        sorted_segments = sorted(segments, key=lambda x: x['start'])
-        loop = asyncio.get_running_loop()
-
-        for i, chapter in enumerate(chapters):
-            if task_manager.is_cancelled(task_id): raise TaskCancelledError()
-
-            progress = int((i / total_chaps) * 100)
-            task_manager.update_progress(task_id, progress, f"블로그 다시 작성 중... ({i+1}/{total_chaps})")
-
-            # 챕터에 해당하는 세그먼트 추출
-            c_start = chapter['time']['start']
-            c_end = chapter['time']['end']
-            
-            # [Updated] 텍스트 청크가 아닌 세그먼트 리스트 자체를 추출
-            chapter_segments = [
-                s for s in sorted_segments 
-                if s['start'] >= c_start and s['start'] < c_end
-            ]
-            
-            # 윤문 (Refine) - 인용 기능을 위해 segments 전달
-            refined_md = await loop.run_in_executor(
-                None,
-                partial(
-                    refiner.refine_chapter, 
-                    raw_text="", 
-                    chapter_title=chapter['title'],
-                    segments=chapter_segments
-                )
-            )
-            chapter['blog_content'] = refined_md
-
-        # 결과 업데이트 저장
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            json.dump(summary_data, f, ensure_ascii=False, indent=2)
-
-        task_manager.complete_task(task_id, summary_data)
-        print(f"[{task_id}] Blog Regeneration Completed: {req.filename}")
-
-    except Exception as e:
-        print(f"[{task_id}] Blog Regeneration Failed: {e}")
-        task_manager.fail_task(task_id, str(e))
-
 async def worker():
     print("--- [Worker] Analysis Worker Started ---")
     while True:
@@ -679,14 +678,16 @@ async def worker():
                 print(f"[{task_id}] Task cancelled before start.")
                 task_manager.fail_task(task_id, "대기 중 취소됨")
             else:
-                if isinstance(req, AnalyzeRequest):
-                    await run_analysis_pipeline(task_id, req)
+                if isinstance(req, TranscriptionRequest):
+                    await run_transcription_pipeline(task_id, req)
+                elif isinstance(req, SummaryRequest):
+                    await run_summary_pipeline(task_id, req)
+                elif isinstance(req, BlogGenerationRequest):
+                    await run_blog_pipeline(task_id, req)
                 elif isinstance(req, ClipRequest):
                     await run_clip_pipeline(task_id, req)
                 elif isinstance(req, ShortsGenerateRequest):
                     await run_shorts_pipeline(task_id, req)
-                elif isinstance(req, RegenerateBlogRequest):
-                    await run_blog_regeneration_pipeline(task_id, req)
                     
         except Exception as e:
             print(f"[Worker Error] {e}")
@@ -712,41 +713,54 @@ async def upload_video(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=result["message"])
     return result
 
-# [Modify] 여기가 중요합니다. Queue를 사용하는 버전만 남깁니다.
-@app.post("/api/process")
-async def start_processing(req: AnalyzeRequest):
+@app.post("/api/transcribe")
+async def start_transcription(req: TranscriptionRequest):
     """
-    통합 분석 요청 (Queue 방식)
+    [1단계] 영상 다운로드 및 자막 생성 요청
     """
     task_id = str(uuid.uuid4())
     target_name = req.url if req.url else req.filename
     
     # 1. TaskManager 등록 (상태: queued)
-    task_manager.add_task(task_id, target_name, task_type="analysis")
+    task_manager.add_task(task_id, target_name, task_type="transcription")
     
-    # 2. Queue에 작업 추가 (Worker가 가져감)
+    # 2. Queue에 작업 추가
     await job_queue.put((task_id, req))
     
-    # 3. 사용자에게는 "등록됨(Pending)" 응답
     return {
         "task_id": task_id, 
-        "message": f"Task queued. Position: {job_queue.qsize()}"
+        "message": f"Transcription queued. Position: {job_queue.qsize()}"
     }
 
-@app.post("/api/blog/regenerate")
-async def regenerate_blog(req: RegenerateBlogRequest):
+@app.post("/api/analyze")
+async def start_analysis(req: SummaryRequest):
     """
-    [Async] 블로그 뷰 재생성 요청
+    [2단계] AI 챕터 분석 및 요약 요청
     """
     task_id = str(uuid.uuid4())
     
-    # Task Manager 등록 (type="blog_regeneration")
-    task_manager.add_task(task_id, req.filename, task_type="blog_regeneration")
+    # Task Manager 등록
+    task_manager.add_task(task_id, req.filename, task_type="analysis")
     
     # Queue에 작업 추가
     await job_queue.put((task_id, req))
     
-    return {"task_id": task_id, "message": "Blog regeneration queued"}
+    return {"task_id": task_id, "message": "Analysis queued"}
+
+@app.post("/api/blog/generate")
+async def generate_blog(req: BlogGenerationRequest):
+    """
+    [3단계] 블로그 포스트 생성 요청
+    """
+    task_id = str(uuid.uuid4())
+    
+    # Task Manager 등록
+    task_manager.add_task(task_id, req.filename, task_type="blog_generation")
+    
+    # Queue에 작업 추가
+    await job_queue.put((task_id, req))
+    
+    return {"task_id": task_id, "message": "Blog generation queued"}
 
 @app.get("/api/tasks")
 async def get_active_tasks():
