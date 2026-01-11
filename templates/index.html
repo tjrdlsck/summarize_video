@@ -1017,16 +1017,33 @@
 
                 if (activeIndex !== -1) {
                     // 2. 해당 요소의 ID 생성 (렌더링 시 부여할 ID 규칙과 일치해야 함)
-                    // 형식: shorts-script-item-{ShortsID}-{TranscriptIndex}
                     const elementId = `shorts-script-item-${activeShortsId}-${activeIndex}`;
                     const element = document.getElementById(elementId);
 
                     if (element) {
-                        // 3. 부드럽게 스크롤 이동 (block: 'center'로 중앙 정렬)
-                        element.scrollIntoView({
-                            behavior: 'smooth',
-                            block: 'center'
-                        });
+                        // [Core Fix] 부모 요소를 스크롤 시키는 scrollIntoView 대신 컨테이너의 scrollTop을 직접 조정
+                        // 'parentElement'가 스크롤 상자가 아닐 경우를 대비해 가장 가까운 스크롤 가능 조상을 찾음
+                        const container = element.closest('.shorts-script-container') || element.parentElement;
+                        
+                        if (container) {
+                            // [New Algorithm] BoundingClientRect를 이용한 정교한 중앙 정렬 계산
+                            const elementRect = element.getBoundingClientRect();
+                            const containerRect = container.getBoundingClientRect();
+                            
+                            // 컨테이너 내부에서의 상대적인 TOP 위치 계산
+                            const relativeTop = elementRect.top - containerRect.top + container.scrollTop;
+                            
+                            // 정중앙 정렬을 위한 목표 scrollTop (중심선 일치 공식)
+                            const targetScrollTop = relativeTop - (container.clientHeight / 2) + (element.clientHeight / 2);
+                            
+                            // 현재 스크롤 위치와 목표 위치의 차이가 10px 이상일 때만 이동 (불필요한 떨림 방지)
+                            if (Math.abs(container.scrollTop - targetScrollTop) > 10) {
+                                container.scrollTo({
+                                    top: targetScrollTop,
+                                    behavior: 'smooth'
+                                });
+                            }
+                        }
                     }
                 }
             }, [currentShortsOriginalTime, activeShortsId, activeTab, playerData]);
