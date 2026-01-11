@@ -412,6 +412,7 @@ class VideoSummarizer:
                 
                 mapped_result.append({
                     "title": clean_chapter_title,
+                    "type": chap['type'],
                     "summary": chap['summary'],
                     "time": {
                         "start": start_time,
