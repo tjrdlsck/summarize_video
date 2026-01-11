@@ -186,6 +186,20 @@
             return `${hStr}:${mStr}:${sStr}`;
         };
 
+        // 정밀 시간 포맷 (초 -> HH:MM:SS.s)
+        const formatTimeDetail = (seconds) => {
+            if (isNaN(seconds) || seconds < 0) return "00:00:00.0";
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            
+            const hStr = String(h).padStart(2, '0');
+            const mStr = String(m).padStart(2, '0');
+            const sStr = s.toFixed(1).padStart(4, '0');
+            
+            return `${hStr}:${mStr}:${sStr}`;
+        };
+
         const removePunctuation = (text) => {
             if (!text) return "";
             return text.replace(/[.,?!]/g, "");
