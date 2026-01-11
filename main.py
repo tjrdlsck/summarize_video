@@ -104,6 +104,7 @@ class ClipRequest(BaseModel):
 
 class ShortsGenerateRequest(BaseModel):
     filename: str  # 원본 영상 파일명
+    focus_topic: Optional[str] = None # [New] 사용자가 원하는 주제
 
 class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청 모델
     video_filename: str
@@ -546,12 +547,18 @@ async def run_shorts_pipeline(task_id: str, req: ShortsGenerateRequest):
 
         # 2. LLM 기획 (0~30%)
         if task_manager.is_cancelled(task_id): raise Exception("Task cancelled")
-        task_manager.update_progress(task_id, 10, "AI가 하이라이트 구간 선별 중 (성경 구간 보호 적용)...")
+        task_manager.update_progress(task_id, 10, f"AI가 '{req.focus_topic or '자동'}' 주제로 기획 중...")
         
         loop = asyncio.get_running_loop()
         candidates = await loop.run_in_executor(
             None, 
-            partial(shorts_maker.make_shorts_candidates, transcripts, video_title, chapters=chapters)
+            partial(
+                shorts_maker.make_shorts_candidates, 
+                transcripts, 
+                video_title, 
+                chapters=chapters,
+                focus_topic=req.focus_topic # [New] 사용자 주제 전달
+            )
         )
         
         if not candidates: raise Exception("AI가 숏츠 구간을 찾지 못했습니다.")

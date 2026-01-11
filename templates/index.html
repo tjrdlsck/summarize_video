@@ -874,16 +874,21 @@
             };
             // ----------------------------------
 
-            // [New] AI 숏츠 생성 핸들러
+            // [New] AI 숏츠 생성 핸들러 (Updated with Topic Input)
             const handleAutoGenerateShorts = async () => {
-                if (!confirm("AI가 이 영상의 하이라이트를 찾아 숏츠로 제작합니다.\n(약 1~2분 소요)\n\n계속하시겠습니까?")) return;
+                // 사용자에게 주제 입력 받기 (Prompt)
+                const userTopic = prompt("AI가 숏츠를 제작합니다.\n\n특별히 원하시는 주제나 키워드가 있나요?\n(예: '회개', '어린 시절', '다윗')\n\n* 비워두면 AI가 알아서 가장 재미있는 부분을 찾아냅니다.", "");
+                
+                // 취소 버튼 누르면 중단
+                if (userTopic === null) return; 
 
                 try {
                     await axios.post('/api/shorts/auto-generate', {
-                        filename: playerData.video_filename
+                        filename: playerData.video_filename,
+                        focus_topic: userTopic.trim() // [New] 주제 전달
                     });
 
-                    alert("AI 숏츠 제작이 시작되었습니다!\n우측 하단 작업 모니터에서 진행 상황을 확인하세요.");
+                    alert(`AI 숏츠 기획이 시작되었습니다!\n(주제: ${userTopic.trim() || '자동 추천'})\n\n우측 하단 작업 모니터에서 진행 상황을 확인하세요.`);
                     fetchActiveTasks(); // 작업 목록 갱신
 
                 } catch (err) {
@@ -1666,7 +1671,15 @@
 
                                                                     <div className="flex-1">
                                                                         <div className="flex justify-between items-center gap-4">
-                                                                            <h3 className={`text-base font-bold transition leading-relaxed ${isExpanded ? 'text-indigo-700' : 'text-gray-700'}`}>
+                                                                            <h3 className={`text-base font-bold transition leading-relaxed flex items-center gap-2 ${isExpanded ? 'text-indigo-700' : 'text-gray-700'}`}>
+                                                                                {/* [New] 챕터 타입 배지 */}
+                                                                                {chap.type === 'Illustration' && <span className="text-[10px] bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded border border-yellow-200">✨ 예화</span>}
+                                                                                {chap.type === 'Scripture' && <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200">📖 성경</span>}
+                                                                                {chap.type === 'Announcement' && <span className="text-[10px] bg-red-50 text-red-500 px-1.5 py-0.5 rounded border border-red-100">📢 광고</span>}
+                                                                                {chap.type === 'Intro_Icebreak' && <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded border border-gray-200">🧊 인트로</span>}
+                                                                                {chap.type === 'Application' && <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded border border-green-200">🎯 적용</span>}
+                                                                                {chap.type === 'Prayer' && <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200">🙏 기도</span>}
+                                                                                
                                                                                 {chap.title}
                                                                             </h3>
                                                                             {/* Chevron Icon */}

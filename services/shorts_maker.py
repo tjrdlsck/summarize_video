@@ -64,24 +64,68 @@ class ShortsMaker:
 
         return segment_start
 
-    def make_shorts_candidates(self, transcripts, video_title, chapters=None):
+    def make_shorts_candidates(self, transcripts, video_title, chapters=None, focus_topic=None):
         """
-        [Advanced] 챕터 메타데이터를 활용하여 성경 봉독 구간의 원자성을 보호하며 숏츠 후보를 생성합니다.
+        [Advanced] 챕터 메타데이터와 사용자 주제(Topic)를 활용하여 최적의 숏츠 후보를 생성합니다.
+        
+        Args:
+            transcripts: 전체 자막 데이터 리스트
+            video_title: 영상 제목
+            chapters: 분석된 챕터 정보 (Filtering용)
+            focus_topic: 사용자가 요청한 주제/키워드 (Optional)
         """
         if not self.api_key:
             print("[ShortsMaker] Error: API Key missing")
             return []
 
-        input_data = "\n".join([f"[{t['id']}] {t['start']:.2f}~{t['end']:.2f}: {t['text']}" for t in transcripts])
+        # 1. 챕터 기반 데이터 필터링 (Whitelist 방식)
+        filtered_script = ""
+        # 숏츠로 쓰기에 적합한 챕터 타입
+        TARGET_TYPES = ["Illustration", "Preaching_Main", "Application"]
         
-        chapter_context = ""
         if chapters:
-            bible_segments = [c for c in chapters if c.get('type') == 'Scripture_Reading']
-            if bible_segments:
-                chapter_context = "\n### Special Constraints (Scripture Reading):\n"
-                for b in bible_segments:
-                    chapter_context += f"- ID {b.get('start_id')} to {b.get('end_id')} is a Scripture Reading section.\n"
-                chapter_context += "Rule: Do NOT cut in the middle of these sections. Include the WHOLE section or NOTHING from it.\n"
+            print(f"[ShortsMaker] Filtering chapters... (Target: {TARGET_TYPES})")
+            for chap in chapters:
+                # 챕터 타입이 타겟에 포함되는 경우만 추출
+                if chap.get("type") in TARGET_TYPES:
+                    start_t = chap["time"]["start"]
+                    end_t = chap["time"]["end"]
+                    
+                    # 챕터 정보를 헤더로 넣어 문맥 파악 도움
+                    filtered_script += f"\n\n## Section: {chap['title']} ({chap.get('type')})\n"
+                    
+                    # 시간 범위에 맞는 세그먼트 추출
+                    in_range_segments = [
+                        s for s in transcripts 
+                        if s['start'] >= start_t and s['start'] < end_t
+                    ]
+                    for seg in in_range_segments:
+                        filtered_script += f"[{seg['id']}] {seg['start']:.2f}~{seg['end']:.2f}: {seg['text']}\n"
+        else:
+            # 챕터 정보가 없으면 전체 사용 (Fallback)
+            print("[ShortsMaker] No chapters provided. Using full script.")
+            for seg in transcripts:
+                filtered_script += f"[{seg['id']}] {seg['start']:.2f}~{seg['end']:.2f}: {seg['text']}\n"
+
+        if not filtered_script.strip():
+            print("[ShortsMaker] Warning: No chapters matched target types. Falling back to FULL script.")
+            # 필터링된 게 없으면 전체 스크립트를 다 넣음 (구버전 데이터 호환성 or 챕터가 제대로 안 잡힌 경우 대비)
+            for seg in transcripts:
+                filtered_script += f"[{seg['id']}] {seg['start']:.2f}~{seg['end']:.2f}: {seg['text']}\n"
+
+        if not filtered_script.strip():
+            print("[ShortsMaker] No valid script found even after fallback.")
+            return []
+
+        # 2. 프롬프트 구성
+        user_intent_guide = ""
+        if focus_topic:
+            user_intent_guide = (
+                f"\n**[사용자 특별 요청]**\n"
+                f"사용자는 **'{focus_topic}'**에 관한 내용을 원합니다.\n"
+                f"제공된 스크립트에서 이 주제와 관련된 에피소드나 메시지를 **최우선**으로 찾으세요.\n"
+                f"만약 주제와 정확히 일치하는 내용이 없다면, 가장 유사하거나 흥미로운 대안을 제시하세요.\n"
+            )
 
         candidates_schema = {
             "type": "ARRAY",
@@ -89,7 +133,7 @@ class ShortsMaker:
                 "type": "OBJECT",
                 "properties": {
                     "title": {"type": "STRING", "description": "시선을 끄는 숏츠 제목"},
-                    "reason": {"type": "STRING", "description": "바이럴 소구점 설명"},
+                    "reason": {"type": "STRING", "description": "선정 이유 및 사용자 주제와의 연관성"},
                     "segments": {
                         "type": "ARRAY",
                         "items": {
@@ -106,35 +150,21 @@ class ShortsMaker:
             }
         }
 
-        prompt = f"""
-        You are an expert video editor specializing in viral Shorts/Reels for Christian content.
-        Your task is to identify the **top 3 most engaging candidates** for Shorts from the provided transcript.
-        Video Title: {video_title}
+        system_instruction = (
+            "당신은 수백만 조회수를 기록하는 **유튜브 쇼츠 전문 PD**입니다.\n"
+            "제공된 설교 대본(Script)에서 시청자의 이목을 사로잡을 수 있는 '알짜배기' 구간을 발굴하여 기획안을 작성하세요.\n\n"
+            "**[편집 원칙]**\n"
+            "1. **Viral Selection**: 지루한 서론은 버리고, **'Hook(도입)-Body(전개)-Climax(결말)'**가 확실한 구간을 선택하세요.\n"
+            "2. **Time Constraint**: 길이는 **최소 40초 ~ 최대 120초(2분)**로 제한합니다. 문맥이 끊기지 않고 완결성을 갖추는 것이 60초 제한보다 더 중요합니다.\n"
+            "3. **Contextual Integrity**: 문장이 중간에 잘리거나, 앞뒤 맥락 없이 대명사(그, 저기 등)로 시작하지 않도록 주의하세요.\n"
+            "4. **Priority**: '예화(Illustration)'나 '강렬한 메시지(Application)' 위주로 선정하세요. (광고나 성경 봉독은 절대 금지)\n"
+            f"{user_intent_guide}\n"
+        )
 
-        ### Core Strategy: Multi-cut Editing
-        - **DO NOT** just pick one long continuous block. It's often boring.
-        - **DO** identify multiple key moments (e.g., a powerful opening statement, a core message, and a concluding impact) and **combine them** into one Short.
-        - **Skip** filler words, long pauses, or redundant explanations between the core points to keep the pace high and the duration optimal.
-        - Each candidate in the JSON should ideally have **2 to 4 segments** in the `segments` array to create a dynamic 'multi-cut' effect.
-
-        ### Core Requirements:
-        1. **Format**: Vertical Short-form video (Reels/Shorts/TikTok).
-        2. **Duration**: Each final Short must be between **15 seconds and 180 seconds** in total duration.
-        3. **Flow**: Ensure the transition between non-adjacent segments feels logical and the audio flows naturally without cutting mid-sentence.
-        4. **Hook**: The very first segment MUST be an attention-grabbing 'hook'.
-
-        {chapter_context}
-
-        ### Crucial Rule for Scripture Reading:
-        - If a segment belongs to a 'Scripture_Reading' section, you MUST NOT fragment it. 
-        - These sections are sacred and must be presented as a whole unit to maintain context. 
-        - If the scripture is too long for a Short, focus on the speaker's explanation (Sermon) instead.
-
-        ### Input Transcript:
-        {input_data}
-        """
+        prompt = f"{system_instruction}\n\n[Selected Script Data]:\n{filtered_script}"
 
         try:
+            print(f"[ShortsMaker] Requesting AI Plan... (Topic: {focus_topic})")
             client = genai.Client(api_key=self.api_key)
             response = client.models.generate_content(
                 model=self.model_name,
@@ -148,7 +178,7 @@ class ShortsMaker:
             
             candidates = json.loads(response.text)
             valid_candidates = []
-            MAX_DURATION = 180.0
+            MAX_DURATION = 130.0 # 여유 있게 130초
 
             for item in candidates:
                 if not item.get('segments'):
@@ -176,10 +206,34 @@ class ShortsMaker:
                         validated_segments.append({"start": s, "end": e})
                         current_total_duration += seg_duration
 
-                if validated_segments and current_total_duration >= 10.0:
+                # 40초 이상 120초 이하 조건 체크 (약간의 오차 허용)
+                if validated_segments and current_total_duration >= 35.0:
                     item['segments'] = validated_segments
                     item['total_duration'] = current_total_duration
-                    valid_candidates.append(item)
+                    
+                    # 중복 필터링 (Overlap Filtering)
+                    is_duplicate = False
+                    for existing in valid_candidates:
+                        # 교집합 계산 (첫 번째 세그먼트 기준)
+                        # *주의: 멀티 컷일 경우 전체 범위를 단순 비교하기 어려우나, 
+                        # 보통 전체 범위(Total Span)를 기준으로 판단
+                        
+                        my_start = validated_segments[0]['start']
+                        my_end = validated_segments[-1]['end']
+                        ex_start = existing['segments'][0]['start']
+                        ex_end = existing['segments'][-1]['end']
+                        
+                        overlap_start = max(my_start, ex_start)
+                        overlap_end = min(my_end, ex_end)
+                        overlap_len = max(0, overlap_end - overlap_start)
+                        
+                        # 기존 구간 대비 50% 이상 겹치면 중복
+                        if overlap_len > (existing['total_duration'] * 0.5):
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        valid_candidates.append(item)
 
             print(f"[ShortsMaker] Generated {len(valid_candidates)} candidates.")
             return valid_candidates

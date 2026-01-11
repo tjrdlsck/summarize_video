@@ -273,13 +273,13 @@ class VideoSummarizer:
             "items": {
                 "type": "OBJECT",
                 "properties": {
-                    "title": {"type": "STRING", "description": "챕터 제목"},
+                    "title": {"type": "STRING", "description": "내용을 직관적으로 알 수 있는 챕터 제목 (예: '예화: 탕자의 비유')"},
                     "type": {
                         "type": "STRING", 
-                        "enum": ["Scripture_Reading", "Sermon", "Prayer", "Greeting"],
-                        "description": "챕터의 성격 (성경 봉독, 설교, 기도, 인사 등)"
+                        "enum": ["Intro_Icebreak", "Scripture", "Preaching_Main", "Illustration", "Application", "Announcement", "Prayer"],
+                        "description": "편집 작업을 위한 구간 성격 분류"
                     },
-                    "summary": {"type": "STRING", "description": "상세 내용 요약"},
+                    "summary": {"type": "STRING", "description": "편집자가 내용을 파악할 수 있는 핵심 내용 요약"},
                     "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
                     "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
                 },
@@ -288,12 +288,20 @@ class VideoSummarizer:
         }
 
         system_instruction = (
-            "당신은 기독교 영상 콘텐츠 분석 AI입니다. 대본을 읽고 논리적인 '챕터'로 나누어 JSON으로 출력하세요.\n"
-            "특히 '성경 봉독(Scripture_Reading)' 구간을 정확하게 찾아내는 것이 매우 중요합니다.\n"
-            "규칙 1: 영상의 시작(ID:1)부터 끝까지 빈틈없이 커버해야 합니다.\n"
-            "규칙 2: 성경 봉독 구간은 시작 구절부터 마지막 '아멘' 혹은 종료 문구까지 하나의 챕터로 묶으세요.\n"
-            "규칙 3: start_id와 end_id는 제공된 스크립트의 ID를 참조합니다.\n"
-            "규칙 4: 모든 텍스트는 한국어로 작성하세요."
+            "당신은 설교 영상 전문 미디어 팀장입니다. 제공된 대본을 분석하여 '1차 컷편집(Rough Cut)'을 위한 기획안을 JSON으로 출력하세요.\n"
+            "목표: 편집자가 불필요한 구간을 빠르게 제거하고, 핵심 구간(예화, 강조점)을 찾아낼 수 있도록 돕는 것.\n\n"
+            "**[분류 규칙]**\n"
+            "1. Intro_Icebreak: 설교 전 인사, 가벼운 대화, 날씨 이야기 등.\n"
+            "2. Scripture: 성경 본문 봉독 구간. (정확한 시작과 끝 지점 포착 필수)\n"
+            "3. Preaching_Main: 본문 해석, 교리 설명 등 설교의 메인 흐름.\n"
+            "4. Illustration: 시청자의 몰입을 돕는 예화, 에피소드, 유머 구간. (중요: 별도 챕터로 분리하여 하이라이트화)\n"
+            "5. Application: 성도들을 향한 삶의 권면, 핵심 메시지 선포, 결단.\n"
+            "6. Announcement: 교회 광고, 캠페인, 내빈 소개 등. (편집 시 삭제 1순위 후보)\n"
+            "7. Prayer: 마무리 기도, 축도.\n\n"
+            "**[작성 가이드라인]**\n"
+            "- 영상의 처음(ID:1)부터 끝까지 빈틈없이 나누세요.\n"
+            "- 'Announcement' 구간을 아주 정밀하게 분리하세요. 유튜브 업로드 시 이 구간을 잘라내는 것이 편집자의 주된 업무입니다.\n"
+            "- 모든 텍스트는 한국어로 작성하세요."
         )
 
         try:
