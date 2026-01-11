@@ -564,7 +564,8 @@
                                     // 기존 transcript 데이터는 유지하면서 chapters 등 결과 데이터만 교체
                                     setPlayerData(prev => ({
                                         ...prev,
-                                        ...updatedItem.result_data
+                                        ...updatedItem.result_data,
+                                        transcripts: prev.transcripts // [Fix] 자막 데이터 소실 방지
                                     }));
                                 }
                             } catch (e) { console.error("Auto-refresh failed", e); }
