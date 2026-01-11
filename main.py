@@ -318,65 +318,112 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
 
 async def run_blog_pipeline(task_id: str, req: BlogGenerationRequest):
     """
-    [Background] 3단계: 블로그 포스트 생성 파이프라인
-    - 챕터별 내용을 바탕으로 블로그 글을 작성(윤문)합니다.
+    [Background] 3단계: 블로그 포스트 생성 파이프라인 (Updated)
+    - 1. Flash-Lite를 사용하여 전체 블로그 구조(임시 챕터) 설계 (1회 호출)
+    - 2. 설계된 구조에 따라 Gemma를 사용하여 각 섹션 상세 작성 (N회 호출)
+    - 3. 모든 시간 포맷은 HH:MM:SS 유지
     """
     base_name = os.path.splitext(req.filename)[0]
     transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
-    summary_path = os.path.join("static/results", f"{base_name}_summary.json")
+    output_path = os.path.join("static/results", f"{base_name}_blog_view.json")
 
     try:
-        task_manager.update_progress(task_id, 0, "블로그 작성 준비 중...")
+        task_manager.update_progress(task_id, 0, "블로그 구조 설계 중 (Gemini 2.5 Flash-Lite)...")
         
-        if not os.path.exists(transcript_path) or not os.path.exists(summary_path):
-            raise FileNotFoundError("필수 데이터(자막 또는 분석 결과)가 없습니다.")
+        if not os.path.exists(transcript_path):
+            raise FileNotFoundError("자막 데이터가 없습니다.")
 
         with open(transcript_path, 'r', encoding='utf-8') as f:
             segments = json.load(f)
-        with open(summary_path, 'r', encoding='utf-8') as f:
-            summary_data = json.load(f)
-
-        chapters = summary_data.get("chapters", [])
-        if not chapters:
-            raise ValueError("분석된 챕터가 없습니다. AI 분석을 먼저 실행해주세요.")
-
-        total_chaps = len(chapters)
-        sorted_segments = sorted(segments, key=lambda x: x['start'])
+        
         loop = asyncio.get_running_loop()
 
-        for i, chapter in enumerate(chapters):
+        # --- Step 1: Flash-Lite를 이용한 마스터 설계도 생성 ---
+        blog_plan = await loop.run_in_executor(
+            None,
+            partial(
+                summarizer.plan_blog_structure,
+                segments,
+                req.filename,
+                status_callback=lambda msg: loop.call_soon_threadsafe(task_manager.update_progress, task_id, 10, msg)
+            )
+        )
+
+        if "error" in blog_plan:
+            raise Exception(blog_plan["error"])
+        
+        blog_title = blog_plan.get("blog_title", "Untitled Blog Post")
+        temp_chapters = blog_plan.get("chapters", [])
+        total_chaps = len(temp_chapters)
+        
+        if not temp_chapters:
+            raise ValueError("생성된 블로그 구조가 없습니다.")
+
+        # --- Step 2: 설계도에 따라 Gemma로 섹션별 상세 작성 ---
+        sorted_segments = sorted(segments, key=lambda x: x['start'])
+        final_chapters = []
+
+        for i, chap in enumerate(temp_chapters):
             if task_manager.is_cancelled(task_id): raise TaskCancelledError()
 
-            progress = int((i / total_chaps) * 100)
-            task_manager.update_progress(task_id, progress, f"블로그 작성 중... ({i+1}/{total_chaps})")
+            progress = 20 + int((i / total_chaps) * 80)
+            task_manager.update_progress(task_id, progress, f"섹션 작성 중... ({i+1}/{total_chaps})")
 
-            # 챕터에 해당하는 세그먼트 추출
-            c_start = chapter['time']['start']
-            c_end = chapter['time']['end']
+            # ID 범위에 해당하는 세그먼트 추출 (ID는 1부터 시작하므로 인덱스는 -1)
+            start_id = chap['start_id']
+            end_id = chap['end_id']
             
+            # ID 범위를 기반으로 세그먼트 슬라이싱
             chapter_segments = [
                 s for s in sorted_segments 
-                if s['start'] >= c_start and s['start'] < c_end
+                if start_id <= s['id'] <= end_id
             ]
-            
-            # 윤문 (Refine)
+
+            if not chapter_segments:
+                continue
+
+            # Gemma를 통한 윤문 (Refine)
+            # Flash-Lite가 준 focus_point를 참고하여 작성하도록 유도할 수 있음 (현재 refiner 로직 유지)
             refined_md = await loop.run_in_executor(
                 None,
                 partial(
                     refiner.refine_chapter, 
                     raw_text="", 
-                    chapter_title=chapter['title'],
+                    chapter_title=chap['title'],
                     segments=chapter_segments
                 )
             )
-            chapter['blog_content'] = refined_md
+            
+            # 시간 정보 추출 (HH:MM:SS)
+            start_time = chapter_segments[0]['start']
+            end_time = chapter_segments[-1]['end']
 
-        # 결과 업데이트 저장
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            json.dump(summary_data, f, ensure_ascii=False, indent=2)
+            final_chapters.append({
+                "title": chap['title'],
+                "content": refined_md,
+                "focus_point": chap.get("focus_point", ""),
+                "time": {
+                    "start": start_time,
+                    "end": end_time,
+                    "start_formatted": summarizer._format_time(start_time),
+                    "end_formatted": summarizer._format_time(end_time)
+                }
+            })
 
-        task_manager.complete_task(task_id, summary_data)
-        print(f"[{task_id}] Blog Generation Completed: {req.filename}")
+        # 최종 결과 데이터 구성
+        result_data = {
+            "video_source": req.filename,
+            "blog_title": blog_title,
+            "chapters": final_chapters,
+            "generated_at": datetime.now().isoformat()
+        }
+
+        # 결과 저장
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(result_data, f, ensure_ascii=False, indent=2)
+
+        task_manager.complete_task(task_id, result_data)
+        print(f"[{task_id}] Blog View Generation Completed: {req.filename}")
 
     except TaskCancelledError:
         print(f"[{task_id}] Blog Task Cancelled.")

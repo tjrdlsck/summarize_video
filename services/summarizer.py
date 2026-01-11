@@ -234,6 +234,83 @@ class VideoSummarizer:
             print(f"[Error] Blog generation failed: {e}")
             return {"error": str(e)}
 
+    def plan_blog_structure(
+        self, 
+        segments: list[dict], 
+        video_filename: str, 
+        status_callback: callable = None
+    ) -> dict:
+        """Gemini 2.5 Flash-Lite를 사용하여 영상 전체의 블로그 구조를 설계합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+            video_filename: 원본 영상 파일명.
+            status_callback: 진행 상태 콜백.
+
+        Returns:
+            블로그 챕터 구조(ID 범위 포함)가 담긴 딕셔너리.
+        """
+        if not self.api_key:
+            return {"error": "GOOGLE_API_KEY is missing in .env"}
+        
+        total_lines = len(segments)
+        if total_lines == 0: return {"error": "Empty segments"}
+
+        print(f"--- [Summarizer] Planning Blog Structure with Gemini 2.5 Flash-Lite ---")
+        if status_callback: status_callback("Gemini 2.5 Flash-Lite가 블로그 구조를 설계 중입니다...")
+
+        # 프롬프트 구성: 전체 스크립트를 전달 (Long Context 활용)
+        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
+        script_text = "\n".join(lines)
+        
+        response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "blog_title": {"type": "STRING", "description": "영상의 핵심 내용을 관통하는 매력적인 블로그 제목"},
+                "chapters": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "title": {"type": "STRING", "description": "해당 섹션의 소제목"},
+                            "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
+                            "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"},
+                            "focus_point": {"type": "STRING", "description": "이 섹션에서 강조해야 할 핵심 논거 및 스토리텔링 포인트"}
+                        },
+                        "required": ["title", "start_id", "end_id", "focus_point"]
+                    }
+                }
+            },
+            "required": ["blog_title", "chapters"]
+        }
+
+        system_instruction = (
+            "당신은 영상 콘텐츠를 고품질 블로그 포스트로 변환하는 전문 에디터입니다.\n"
+            "제공된 전체 스크립트를 분석하여 독자가 몰입할 수 있는 논리적인 블로그 구조를 설계하세요.\n"
+            "영상의 처음(ID:1)부터 끝까지 빈틈없이 챕터를 나누어야 합니다.\n"
+            "각 챕터는 단순 요약이 아닌, 하나의 완결된 이야기를 구성할 수 있도록 ID 범위를 지정하세요."
+        )
+
+        try:
+            client = genai.Client(api_key=self.api_key)
+            # Gemini 2.5 Flash-Lite 모델 사용
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=f"{system_instruction}\n\n[Full Script]:\n{script_text}",
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    response_schema=response_schema
+                )
+            )
+            
+            plan = json.loads(response.text)
+            return plan
+
+        except Exception as e:
+            print(f"[Error] Blog planning failed: {e}")
+            return {"error": str(e)}
+
     def summarize(
         self, 
         segments: list[dict], 

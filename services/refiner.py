@@ -21,7 +21,7 @@ class TextRefiner:
     def _format_time(self, seconds: float) -> str:
         m, s = divmod(int(seconds), 60)
         h, m = divmod(m, 60)
-        return f"{m:02}:{s:02}"
+        return f"{h:02}:{m:02}:{s:02}"
 
     def refine_chapter(self, raw_text: str, chapter_title: str, segments: list[dict] = None) -> str:
         """챕터별 텍스트를 입력받아 가독성이 극대화된 Markdown 형식으로 윤문합니다.
