@@ -4,6 +4,9 @@
 # 작성자: AI Agent
 # 설명: 이 스크립트는 macOS 환경에서 필요한 의존성을 설치하고 서버를 실행합니다.
 
+# 프로젝트 저장소 주소
+REPO_URL="https://github.com/tjrdlsck/summarize_video.git"
+
 # 색상 코드
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -22,6 +25,14 @@ if ! command -v brew &> /dev/null; then
     echo "터미널에 다음 명령어를 입력하여 Homebrew를 먼저 설치해주세요:"
     echo '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
     exit 1
+fi
+
+# Git 확인 및 설치 추가
+if ! command -v git &> /dev/null; then
+    echo "Git이 없습니다. Homebrew로 설치를 시작합니다..."
+    brew install git
+else
+    echo "Git이 이미 설치되어 있습니다."
 fi
 
 if ! command -v ffmpeg &> /dev/null; then
@@ -67,6 +78,20 @@ if [ ! -f ".env" ]; then
     fi
 else
     echo ".env 파일이 이미 존재합니다."
+fi
+
+# 4.5 Git 저장소 복구 (ZIP 다운로드 사용자용)
+# .git 폴더가 없다면 ZIP으로 받은 것이므로, Git 저장소로 변환하여 업데이트가 가능하게 만듭니다.
+if [ ! -d ".git" ]; then
+    echo -e "${YELLOW}[4.5] Git 저장소 연결 복구 중...${NC}"
+    git init
+    git remote add origin "$REPO_URL"
+    git fetch origin
+    # 현재 파일들을 유지하면서(mixed) 최신 상태와 동기화 정보를 맞춤
+    git reset --mixed origin/main
+    # 로컬 브랜치 추적 설정
+    git branch --set-upstream-to=origin/main main
+    echo -e "${GREEN}>>> 이제 이 폴더는 'git pull' 명령어로 업데이트가 가능합니다!${NC}"
 fi
 
 # 5. 서버 실행
