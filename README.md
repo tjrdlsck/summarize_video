@@ -6,31 +6,22 @@
 
 ---
 
-## 🚀 10초 만에 시작하기 (Super Easy Mode)
+## 🚀 시작하기 (Quick Start)
 
-터미널 명령어가 낯설다면 이 방법을 사용하세요!
+터미널을 열고 아래 명령어를 입력하여 설치 및 실행하세요.
 
 ### 1. 프로젝트 다운로드
 ```bash
 git clone https://github.com/tjrdlsck/summarize_video.git
-```
-(또는 우측 상단 `Code` -> `Download ZIP` 후 압축 해제)
-
-### 2. 더블 클릭으로 실행
-폴더 안에 있는 **`One-Click-Start.command`** 파일을 더블 클릭하세요.
-자동으로 설치가 진행되고 서버가 실행됩니다.
-
-> **Tip:** 처음 실행 시 "확인되지 않은 개발자가..." 경고가 뜬다면?
-> 파일을 **마우스 우클릭** -> **열기**를 선택한 후, 팝업창에서 **열기**를 누르면 됩니다. (Mac 보안 정책)
-
----
-
-## 💻 터미널로 실행하기 (Developer Mode)
-
-```bash
 cd summarize_video
+```
+
+### 2. 자동 설치 및 실행
+```bash
 ./setup.sh
 ```
+스크립트가 실행되면 안내에 따라 **Google Gemini API Key**를 입력하면 끝입니다!
+설치가 완료되면 자동으로 서버가 실행되며, 브라우저가 열립니다. (http://localhost:8000)
 
 ---
 
