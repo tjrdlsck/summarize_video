@@ -34,14 +34,17 @@ class SystemManager:
         Signals the guardian process (run.py) to perform update and restart.
         Exits current process with code 5.
         """
-        print("--- [System] Signaling Update to Guardian... ---")
+        print("--- [System] Signaling Update to Guardian in 1s... ---")
         # Exit code 5 is our custom signal defined in run.py
-        sys.exit(5)
+        # We use a short delay and os._exit to bypass FastAPI's exception handling
+        time.sleep(1)
+        os._exit(5)
 
     @staticmethod
     def restart_server():
         """
         Signals the guardian process to just restart.
         """
-        print("--- [System] Signaling Restart to Guardian... ---")
-        sys.exit(5) # Currently update and restart share the same flow
+        print("--- [System] Signaling Restart to Guardian in 1s... ---")
+        time.sleep(1)
+        os._exit(5)
