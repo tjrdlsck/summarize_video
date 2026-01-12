@@ -13,6 +13,11 @@ function App() {
     const [playerData, setPlayerData] = useState(null);
     const [blogData, setBlogData] = useState(null);
 
+    // [New] System Update State
+    const [updateAvailable, setUpdateAvailable] = useState(false);
+    const [updateInfo, setUpdateInfo] = useState(null);
+    const [isUpdating, setIsUpdating] = useState(false);
+
     // Player UI State
     const [loading, setLoading] = useState(false);
     const [activeTab, setActiveTab] = useState('chapters');
@@ -133,11 +138,49 @@ function App() {
 
     const videoRef = useRef(null);
 
+    // --- [Lifecycle & Polling] ---
     useEffect(() => {
         fetchHistory();
+        checkUpdate(); // [New] 앱 로드 시 업데이트 확인
         const interval = setInterval(fetchActiveTasks, 2000);
         return () => clearInterval(interval);
     }, []);
+
+    // [New] 업데이트 확인 핸들러
+    const checkUpdate = async () => {
+        try {
+            const res = await axios.get('/api/system/check-update');
+            if (res.data.update_available) {
+                setUpdateAvailable(true);
+                setUpdateInfo(res.data);
+            }
+        } catch (err) { console.error("Update check failed", err); }
+    };
+
+    // [New] 시스템 업데이트 실행 핸들러
+    const handleSystemUpdate = async () => {
+        if (!confirm(`시스템 업데이트를 진행하시겠습니까?\n\n- 최신 코드를 다운로드하고 의존성을 재설치합니다.\n- 로컬에서 수정된 코드가 있다면 원본으로 초기화될 수 있습니다.\n- 완료 후 서버가 자동으로 재시작됩니다.`)) return;
+
+        setIsUpdating(true);
+        try {
+            await axios.post('/api/system/update');
+            
+            // 서버 재시작으로 인해 연결이 끊길 것이므로 사용자에게 안내
+            alert("업데이트 요청 성공! 약 10~20초 후 페이지를 새로고침 해주세요.");
+            window.location.reload();
+        } catch (err) {
+            // 서버가 바로 꺼지면서 에러가 발생할 수 있으므로 상황 판단 필요
+            if (err.code === 'ECONNABORTED' || !err.response) {
+                alert("서버 재시작 중입니다. 잠시 후 새로고침 하세요.");
+            } else {
+                alert("업데이트 실패: " + err.message);
+            }
+        } finally {
+            setIsUpdating(false);
+        }
+    };
+
+    // 작업 완료 감지
 
     const prevTaskCount = useRef(0);
     useEffect(() => {
@@ -565,10 +608,36 @@ ${b.fullText}`).join('\n\n');
             <TaskMonitor tasks={activeTasks} onCancel={handleCancelTask} />
 
             <main className="flex-1 flex overflow-hidden bg-gray-50">
-                {viewMode === 'dashboard' && (
-                    <div className="w-full h-full overflow-y-auto custom-scrollbar">
-                        <div className="max-w-6xl mx-auto p-4 md:p-8 fade-in space-y-12">
-                            <section className="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
+                        {/* --- View 1: Dashboard --- */}
+                        {viewMode === 'dashboard' && (
+                            // [수정] 전체 높이(h-full)와 스크롤(overflow-y-auto)을 적용하여 목록이 많아져도 스크롤 가능하게 함
+                            <div className="w-full h-full overflow-y-auto custom-scrollbar">
+                                <div className="max-w-6xl mx-auto p-4 md:p-8 fade-in space-y-12">
+                                    
+                                    {/* [New] System Update Banner */}
+                                    {updateAvailable && (
+                                        <div className="bg-indigo-600 rounded-2xl p-4 mb-8 text-white shadow-lg flex flex-col md:flex-row justify-between items-center gap-4 animate-bounce-subtle">
+                                            <div className="flex items-center gap-3">
+                                                <div className="bg-indigo-500 p-2 rounded-full">
+                                                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.001 0 01-15.357-2m15.357 2H15"></path></svg>
+                                                </div>
+                                                <div>
+                                                    <h4 className="font-bold text-sm">새로운 시스템 업데이트가 있습니다!</h4>
+                                                    <p className="text-xs text-indigo-100">현재: {updateInfo.current_version} → 최신: {updateInfo.latest_version}</p>
+                                                </div>
+                                            </div>
+                                            <button 
+                                                onClick={handleSystemUpdate}
+                                                disabled={isUpdating}
+                                                className="bg-white text-indigo-600 px-6 py-2 rounded-xl font-bold text-sm hover:bg-indigo-50 transition shadow-sm disabled:opacity-50"
+                                            >
+                                                {isUpdating ? '업데이트 중...' : '🚀 지금 업데이트'}
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {/* Input Section */}
+                                    <section className="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
                                 <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">새 영상 분석하기</h2>
                                 <div className="max-w-2xl mx-auto space-y-6">
                                     <div className="flex gap-3">
