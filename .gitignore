@@ -13,3 +13,10 @@ tasks.json
 .gemini/
 test.mp4
 debug_transcribe.py
+
+# macOS
+.DS_Store
+*.app/
+
+# Logs
+*.log
