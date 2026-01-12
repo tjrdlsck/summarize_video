@@ -85,10 +85,14 @@ if [ ! -d ".git" ]; then
     git init
     git remote add origin "$REPO_URL"
     git fetch origin
-    # 현재 파일들을 유지하면서(mixed) 최신 상태와 동기화 정보를 맞춤
+    
+    # 로컬 브랜치를 생성하고 원격 브랜치와 연결 (이미 파일이 있으므로 강제 체크아웃)
+    # --force를 사용하여 기존 파일들과의 충돌을 무시하고 Git 인덱스를 초기화합니다.
+    git checkout -B main origin/main
+    
+    # 파일 상태를 유지하면서 인덱스만 맞춤 (이미 최신 파일들이 있으므로)
     git reset --mixed origin/main
-    # 로컬 브랜치 추적 설정
-    git branch --set-upstream-to=origin/main main
+    
     echo -e "${GREEN}>>> 이제 이 폴더는 'git pull' 명령어로 업데이트가 가능합니다!${NC}"
 fi
 
