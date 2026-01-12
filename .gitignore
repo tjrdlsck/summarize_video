@@ -2,7 +2,10 @@
 venv/
 video/
 __pycache__/
-static/
+static/clips/
+static/results/
+static/temp/
+static/videos/
 1.txt
 gemma.py
 sermon_output.md
