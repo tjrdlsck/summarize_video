@@ -1242,18 +1242,13 @@ async def check_update():
 async def update_system():
     """
     업데이트를 수행하고 서버를 재시작합니다.
+    (가디언 프로세스 run.py에 신호를 전달)
     """
     try:
-        # 1. 업데이트 수행 (git reset --hard & pip install)
+        # 가디언 프로세스에게 업데이트 신호(Exit Code 5) 전달
+        # 이 함수가 실행되는 즉시 프로세스가 종료됩니다.
         SystemManager.perform_update()
-        
-        # 2. 서버 재시작 (이 작업은 현재 프로세스를 종료하고 새 프로세스를 띄웁니다)
-        # 클라이언트에게 응답을 보낼 시간을 주기 위해 아주 잠깐 지연 후 실행할 수도 있으나, 
-        # restart_server 내의 os.execv는 즉시 실행됩니다.
-        # 따라서 클라이언트는 연결 끊김(Connection Closed)을 성공 신호로 간주해야 합니다.
-        asyncio.get_running_loop().call_later(1.0, SystemManager.restart_server)
-        
-        return {"status": "success", "message": "Update started. Server will restart in 1 second."}
+        return {"status": "success", "message": "Update initiated."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
