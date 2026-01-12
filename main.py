@@ -38,6 +38,10 @@ async def lifespan(app: FastAPI):
     """
     # [Startup] 앱 시작 시 실행
     print("--- [Lifespan] Starting Background Worker... ---")
+    
+    # [Cleanup] 서버 시작 시 잔존 임시 파일 정리
+    cleanup_orphaned_files()
+    
     worker_task = asyncio.create_task(worker())
     
     yield  # 앱이 실행되는 동안 여기서 대기 (Control Yield)
@@ -132,6 +136,46 @@ class TaskProgressWrapper:
     def is_cancelled(self, task_id):
         # 취소 여부는 원본 매니저에게 위임
         return self.tm.is_cancelled(self.task_id)
+
+def cleanup_orphaned_files():
+    """
+    [Startup] 서버 시작 시, 이전 실행에서 비정상 종료 등으로 남겨진 임시 파일들을 정리합니다.
+    대상: static/temp/*, static/results/*_temp.wav
+    """
+    print("--- [Cleanup] Scanning for orphaned temporary files... ---")
+    cleanup_count = 0
+    
+    # 1. static/temp 폴더 비우기 (Zip, MP4 조각 등)
+    temp_dir = "static/temp"
+    if os.path.exists(temp_dir):
+        for filename in os.listdir(temp_dir):
+            if filename == ".gitkeep": continue # .gitkeep은 유지
+            
+            file_path = os.path.join(temp_dir, filename)
+            try:
+                if os.path.isfile(file_path) or os.path.islink(file_path):
+                    os.unlink(file_path)
+                    cleanup_count += 1
+                elif os.path.isdir(file_path):
+                    shutil.rmtree(file_path)
+                    cleanup_count += 1
+            except Exception as e:
+                print(f"[Cleanup Error] Failed to delete {file_path}: {e}")
+
+    # 2. static/results 내부의 임시 wav 파일 정리
+    results_dir = "static/results"
+    if os.path.exists(results_dir):
+        for filename in os.listdir(results_dir):
+            if filename.endswith("_temp.wav"):
+                file_path = os.path.join(results_dir, filename)
+                try:
+                    os.remove(file_path)
+                    cleanup_count += 1
+                except Exception as e:
+                    print(f"[Cleanup Error] Failed to delete {file_path}: {e}")
+                    
+    if cleanup_count > 0:
+        print(f"--- [Cleanup] Removed {cleanup_count} orphaned files. ---")
 
 def remove_temp_files(file_paths: list):
     """
