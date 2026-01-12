@@ -62,38 +62,17 @@ pip install -r requirements.txt
 echo -e "${YELLOW}[4/5] 환경 변수 설정 확인...${NC}"
 
 if [ ! -f ".env" ]; then
-    echo -e "${GREEN}>>> .env 파일 설정을 시작합니다.${NC}"
-    
-    echo -e "${RED}!!! 중요 !!!${NC}"
+    echo -e "${GREEN}>>> .env 파일이 없습니다.${NC}"
     echo "Google Gemini API Key가 필요합니다."
     read -p "지금 API Key를 입력하시겠습니까? (y/n): " answer
-    
     if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
         read -p "API Key 붙여넣기: " apikey
-        
-        # [수정됨] sed 대신 안전하게 파일 생성
-        # 기존 .env.example이 있다면 내용을 가져오되, API 키 부분은 제거하고 새로 씀
-        if [ -f ".env.example" ]; then
-            # API 키 라인을 제외한 나머지 설정 복사
-            grep -v "GEMINI_API_KEY" .env.example > .env
-        else
-            # 예제 파일이 없으면 빈 파일 생성
-            touch .env
-        fi
-        
-        # 사용자가 입력한 키를 파일 끝에 추가
-        echo "" >> .env
-        echo "GEMINI_API_KEY=$apikey" >> .env
-        
-        echo "✅ API Key가 .env 파일에 안전하게 저장되었습니다."
+        echo "GOOGLE_API_KEY=\"$apikey\"" > .env
+        echo "API Key가 .env 파일에 저장되었습니다."
     else
-        # 사용자가 입력을 거부한 경우 예제 파일만 복사
-        if [ -f ".env.example" ]; then
-            cp .env.example .env
-        else
-            echo "GEMINI_API_KEY=" > .env
-        fi
-        echo "⚠️  나중에 .env 파일을 직접 열어서 API Key를 입력해주세요."
+        echo ".env.example을 복사하여 기본 파일을 생성합니다."
+        cp .env.example .env
+        echo "나중에 .env 파일을 직접 열어서 API Key를 수정해주세요."
     fi
 else
     echo ".env 파일이 이미 존재합니다."
