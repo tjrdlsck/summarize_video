@@ -32,13 +32,18 @@ def run_server():
                 # 1. Update source code
                 print("[Maintenance] Fetching latest changes from git...")
                 subprocess.run(["git", "fetch", "origin", "main"], check=True)
-                subprocess.run(["git", "reset", "--hard", "origin/main"], check=True)
                 
-                # 2. Update dependencies
+                # 2. Explicitly checkout and sync main branch
+                print("[Maintenance] Switching to main branch and syncing...")
+                # -B: Create or reset the branch if it already exists
+                subprocess.run(["git", "checkout", "-B", "main", "origin/main"], check=True)
+                
+                # 3. Update dependencies
                 print("[Maintenance] Updating python dependencies...")
                 subprocess.run([python_exe, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
                 
-                print("[Maintenance] Update successful. Cooling down for 2 seconds...")
+                print("[Maintenance] Update successful. Switched to 'main' branch.")
+                print("[Maintenance] Cooling down for 2 seconds...")
                 time.sleep(2) # Grace period for port release
                 
             except subprocess.CalledProcessError as e:
