@@ -97,8 +97,15 @@ class VideoSummarizer:
         self.model_name = "gemini-2.5-flash"  # Cost-effective high performance model
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def _create_prompt(self, segments):
-        """LLM에게 던질 경량화된 스크립트(ID | Text) 생성"""
+    def _create_prompt(self, segments: list[dict]) -> str:
+        """LLM에게 전달할 경량화된 스크립트 데이터를 생성합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+
+        Returns:
+            ID와 텍스트가 결합된 문자열 형태의 스크립트 데이터.
+        """
         lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
         script_text = "\n".join(lines)
         
@@ -113,12 +120,214 @@ class VideoSummarizer:
         )
         return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
-    # [Update] 기존 summarize 메서드를 교체하세요.
-    def summarize(self, segments, video_filename, custom_title=None, status_callback=None):
+    def _create_blog_prompt(self, segments: list[dict]) -> str:
+        """블로그 포스트 생성을 위한 프롬프트를 생성합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+
+        Returns:
+            블로그 작성 지시사항과 스크립트 데이터가 포함된 프롬프트 문자열.
         """
-        Gemini 1.5/2.0의 JSON Mode를 사용하여 정확한 챕터 데이터를 생성합니다.
-        Regex 파싱이 필요 없어 훨씬 안정적입니다.
-        [Fix] 챕터 제목의 Markdown 문법 제거 및 가독성 높은 제목 처리 추가
+        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
+        script_text = "\n".join(lines)
+        
+        system_instruction = (
+            "당신은 전문 지식을 독자에게 친절하고 논리적으로 가르치는 **세계 최고의 블로그 에디터**입니다.\n"
+            "제공된 스크립트를 바탕으로 독자가 몰입할 수 있는 **스토리텔링형 블로그 포스트**를 작성하세요.\n"
+            "**절대 시간 순서대로 단순히 나열하지 마세요.** 주제별로 내용을 재구성하여 독자의 지적 호기심을 충족시켜야 합니다.\n\n"
+            "**[필수 작성 및 강조 규칙]**\n"
+            "1. **정형화된 서사 구조**: 모든 주제 섹션은 아래 구성을 따라야 합니다.\n"
+            "   - **도입부 (Introduction)**: 독자의 호기심을 자극하고 본문에서 다룰 핵심 질문을 던지는 문장으로 시작.\n"
+            "   - **본문 (Body)**: 매력적인 소제목과 함께 내용을 논리적으로 상세히 설명.\n"
+            "   - **맺음말 (Conclusion)**: 내용을 갈무리하며 독자에게 깊은 통찰이나 제언을 던지는 문장으로 마무리.\n"
+            "2. **시각적 강조 (Highlighting)**:\n"
+            "   - **핵심 키워드**: 문맥상 중요한 단어나 고유 명사는 반드시 `**굵게**` 표시하세요. (섹션당 5개 이상)\n"
+            "   - **핵심 메시지**: 각 챕터나 섹션의 결론이 담긴 가장 중요한 문장 1~2개는 반드시 `<mark>핵심 문장</mark>` 태그로 감싸세요.\n"
+            "3. **인용(Citation)**: 본문의 내용이 스크립트의 특정 부분에 기반할 때, 문장 끝에 반드시 `[[ID:숫자]]` 형식으로 출처를 남기세요.\n"
+            "   - **주의**: 여러 개의 출처를 인용할 경우 반드시 `[[ID:1]][[ID:2]]`와 같이 개별적으로 작성하세요. `[[ID:1, 2]]`와 같이 쉼표로 연결하지 마세요.\n"
+            "4. **어조**: 친절하고 전문적인 블로거의 말투(해요체)를 사용하세요."
+        )
+        return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
+
+    def generate_blog_post(
+        self, 
+        segments: list[dict], 
+        video_filename: str, 
+        status_callback: callable = None
+    ) -> dict:
+        """Gemini를 사용하여 주제 중심의 블로그 포스트를 생성합니다.
+
+        타임스탬프를 인용(`[[ID:숫자]]`) 형태로 받아 실제 시간으로 치환합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+            video_filename: 원본 영상 파일명.
+            status_callback: 진행 상태 콜백.
+
+        Returns:
+            블로그 포스트 내용과 메타데이터가 포함된 딕셔너리.
+        """
+        if not self.api_key:
+            return {"error": "GOOGLE_API_KEY is missing in .env"}
+        
+        if not segments:
+            return {"error": "Empty segments"}
+
+        print(f"--- [Summarizer] Generating Blog Post for {video_filename} ---")
+        if status_callback: status_callback("Gemini가 블로그 포스트를 작성 중입니다...")
+
+        tracker = UsageTracker()
+        prompt = self._create_blog_prompt(segments)
+
+        try:
+            client = genai.Client(api_key=self.api_key)
+            
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.3, # 창의성 약간 부여
+                )
+            )
+            tracker.update(response)
+            
+            blog_content = response.text
+            
+            # --- Post-Processing: 인용 ID를 타임스탬프로 치환 ---
+            def replace_match(match):
+                try:
+                    seg_id = int(match.group(1))
+                    idx = seg_id - 1
+                    if 0 <= idx < len(segments):
+                        start_time = segments[idx]['start']
+                        time_str = self._format_time(start_time)
+                        return f" `({time_str})`" 
+                except:
+                    pass
+                return ""
+
+            # 1. 다양한 형태의 ID 인용구 치환
+            inter_content = re.sub(r'\[*ID:\s*(\d+)\s*\]*', replace_match, blog_content)
+            
+            # 2. 잔여물 제거 (Heuristic Cleanup)
+            refined_content = re.sub(r'[, \d]*\]+', '', inter_content)
+            refined_content = refined_content.replace("[[", "").replace("]]", "").strip()
+            
+            result_data = {
+                "video_source": video_filename,
+                "type": "blog_post",
+                "token_usage": tracker.get_report(),
+                "content": refined_content
+            }
+
+            # 저장
+            base_name = os.path.splitext(video_filename)[0]
+            output_path = os.path.join(self.output_dir, f"{base_name}_blog.json")
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(result_data, f, ensure_ascii=False, indent=2)
+                
+            return result_data
+
+        except Exception as e:
+            print(f"[Error] Blog generation failed: {e}")
+            return {"error": str(e)}
+
+    def plan_blog_structure(
+        self, 
+        segments: list[dict], 
+        video_filename: str, 
+        status_callback: callable = None
+    ) -> dict:
+        """Gemini 2.5 Flash-Lite를 사용하여 영상 전체의 블로그 구조를 설계합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+            video_filename: 원본 영상 파일명.
+            status_callback: 진행 상태 콜백.
+
+        Returns:
+            블로그 챕터 구조(ID 범위 포함)가 담긴 딕셔너리.
+        """
+        if not self.api_key:
+            return {"error": "GOOGLE_API_KEY is missing in .env"}
+        
+        total_lines = len(segments)
+        if total_lines == 0: return {"error": "Empty segments"}
+
+        print(f"--- [Summarizer] Planning Blog Structure with Gemini 2.5 Flash-Lite ---")
+        if status_callback: status_callback("Gemini 2.5 Flash-Lite가 블로그 구조를 설계 중입니다...")
+
+        # 프롬프트 구성: 전체 스크립트를 전달 (Long Context 활용)
+        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
+        script_text = "\n".join(lines)
+        
+        response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "blog_title": {"type": "STRING", "description": "영상의 핵심 내용을 관통하는 매력적인 블로그 제목"},
+                "chapters": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "title": {"type": "STRING", "description": "해당 섹션의 소제목"},
+                            "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
+                            "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"},
+                            "focus_point": {"type": "STRING", "description": "이 섹션에서 강조해야 할 핵심 논거 및 스토리텔링 포인트"}
+                        },
+                        "required": ["title", "start_id", "end_id", "focus_point"]
+                    }
+                }
+            },
+            "required": ["blog_title", "chapters"]
+        }
+
+        system_instruction = (
+            "당신은 영상 콘텐츠를 고품질 블로그 포스트로 변환하는 전문 에디터입니다.\n"
+            "제공된 전체 스크립트를 분석하여 독자가 몰입할 수 있는 논리적인 블로그 구조를 설계하세요.\n"
+            "영상의 처음(ID:1)부터 끝까지 빈틈없이 챕터를 나누어야 합니다.\n"
+            "각 챕터는 단순 요약이 아닌, 하나의 완결된 이야기를 구성할 수 있도록 ID 범위를 지정하세요."
+        )
+
+        try:
+            client = genai.Client(api_key=self.api_key)
+            # Gemini 2.5 Flash-Lite 모델 사용
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=f"{system_instruction}\n\n[Full Script]:\n{script_text}",
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    response_mime_type="application/json",
+                    response_schema=response_schema
+                )
+            )
+            
+            plan = json.loads(response.text)
+            return plan
+
+        except Exception as e:
+            print(f"[Error] Blog planning failed: {e}")
+            return {"error": str(e)}
+
+    def summarize(
+        self, 
+        segments: list[dict], 
+        video_filename: str, 
+        custom_title: str = None, 
+        status_callback: callable = None
+    ) -> dict:
+        """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다.
+
+        Args:
+            segments: 분석된 자막 세그먼트 리스트.
+            video_filename: 원본 영상 파일명.
+            custom_title: 사용자가 지정한 영상 제목 (선택 사항).
+            status_callback: 진행 상태를 보고할 콜백 함수 (선택 사항).
+
+        Returns:
+            요약 결과, 챕터 리스트, 토큰 사용량 등이 포함된 결과 딕셔너리.
         """
         if not self.api_key:
             return {"error": "GOOGLE_API_KEY is missing in .env"}
@@ -141,20 +350,35 @@ class VideoSummarizer:
             "items": {
                 "type": "OBJECT",
                 "properties": {
-                    "title": {"type": "STRING", "description": "챕터 제목"},
-                    "summary": {"type": "STRING", "description": "상세 내용 요약"},
+                    "title": {"type": "STRING", "description": "내용을 직관적으로 알 수 있는 챕터 제목 (예: '예화: 탕자의 비유')"},
+                    "type": {
+                        "type": "STRING", 
+                        "enum": ["Intro_Icebreak", "Scripture", "Preaching_Main", "Illustration", "Application", "Announcement", "Prayer"],
+                        "description": "편집 작업을 위한 구간 성격 분류"
+                    },
+                    "summary": {"type": "STRING", "description": "편집자가 내용을 파악할 수 있는 핵심 내용 요약"},
                     "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
                     "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
                 },
-                "required": ["title", "summary", "start_id", "end_id"]
+                "required": ["title", "type", "summary", "start_id", "end_id"]
             }
         }
 
         system_instruction = (
-            "당신은 영상 콘텐츠 분석 AI입니다. 대본을 읽고 논리적인 '챕터'로 나누어 JSON으로 출력하세요.\n"
-            "규칙 1: 영상의 시작(ID:1)부터 끝까지 빈틈없이 커버해야 합니다.\n"
-            "규칙 2: start_id와 end_id는 제공된 스크립트의 ID를 참조합니다.\n"
-            "규칙 3: 한국어로 작성하세요."
+            "당신은 설교 영상 전문 미디어 팀장입니다. 제공된 대본을 분석하여 '1차 컷편집(Rough Cut)'을 위한 기획안을 JSON으로 출력하세요.\n"
+            "목표: 편집자가 불필요한 구간을 빠르게 제거하고, 핵심 구간(예화, 강조점)을 찾아낼 수 있도록 돕는 것.\n\n"
+            "**[분류 규칙]**\n"
+            "1. Intro_Icebreak: 설교 전 인사, 가벼운 대화, 날씨 이야기 등.\n"
+            "2. Scripture: 성경 본문 봉독 구간. (정확한 시작과 끝 지점 포착 필수)\n"
+            "3. Preaching_Main: 본문 해석, 교리 설명 등 설교의 메인 흐름.\n"
+            "4. Illustration: 시청자의 몰입을 돕는 예화, 에피소드, 유머 구간. (중요: 별도 챕터로 분리하여 하이라이트화)\n"
+            "5. Application: 성도들을 향한 삶의 권면, 핵심 메시지 선포, 결단.\n"
+            "6. Announcement: 교회 광고, 캠페인, 내빈 소개 등. (편집 시 삭제 1순위 후보)\n"
+            "7. Prayer: 마무리 기도, 축도.\n\n"
+            "**[작성 가이드라인]**\n"
+            "- 영상의 처음(ID:1)부터 끝까지 빈틈없이 나누세요.\n"
+            "- 'Announcement' 구간을 아주 정밀하게 분리하세요. 유튜브 업로드 시 이 구간을 잘라내는 것이 편집자의 주된 업무입니다.\n"
+            "- 모든 텍스트는 한국어로 작성하세요."
         )
 
         try:
@@ -174,7 +398,7 @@ class VideoSummarizer:
             # JSON 파싱
             final_chapters = json.loads(response.text)
             
-            # ID -> Time 매핑 & [New] 챕터 제목 정제
+            # ID -> Time 매핑 & 챕터 제목 정제
             mapped_result = []
             for chap in final_chapters:
                 s_idx = max(0, min(chap['start_id'] - 1, total_lines - 1))
@@ -183,12 +407,12 @@ class VideoSummarizer:
                 start_time = segments[s_idx]['start']
                 end_time = segments[e_idx]['end']
                 
-                # [Fix] 챕터 제목 내 불필요한 마크다운(**, __) 제거
-                # 예: "**서론**" -> "서론"
+                # 챕터 제목 내 불필요한 마크다운(**, __) 제거
                 clean_chapter_title = re.sub(r'\*\*|__', '', chap['title']).strip()
                 
                 mapped_result.append({
-                    "title": clean_chapter_title, # 정제된 제목 사용
+                    "title": clean_chapter_title,
+                    "type": chap['type'],
                     "summary": chap['summary'],
                     "time": {
                         "start": start_time,
@@ -198,7 +422,6 @@ class VideoSummarizer:
                     }
                 })
 
-            # [Fix] display_title이 이미 정제되어 넘어오므로 그대로 사용
             display_title = custom_title if custom_title and custom_title.strip() else video_filename
 
             result_data = {
@@ -222,8 +445,15 @@ class VideoSummarizer:
             print(f"[Error] Summarization failed: {e}")
             return {"error": str(e)}
         
-    def _format_time(self, seconds):
-        """초(seconds)를 HH:MM:SS 형식의 문자열로 변환"""
+    def _format_time(self, seconds: float) -> str:
+        """초(seconds)를 HH:MM:SS 형식의 문자열로 변환합니다.
+
+        Args:
+            seconds: 변환할 초 단위 시간.
+
+        Returns:
+            HH:MM:SS 형식의 시간 문자열.
+        """
         m, s = divmod(int(seconds), 60)
         h, m = divmod(m, 60)
         return f"{h:02}:{m:02}:{s:02}"
