@@ -26,6 +26,7 @@ from services.clipper import VideoClipper
 from services.refiner import TextRefiner
 from services.shorts_maker import ShortsMaker
 from services.premiere_exporter import PremiereExporter
+from services.system_manager import SystemManager
 
 
 # --- [Lifespan Manager] ---
@@ -1227,6 +1228,34 @@ async def cancel_task(task_id: str):
     task_manager.request_cancel(task_id)
     
     return {"status": "success", "message": "Cancel requested"}
+
+# --- [System Management Endpoints] ---
+
+@app.get("/api/system/check-update")
+async def check_update():
+    """
+    원격 저장소와 비교하여 업데이트가 필요한지 확인합니다.
+    """
+    return SystemManager.check_for_updates()
+
+@app.post("/api/system/update")
+async def update_system():
+    """
+    업데이트를 수행하고 서버를 재시작합니다.
+    """
+    try:
+        # 1. 업데이트 수행 (git reset --hard & pip install)
+        SystemManager.perform_update()
+        
+        # 2. 서버 재시작 (이 작업은 현재 프로세스를 종료하고 새 프로세스를 띄웁니다)
+        # 클라이언트에게 응답을 보낼 시간을 주기 위해 아주 잠깐 지연 후 실행할 수도 있으나, 
+        # restart_server 내의 os.execv는 즉시 실행됩니다.
+        # 따라서 클라이언트는 연결 끊김(Connection Closed)을 성공 신호로 간주해야 합니다.
+        asyncio.get_running_loop().call_later(1.0, SystemManager.restart_server)
+        
+        return {"status": "success", "message": "Update started. Server will restart in 1 second."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # if __name__ == "__main__":
 #     import uvicorn
