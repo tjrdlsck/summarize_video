@@ -64,7 +64,7 @@ cd summarize_video
 1.  [Google AI Studio](https://aistudio.google.com/)에서 무료 API Key를 발급받으세요.
 2.  설치 과정에서 입력하지 못했다면, 프로젝트 폴더 내의 `.env` 파일을 열어 직접 수정하세요.
     ```env
-    GEMINI_API_KEY=여기에_키를_붙여넣으세요
+    GOOGLE_API_KEY="여기에_키를_붙여넣으세요"
     ```
 
 ---

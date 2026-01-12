@@ -62,18 +62,16 @@ pip install -r requirements.txt
 echo -e "${YELLOW}[4/5] 환경 변수 설정 확인...${NC}"
 
 if [ ! -f ".env" ]; then
-    echo -e "${GREEN}>>> .env 파일이 없어서 .env.example을 복사하여 생성합니다.${NC}"
-    cp .env.example .env
-    echo -e "${RED}!!! 중요 !!!${NC}"
-    echo ".env 파일이 생성되었습니다."
+    echo -e "${GREEN}>>> .env 파일이 없습니다.${NC}"
     echo "Google Gemini API Key가 필요합니다."
     read -p "지금 API Key를 입력하시겠습니까? (y/n): " answer
     if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
         read -p "API Key 붙여넣기: " apikey
-        # sed 명령어로 GEMINI_API_KEY 값 교체 (macOS 호환 방식)
-        sed -i '' "s/GEMINI_API_KEY=.*/GEMINI_API_KEY=$apikey/" .env
-        echo "API Key가 저장되었습니다."
+        echo "GOOGLE_API_KEY=\"$apikey\"" > .env
+        echo "API Key가 .env 파일에 저장되었습니다."
     else
+        echo ".env.example을 복사하여 기본 파일을 생성합니다."
+        cp .env.example .env
         echo "나중에 .env 파일을 직접 열어서 API Key를 수정해주세요."
     fi
 else
