@@ -58,13 +58,15 @@ class SystemManager:
     @staticmethod
     def restart_server():
         """
-        Restarts the current python process using os.execv
+        Restarts the current python process with a slight delay to allow port release.
+        Uses a shell command to wait and then re-execute.
         """
-        print("--- [System] Restarting Server... ---")
-        # Flush stdout to ensure logs are written
+        print("--- [System] Restarting Server in 2 seconds... ---")
         sys.stdout.flush()
         
-        # Replace current process with new one
-        # sys.executable: path to python interpreter
-        # sys.argv: arguments used to launch the script (e.g. ['main.py'])
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # Combined command: sleep then restart
+        # This gives the OS time to release the bound port (8000)
+        python_cmd = f"{sys.executable} {' '.join(sys.argv)}"
+        restart_cmd = f"sleep 2 && {python_cmd}"
+        
+        os.execv("/bin/sh", ["/bin/sh", "-c", restart_cmd])

@@ -159,24 +159,44 @@ function App() {
 
     // [New] 시스템 업데이트 실행 핸들러
     const handleSystemUpdate = async () => {
-        if (!confirm(`시스템 업데이트를 진행하시겠습니까?\n\n- 최신 코드를 다운로드하고 의존성을 재설치합니다.\n- 로컬에서 수정된 코드가 있다면 원본으로 초기화될 수 있습니다.\n- 완료 후 서버가 자동으로 재시작됩니다.`)) return;
+        if (!confirm(`시스템 업데이트를 진행하시겠습니까?
+
+- 최신 코드를 다운로드하고 의존성을 재설치합니다.
+- 로컬에서 수정된 코드가 있다면 원본으로 초기화될 수 있습니다.
+- 완료 후 서버가 자동으로 재시작됩니다.`)) return;
 
         setIsUpdating(true);
         try {
             await axios.post('/api/system/update');
             
-            // 서버 재시작으로 인해 연결이 끊길 것이므로 사용자에게 안내
-            alert("업데이트 요청 성공! 약 10~20초 후 페이지를 새로고침 해주세요.");
-            window.location.reload();
+            // [New Strategy] Smart Polling Restart
+            // 서버가 꺼지고 다시 켜질 때까지 기다린 후 새로고침합니다.
+            alert("업데이트가 시작되었습니다. 서버 재시작 완료 시 자동으로 페이지를 불러옵니다.");
+            
+            const pollServer = async () => {
+                try {
+                    // 서버의 루트(/) 경로에 2초마다 핑을 보냅니다.
+                    await axios.get('/?t=' + Date.now(), { timeout: 1500 });
+                    // 성공하면(서버가 다시 뜸) 새로고침
+                    window.location.reload();
+                } catch (e) {
+                    // 에러가 나면(서버가 아직 죽어있음) 계속 시도
+                    setTimeout(pollServer, 2000);
+                }
+            };
+
+            // 5초 뒤부터 서버 체크 시작 (업데이트 작업 시간을 고려)
+            setTimeout(pollServer, 5000);
+
         } catch (err) {
-            // 서버가 바로 꺼지면서 에러가 발생할 수 있으므로 상황 판단 필요
             if (err.code === 'ECONNABORTED' || !err.response) {
-                alert("서버 재시작 중입니다. 잠시 후 새로고침 하세요.");
+                // 이미 서버가 종료되어 연결이 끊긴 경우도 성공으로 간주하고 폴링 시작
+                alert("서버 재시작 대기 중... 자동으로 페이지를 불러옵니다.");
+                window.location.reload(); // 폴링 로직이 alert 후 바로 탈 수도 있으므로 안전하게 처리
             } else {
                 alert("업데이트 실패: " + err.message);
+                setIsUpdating(false);
             }
-        } finally {
-            setIsUpdating(false);
         }
     };
 
