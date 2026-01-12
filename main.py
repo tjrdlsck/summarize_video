@@ -1239,16 +1239,16 @@ async def check_update():
     return SystemManager.check_for_updates()
 
 @app.post("/api/system/update")
-async def update_system():
+async def update_system(background_tasks: BackgroundTasks):
     """
     업데이트를 수행하고 서버를 재시작합니다.
     (가디언 프로세스 run.py에 신호를 전달)
     """
     try:
-        # 가디언 프로세스에게 업데이트 신호(Exit Code 5) 전달
-        # 이 함수가 실행되는 즉시 프로세스가 종료됩니다.
-        SystemManager.perform_update()
-        return {"status": "success", "message": "Update initiated."}
+        # 가디언 프로세스에게 업데이트 신호(Exit Code 5) 전달 예약
+        # 응답이 사용자에게 전달된 후 실행됩니다.
+        background_tasks.add_task(SystemManager.perform_update)
+        return {"status": "success", "message": "Update initiated. Server will restart shortly."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1282,6 +1282,5 @@ async def update_system():
 # --- nginx 명령어 끝 ---
 if __name__ == "__main__":
     import uvicorn
-    # proxy_headers=True: Nginx가 보낸 헤더(X-Forwarded-Proto 등)를 신뢰함
-    # forwarded_allow_ips="*": 모든 IP에서의 프록시 요청을 허용 (보안상 NPM IP만 적는 게 좋지만 편의상 * 사용)
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, proxy_headers=True, forwarded_allow_ips="*")
+    # [Modify] reload=False: Guardian(run.py)이 수명 주기를 관리하므로 중복 리로드를 비활성화합니다.
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, proxy_headers=True, forwarded_allow_ips="*")
