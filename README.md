@@ -1,115 +1,103 @@
-# 🎥 AI Video Analyst (Mac Optimized)
+# 🎥 SermonCutter AI (Mac Optimized)
 
-유튜브 영상이나 로컬 비디오 파일을 심층 분석하여 **자막(STT), 요약, 블로그 포스팅, 그리고 AI 숏츠(Shorts)**까지 자동으로 생성해주는 올인원 도구입니다.
+> **2026년 1월 최신 LLM 스택 대응 완료**
 
-이 프로젝트는 **Apple Silicon (M1/M2/M3)** 칩셋의 강력한 성능을 활용하도록 최적화되어 있습니다. (MLX Whisper & Hardware Acceleration)
+**SermonCutter AI**는 긴 설교 영상이나 유튜브 콘텐츠를 심층 분석하여 **자막(STT), 챕터 요약, 블로그 포스팅, 그리고 AI 숏츠(Shorts)**까지 자동으로 생성해주는 미디어 사역 최적화 올인원 도구입니다. 
+
+본 프로젝트는 **Apple Silicon (M1/M2/M3/M4)** 칩셋의 Neural Engine 및 GPU 가속을 활용하도록 설계되었습니다. (MLX Whisper & Hardware Acceleration)
 
 ---
 
-## 🚀 새로운 Mac에서 시작하기 (Getting Started)
-
-새로운 컴퓨터(또는 동료의 컴퓨터)에서 이 프로젝트를 처음 실행하신다면, 아래 단계를 순서대로 따라주세요.
+## 🚀 시작하기 (Getting Started)
 
 ### 1. 사전 준비 (Prerequisites)
-이 프로그램은 macOS 전용입니다. 터미널에 아래 명령어를 입력하여 필수 도구를 설치하세요.
-(이미 설치되어 있다면 건너뛰셔도 됩니다.)
+이 프로그램은 macOS 전용입니다. 터미널(Terminal)에서 아래 도구들이 설치되어 있는지 확인하세요.
 
 ```bash
-# Homebrew 설치 (Mac용 패키지 관리자)
+# Homebrew 설치 (패키지 관리자)
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 
-# Git 설치
-brew install git
+# Git & FFmpeg 설치
+brew install git ffmpeg
 ```
 
-### 2. 프로젝트 다운로드
+### 2. 설치 및 실행 (자동화)
+복잡한 가상환경 설정 없이, 아래 명령어 하나로 모든 준비가 완료됩니다.
+
 ```bash
 git clone https://github.com/tjrdlsck/summarize_video.git
 cd summarize_video
-```
-
-### 3. 설치 및 실행 (자동화)
-
-복잡한 명령어 없이, **아래 명령어 하나만 입력하면 끝입니다.**
-(가상환경 생성, 패키지 설치, 서버 실행을 모두 자동으로 처리합니다.)
-
-```bash
 ./start.sh
 ```
-*   처음 실행 시: 필요한 라이브러리를 설치하느라 시간이 조금 걸릴 수 있습니다.
-*   설치 도중 **Google Gemini API Key**를 입력하라는 메시지가 나오면 키를 붙여넣어 주세요.
+*   **최초 실행 시:** 가상환경(`venv`) 구축 및 라이브러리 설치로 인해 수 분이 소요될 수 있습니다.
+*   **API Key:** 실행 도중 [Google AI Studio](https://aistudio.google.com/)에서 발급받은 API 키 입력을 요청합니다.
 
 ---
 
-## 🖥️ 'Mac 앱'으로 만들어서 사용하기 (GUI)
+## 🖥️ 앱(App)으로 사용하기 (GUI Mode)
 
-매번 터미널을 열기 귀찮으시다면, 진짜 앱처럼 아이콘을 더블 클릭해서 실행할 수 있습니다.
+터미널 입력 대신 아이콘 클릭만으로 실행하고 싶다면 다음 과정을 따르세요.
 
-1.  앱 생성 스크립트 실행:
-    ```bash
-    ./make_portable_app.sh
-    ```
-2.  폴더 안에 생성된 **`AI Video Analyst.app`** 아이콘을 더블 클릭하세요.
-3.  터미널 창이 열리면서 서버가 실행됩니다.
-
-> **꿀팁:** 바탕화면에 아이콘을 두고 싶다면?
-> 앱을 직접 옮기지 마세요! (경로가 꼬일 수 있습니다.)
-> 대신 앱을 **우클릭 -> '가상본 만들기(Make Alias)'**를 한 뒤, 만들어진 가상본(화살표 아이콘)만 바탕화면으로 옮기세요.
+1.  **앱 생성:** `./make_portable_app.sh` 실행
+2.  **실행:** 폴더 내 생성된 **`AI Video Analyst.app`** 아이콘을 더블 클릭하세요.
+3.  **팁:** 앱 아이콘을 우클릭하여 **'가상본 만들기(Alias)'**를 한 후, 그 가상본만 바탕화면으로 옮겨서 사용하세요.
 
 ---
 
-## 🔑 API Key 설정 (Google Gemini)
+## 🛠️ 기술 스택 및 모델 현황 (2026.01)
 
-이 프로그램은 Google의 최신 AI 모델을 사용합니다.
-1.  [Google AI Studio](https://aistudio.google.com/)에서 무료 API Key를 발급받으세요.
-2.  설치 과정에서 입력하지 못했다면, 프로젝트 폴더 내의 `.env` 파일을 열어 직접 수정하세요.
-    ```env
-    GOOGLE_API_KEY="여기에_키를_붙여넣으세요"
-    ```
+본 프로젝트는 최신 멀티모달 AI 모델을 작업 성격에 맞게 최적화하여 사용합니다.
 
----
-
-## ✨ 주요 기능 (Key Features)
-
-*   **초고속 음성 인식 (Whisper MLX):** Apple Neural Engine을 활용하여 CPU 대비 수 배 빠른 속도로 자막을 생성합니다. (환각 제거 및 구간 보정 기술 적용)
-*   **AI 챕터 분석:** Gemini 1.5 모델이 영상의 핵심 내용을 논리적으로 요약하고 구조화합니다.
-*   **AI 숏츠 자동 제작:** 영상의 하이라이트 구간을 AI가 스스로 판단하여 추출하고, 모바일 비율에 맞춰 크롭합니다.
-*   **블로그 포스팅:** 개발자 블로그 스타일의 기술적인 아티클을 자동으로 작성합니다.
-*   **스마트 런처:** 폴더의 위치가 바뀌어도 스스로 경로를 추적하여 작동하는 지능형 실행 구조를 갖추고 있습니다.
+*   **Audio Recognition (ASR):** `mlx-whisper` (Large-v3 Turbo) - Apple 가속화 전용
+*   **Video Summarizer:** `Gemini 2.5 Flash` - 고속 상황 분석 및 챕터링
+*   **Blog Planner:** `Gemini 2.5 Flash-Lite` - 효율적인 구조 설계
+*   **Text Refiner:** `Gemma 3 (27B-IT)` - 정교한 문체 및 윤문
+*   **Shorts Selector:** `Gemini 2.5 Flash` - 하이라이트 구간 자동 추출
+*   **Experimental:** `Gemini 3 Pro / Deep-Think` 모델 연동 지원
 
 ---
 
-## 👨‍💻 수동 설치 가이드 (Manual Setup)
+## ⚙️ 모델 변경 및 유지보수 (Advanced Settings)
 
-자동 스크립트(`setup.sh`)가 작동하지 않거나, 직접 환경을 구성하고 싶은 개발자를 위한 가이드입니다.
+AI 기술의 빠른 발전에 대응하기 위해, 설정창이나 설정 파일을 통해 모델을 직접 변경할 수 있습니다.
 
-1.  **FFmpeg 설치:**
-    ```bash
-    brew install ffmpeg
-    ```
-2.  **가상환경(venv) 생성 및 활성화:**
-    ```bash
-    python3 -m venv venv
-    source venv/bin/activate
-    ```
-3.  **필수 라이브러리 설치:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-4.  **환경 변수 설정:**
-    `.env.example` 파일을 복사하여 `.env`로 만들고 API Key를 입력합니다.
-5.  **서버 실행:**
-    ```bash
-    python run.py
-    ```
+### 1. 설정 파일을 통한 변경
+`data/config.json` 파일을 열어 원하는 모델명으로 수정하세요. 서버 재시작 없이 다음 작업부터 즉시 반영됩니다.
+
+```json
+{
+  "models": {
+    "summarizer": "gemini-3-flash",
+    "planner": "gemini-2.5-flash-lite",
+    "refiner": "gemma-3-27b-it",
+    "shorts": "gemini-2.5-flash"
+  }
+}
+```
+
+### 2. 유지보수 주의사항
+*   **Gemini 모델:** `gemini-` 접두사로 시작하는 모델은 Google API Key가 필요합니다.
+*   **Gemma 모델:** 로컬 또는 호스팅된 엔드포인트 설정에 따라 성능이 달라질 수 있습니다.
 
 ---
 
-## 🛠️ 기술 스택 (Tech Stack)
+## ✨ 주요 핵심 기능
 
-*   **Language:** Python 3.10+
-*   **Web Framework:** FastAPI
-*   **AI Model:** 
-    *   STT: [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper) (Large-v3 Turbo)
-    *   LLM: Google Gemini 1.5 Pro / Flash-Lite / Gemma 2
-*   **Media Processing:** FFmpeg (Apple Videotoolbox Hardware Acceleration)
+*   **성경 구절 자동 감지:** 설교 중 인용되는 성경 본문을 AI가 인식하여 챕터를 자동 분류합니다.
+*   **프리미어 프로(Premiere Pro) 연동:** AI가 나눈 챕터대로 컷이 나뉘어 있는 `XML` 타임라인 파일을 생성합니다.
+*   **스토리텔링 블로그:** 단순 요약이 아닌, 독자가 읽기 좋은 '기사 형태'의 글을 인용구와 함께 작성합니다.
+*   **지능형 런처:** 폴더 위치가 바뀌어도 스스로 경로를 추적하여 안정적으로 실행됩니다.
+
+---
+
+## 📄 저작권 및 라이선스 (Copyright & License)
+
+© 2026 **SermonCutter AI Contributors**. All rights reserved.
+
+본 프로젝트는 **[MIT License](LICENSE)**에 따라 배포됩니다. 누구나 자유롭게 소프트웨어를 사용, 복제, 수정 및 배포할 수 있으나, 소프트웨어 사용으로 인해 발생하는 결과에 대해 저작자는 어떠한 법적 책임도 지지 않습니다.
+
+---
+**Reference:**
+- [Google AI Gemini Documentation](https://ai.google.dev/docs)
+- [MLX Whisper GitHub](https://github.com/ml-explore/mlx-examples)
+- [Apple Machine Learning Research](https://ml-explore.github.io/mlx)
