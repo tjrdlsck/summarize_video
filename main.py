@@ -26,7 +26,7 @@ from services.clipper import VideoClipper
 from services.refiner import TextRefiner
 from services.shorts_maker import ShortsMaker
 from services.premiere_exporter import PremiereExporter
-from services.system_manager import SystemManager
+from services.system_manager import SystemManager, ConfigManager
 from services.subtitle_builder import SubtitleBuilder
 
 
@@ -91,6 +91,23 @@ class TranscriptionRequest(BaseModel):
     url: Optional[str] = None      # 유튜브 URL
     filename: Optional[str] = None # 업로드된 파일명
     custom_title: Optional[str] = None # [New] 사용자가 지정한 영상 제목
+
+class SettingsUpdateRequest(BaseModel): # [New] 설정 업데이트 요청 모델
+    models: dict
+
+# --- [API Endpoints] ---
+
+@app.get("/api/settings")
+async def get_settings():
+    """현재 AI 모델 설정을 조회합니다."""
+    return ConfigManager.load_config()
+
+@app.post("/api/settings")
+async def update_settings(req: SettingsUpdateRequest):
+    """AI 모델 설정을 업데이트합니다."""
+    if ConfigManager.save_config(req.model_dump()):
+        return {"status": "success", "message": "Settings applied successfully"}
+    raise HTTPException(status_code=500, detail="Failed to save settings")
 
 class SummaryRequest(BaseModel):
     filename: str
