@@ -85,6 +85,8 @@ class ChapterHealer:
             
         return healed
 
+from services.system_manager import ConfigManager
+
 # --- [Main Class] Video Summarizer ---
 class VideoSummarizer:
     """
@@ -94,8 +96,11 @@ class VideoSummarizer:
         load_dotenv()
         self.api_key = os.getenv("GOOGLE_API_KEY")
         self.output_dir = output_dir
-        self.model_name = "gemini-2.5-flash"  # Cost-effective high performance model
         os.makedirs(self.output_dir, exist_ok=True)
+
+    def _get_model(self, task_type):
+        """설정 매니저를 통해 실시간으로 모델명을 가져옵니다."""
+        return ConfigManager.get_model(task_type)
 
     def _create_prompt(self, segments: list[dict]) -> str:
         """LLM에게 전달할 경량화된 스크립트 데이터를 생성합니다.
@@ -184,7 +189,7 @@ class VideoSummarizer:
             client = genai.Client(api_key=self.api_key)
             
             response = client.models.generate_content(
-                model=self.model_name,
+                model=self._get_model("summarizer"),
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.3, # 창의성 약간 부여
@@ -295,7 +300,7 @@ class VideoSummarizer:
             client = genai.Client(api_key=self.api_key)
             # Gemini 2.5 Flash-Lite 모델 사용
             response = client.models.generate_content(
-                model="gemini-2.5-flash-lite",
+                model=self._get_model("planner"),
                 contents=f"{system_instruction}\n\n[Full Script]:\n{script_text}",
                 config=types.GenerateContentConfig(
                     temperature=0.1,
@@ -385,7 +390,7 @@ class VideoSummarizer:
             client = genai.Client(api_key=self.api_key)
             
             response = client.models.generate_content(
-                model=self.model_name,
+                model=self._get_model("summarizer"),
                 contents=f"{system_instruction}\n\n[Script]:\n{script_text}",
                 config=types.GenerateContentConfig(
                     temperature=0.2,

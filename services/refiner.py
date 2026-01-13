@@ -3,6 +3,7 @@ import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from services.system_manager import ConfigManager
 
 class TextRefiner:
     """
@@ -11,12 +12,14 @@ class TextRefiner:
     def __init__(self):
         load_dotenv()
         self.api_key = os.getenv("GOOGLE_API_KEY")
-        # gemma-3-27b-it 모델 사용
-        self.model_name = "gemma-3-27b-it" 
         self.client = None
         
         if self.api_key:
             self.client = genai.Client(api_key=self.api_key)
+
+    def _get_model(self):
+        """실시간 설정을 가져옵니다."""
+        return ConfigManager.get_model("refiner")
 
     def _format_time(self, seconds: float) -> str:
         m, s = divmod(int(seconds), 60)
@@ -78,7 +81,7 @@ class TextRefiner:
         try:
             # Gemma 모델 호출
             response = self.client.models.generate_content(
-                model=self.model_name,
+                model=self._get_model(),
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.3, 
