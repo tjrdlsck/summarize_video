@@ -117,10 +117,6 @@ function App() {
     };
 
     const handleDownloadOriginalVideo = () => {
-        const link = document.createElement('a');
-        link.href = `/api/stream/video/${playerData.video_filename}`;
-        
-        // 유튜브 링크인 경우 정제된 제목으로 저장 유도
         const isYoutubeSource = !/^[0-9a-fA-F]{8}_/.test(playerData.video_filename);
         let downloadName = playerData.video_filename;
         
@@ -131,6 +127,9 @@ function App() {
             downloadName = playerData.video_filename.replace(/^[0-9a-fA-F]{8}_/, '');
         }
 
+        // [개선] 크롬 호환성을 위해 ?download=true 파라미터 추가
+        const link = document.createElement('a');
+        link.href = `/api/stream/video/${playerData.video_filename}?download=true`;
         link.setAttribute('download', downloadName);
         document.body.appendChild(link);
         link.click();
