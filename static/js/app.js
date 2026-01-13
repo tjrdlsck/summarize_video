@@ -154,11 +154,22 @@ function App() {
 
         if (customFilename === null) return; // 취소 시 중단
 
+        // [Add] 자막 규격 입력 (쇼츠 최적화 기본값 10자, 2줄)
+        const maxCharsStr = prompt("자막 한 줄당 최대 글자 수를 입력하세요 (쇼츠 권장: 10~15):", "10");
+        if (maxCharsStr === null) return;
+        const maxChars = parseInt(maxCharsStr) || 10;
+
+        const maxLinesStr = prompt("자막 최대 표시 줄 수를 입력하세요 (기본값: 2):", "2");
+        if (maxLinesStr === null) return;
+        const maxLines = parseInt(maxLinesStr) || 2;
+
         try {
             const response = await axios.post('/api/export/premiere', {
                 video_filename: playerData.video_filename,
                 clip_id: clipId,
-                custom_video_filename: customFilename.trim()
+                custom_video_filename: customFilename.trim(),
+                max_chars: maxChars,
+                max_lines: maxLines
             }, {
                 responseType: 'blob' 
             });

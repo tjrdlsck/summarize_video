@@ -154,6 +154,8 @@ class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청
     video_filename: str
     clip_id: str
     custom_video_filename: Optional[str] = None # [New] 사용자가 프리미어에서 연결할 실제 영상 파일명
+    max_chars: Optional[int] = 10 # [New] 자막 한 줄당 최대 글자 수 (기본값 10)
+    max_lines: Optional[int] = 2  # [New] 자막 최대 줄 수 (기본값 2)
 
 # --- [Helper: Progress Wrapper] ---
 class TaskProgressWrapper:
@@ -1450,35 +1452,83 @@ async def export_premiere_xml(req: PremiereExportRequest, background_tasks: Back
         # 5. [Core Change] AI 쇼츠 여부에 따른 분기 처리
         is_ai_shorts = target_clip.get("is_ai_generated") is True
         
-        # AI 쇼츠인 경우 자막 파일을 찾아 ZIP으로 패키징
+        # AI 쇼츠인 경우 자막 파일을 새로 구성하여 ZIP으로 패키징
         if is_ai_shorts:
-            # 보관된 영상 파일명으로부터 자막 파일명 유추
-            video_filename_in_clips = target_clip.get("filename_video")
-            if video_filename_in_clips:
-                srt_filename = video_filename_in_clips.replace(".mp4", ".srt")
-                srt_path = os.path.join("static/clips", srt_filename)
-                
-                # 자막 파일이 실제로 존재하면 압축 진행
-                if os.path.exists(srt_path):
-                    zip_filename = f"Premiere_Pack_{safe_title}.zip"
+            # 실시간 자막 재생성 로직 (사용자 지정 글자수/줄 수 반영)
+            transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+            if os.path.exists(transcript_path):
+                try:
+                    with open(transcript_path, 'r', encoding='utf-8') as f:
+                        full_transcript = json.load(f)
                     
-                    # clipper의 create_zip은 동기 함수이므로 바로 호출
-                    # (XML은 임시 폴더에, SRT는 보관 폴더에 있는 것을 활용)
+                    # 쇼츠 타임라인에 맞는 세그먼트 추출 및 시간 이동
+                    accumulated_offset = 0.0
+                    shorts_transcript_data = []
+                    
+                    for seg in segments:
+                        s_start, s_end = seg['start'], seg['end']
+                        
+                        # 원본 자막에서 해당 구간에 포함되는 내용 필터링
+                        for ts in full_transcript:
+                            if ts['end'] <= s_start or ts['start'] >= s_end:
+                                continue
+                            
+                            # 복사본 생성 (원본 유지)
+                            new_ts = json.loads(json.dumps(ts))
+                            
+                            # 단어 단위 데이터 처리 (있는 경우)
+                            if 'words' in new_ts:
+                                # 구간 내 단어만 필터링 및 시간 이동
+                                filtered_words = []
+                                for w in new_ts['words']:
+                                    if w['start'] < s_end and w['end'] > s_start:
+                                        # 시간 이동 수식: t_new = t_old - 구간시작 + 누적오프셋
+                                        w['start'] = max(0, w['start'] - s_start + accumulated_offset)
+                                        w['end'] = max(0, w['end'] - s_start + accumulated_offset)
+                                        filtered_words.append(w)
+                                new_ts['words'] = filtered_words
+                            
+                            # 세그먼트 시간 이동
+                            new_ts['start'] = max(0, ts['start'] - s_start + accumulated_offset)
+                            new_ts['end'] = min((s_end - s_start) + accumulated_offset, ts['end'] - s_start + accumulated_offset)
+                            
+                            shorts_transcript_data.append(new_ts)
+                        
+                        accumulated_offset += (s_end - s_start)
+
+                    # SubtitleBuilder를 통한 재구성 (Reflow)
+                    builder = SubtitleBuilder(data=shorts_transcript_data)
+                    srt_content = builder.to_srt(
+                        max_chars=req.max_chars, 
+                        max_lines=req.max_lines,
+                        remove_punctuation=True # 쇼츠는 가독성을 위해 문장부호 제거 기본 적용
+                    )
+                    
+                    # 임시 SRT 파일 생성
+                    custom_srt_filename = f"Custom_Subs_{uuid.uuid4().hex[:8]}.srt"
+                    custom_srt_path = os.path.join("static/temp", custom_srt_filename)
+                    with open(custom_srt_path, "w", encoding="utf-8") as f_srt:
+                        f_srt.write(srt_content)
+
+                    # ZIP 패키징 (XML + 커스텀 SRT)
+                    zip_filename = f"Premiere_Pack_{safe_title}.zip"
                     zip_path = clipper.create_zip(
-                        [xml_path, srt_path], 
+                        [xml_path, custom_srt_path], 
                         zip_filename=zip_filename, 
                         destination_dir="static/temp"
                     )
                     
-                    # ZIP 파일 전송 및 임시 파일(XML, ZIP) 삭제 예약
-                    # 주의: 원본 SRT는 보관용이므로 삭제 목록에서 제외
-                    background_tasks.add_task(remove_temp_files, [xml_path, zip_path])
+                    # 전송 후 모든 임시 파일 정리 (XML, 커스텀 SRT, ZIP)
+                    background_tasks.add_task(remove_temp_files, [xml_path, custom_srt_path, zip_path])
                     
                     return FileResponse(
                         zip_path,
                         media_type='application/zip',
                         filename=zip_filename
                     )
+                except Exception as ex:
+                    print(f"[Export Error] Failed to generate custom SRT: {ex}")
+                    # 실패 시 기존 로직(보관된 SRT 사용 시도)으로 fallback 하거나 XML만 제공
 
         # 6. 일반 클립이거나 자막을 찾지 못한 AI 쇼츠인 경우 (기존 로직 100% 보존)
         background_tasks.add_task(remove_temp_files, [xml_path])
