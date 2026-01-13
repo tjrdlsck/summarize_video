@@ -4,8 +4,8 @@
 APP_NAME="AI Video Analyst"
 APP_DIR="${APP_NAME}.app"
 
-# 1. 기존 앱 제거 및 디렉토리 생성
-rm -rf "$APP_DIR"
+# 1. 디렉토리 생성 (기존 폴더가 있으면 유지하여 바로가기 보호)
+# rm -rf "$APP_DIR"  <-- 가상본(Alias) 보존을 위해 삭제하지 않습니다.
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
