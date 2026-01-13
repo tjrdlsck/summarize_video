@@ -42,6 +42,14 @@ def run_server():
                 print("[Maintenance] Updating python dependencies...")
                 subprocess.run([python_exe, "-m", "pip", "install", "-r", "requirements.txt"], check=True)
                 
+                # 4. Rebuild macOS App Bundle (if on macOS)
+                if sys.platform == "darwin" and os.path.exists("make_portable_app.sh"):
+                    print("[Maintenance] Rebuilding macOS App Bundle...")
+                    try:
+                        subprocess.run(["bash", "make_portable_app.sh"], check=True)
+                    except Exception as e:
+                        print(f"--- [Warning] App rebuild failed: {e} ---")
+
                 print("[Maintenance] Update successful. Switched to 'main' branch.")
                 print("[Maintenance] Cooling down for 2 seconds...")
                 time.sleep(2) # Grace period for port release
