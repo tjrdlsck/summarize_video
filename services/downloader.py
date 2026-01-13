@@ -3,6 +3,7 @@ import re
 import yt_dlp
 import uuid
 import shutil
+import anyio # [Add] 비동기 파일 I/O를 위해 추가
 
 class VideoDownloader:
     """
@@ -24,19 +25,23 @@ class VideoDownloader:
         파일 시스템 저장 시 오류를 방지하기 위해 파일명을 정제합니다.
         공백은 언더스코어(_)로 변경하고, 특수문자는 제거합니다.
         """
+        # [Add] 유니코드 정규화 (NFC) 적용
+        import unicodedata
+        title = unicodedata.normalize('NFC', title)
+
         # 1. 윈도우/리눅스 금지 문자 제거
         clean_name = re.sub(r'[\\/*?:"<>|]', "", title)
         # 2. 공백 -> 언더스코어
         clean_name = clean_name.strip().replace(" ", "_")
         return clean_name
 
-    def save_uploaded_file(self, file_object, original_filename, task_manager=None, task_id=None):
+    async def save_uploaded_file(self, upload_file, original_filename, task_manager=None, task_id=None):
         """
-        [New] 사용자가 직접 업로드한 파일을 저장하는 메서드
-        [수정] 저장 시작 전 취소 확인 로직 추가
+        [New] 사용자가 직접 업로드한 파일을 저장하는 메서드 (비동기 방식)
+        [수정] anyio를 사용한 Non-blocking 스트림 저장 적용
         
         Args:
-            file_object: FastAPI의 UploadFile.file 객체 (Binary IO)
+            upload_file: FastAPI의 UploadFile 객체
             original_filename: 사용자가 올린 원본 파일명
             task_manager: (Optional) 취소 확인용
             task_id: (Optional) 취소 확인용
@@ -52,9 +57,11 @@ class VideoDownloader:
             unique_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
             final_path = os.path.join(self.download_dir, unique_name)
 
-            # 파일 저장 (Copy stream)
-            with open(final_path, "wb") as buffer:
-                shutil.copyfileobj(file_object, buffer)
+            # [수정] anyio를 사용한 비동기 파일 저장
+            # 1MB씩 청크 단위로 읽어서 기록하여 메모리 효율성 및 이벤트 루프 응답성 확보
+            async with await anyio.open_file(final_path, "wb") as f:
+                while chunk := await upload_file.read(1024 * 1024): # 1MB 청크
+                    await f.write(chunk)
 
             print(f"--- [Upload] File saved to: {final_path} ---")
             return {
@@ -148,14 +155,45 @@ class VideoDownloader:
 
         except Exception as e:
             if "cancelled by user" in str(e):
-                print(f"[Downloader] Task {task_id} cancelled.")
+                print(f"[Downloader] Task {task_id} cancelled. Cleaning up partial files...")
+                if 'final_path' in locals() and final_path:
+                    self._cleanup_partial_files(final_path)
                 return {"status": "error", "message": "User cancelled the download"}
             
             print(f"[Error] Download failed: {e}")
+            if 'final_path' in locals() and final_path:
+                self._cleanup_partial_files(final_path)
             return {
                 "status": "error",
                 "message": str(e)
             }
+
+    def _cleanup_partial_files(self, final_path):
+        """
+        다운로드 중단 시 남겨진 임시 파일(.part, .ytdl 등)을 정리합니다.
+        """
+        try:
+            base_dir = os.path.dirname(final_path)
+            full_name = os.path.basename(final_path)
+            # 확장자를 제외한 순수 파일명 (예: Apple.mp4 -> Apple)
+            base_name = os.path.splitext(full_name)[0]
+            
+            if not os.path.exists(base_dir):
+                return
+
+            print(f"[Cleanup] Scanning for partial files starting with: {base_name}")
+            
+            # 해당 파일명으로 시작하는 모든 파일을 검사
+            for f in os.listdir(base_dir):
+                # 1. 원본 파일명과 정확히 일치하는 경우
+                # 2. 확장자 제외 파일명(base_name)을 포함하면서 임시 확장자를 가진 경우
+                if f == full_name or (base_name in f and (".part" in f or ".ytdl" in f or ".temp" in f)):
+                    file_path = os.path.join(base_dir, f)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        print(f"[Cleanup] Removed partial file: {f}")
+        except Exception as e:
+            print(f"[Cleanup Error] Failed to remove partial files: {e}")
 
 # --- [Module Test Code] ---
 if __name__ == "__main__":

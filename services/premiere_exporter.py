@@ -189,12 +189,35 @@ class PremiereExporter:
           </clipitem>
         """
 
-    def create_xml(self, video_path, segments, output_filename="export.xml"):
+    def create_xml(self, video_path, segments, output_filename="export.xml", video_name=None):
         meta = self._get_video_info(video_path)
         
         server_filename = os.path.basename(video_path)
-        original_filename = re.sub(r'^[0-9a-fA-F]{8}_', '', server_filename)
         
+        if video_name:
+            # 외부에서 이름이 주어진 경우 (예: 메타데이터의 video_title)
+            # 확장자가 없다면 원본 파일에서 가져옴
+            base_name = video_name
+            ext = os.path.splitext(server_filename)[1]
+            if not base_name.lower().endswith(ext.lower()):
+                original_filename = base_name + ext
+            else:
+                original_filename = base_name
+        else:
+            # 외부 지정이 없을 경우 파일명에서 추론
+            # 1. 8자리 hex + _ 패턴 제거 시도
+            if re.match(r'^[0-9a-fA-F]{8}_', server_filename):
+                guessed_name = server_filename[9:] # 8 chars + 1 underscore
+            else:
+                guessed_name = server_filename
+                
+            # 2. 언더스코어를 공백으로 복원 (사용자가 가진 원본 파일과의 매칭 확률을 높임)
+            name_part, ext_part = os.path.splitext(guessed_name)
+            original_filename = name_part.replace('_', ' ') + ext_part
+        
+        # 공백이 제거된 최종 결과물 확인
+        original_filename = original_filename.strip()
+
         # 공통 ID 생성
         video_uuid = str(uuid.uuid4())
         file_id = f"file-{video_uuid}"
