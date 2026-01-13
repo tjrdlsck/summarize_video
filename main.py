@@ -19,6 +19,7 @@ from typing import Optional
 from datetime import datetime
 
 # [Custom Services]
+from services.security import SecurityManager
 from services.downloader import VideoDownloader
 from services.transcriber import VideoTranscriber, TaskCancelledError
 from services.summarizer import VideoSummarizer
@@ -101,6 +102,9 @@ task_manager = TaskManager()  # [New] Task Manager Instance
 clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 생성
 shorts_maker = ShortsMaker()
 premiere_exporter = PremiereExporter(output_dir="static/temp")
+
+# [New] 리소스 제어 세마포어 (동시 실행 작업 수 제한)
+resource_semaphore = asyncio.Semaphore(1)
 
 # --- [Pydantic Models] ---
 class TranscriptionRequest(BaseModel):
@@ -811,16 +815,18 @@ async def worker():
                 print(f"[{task_id}] Task cancelled before start.")
                 task_manager.fail_task(task_id, "대기 중 취소됨")
             else:
-                if isinstance(req, TranscriptionRequest):
-                    await run_transcription_pipeline(task_id, req)
-                elif isinstance(req, SummaryRequest):
-                    await run_summary_pipeline(task_id, req)
-                elif isinstance(req, BlogGenerationRequest):
-                    await run_blog_pipeline(task_id, req)
-                elif isinstance(req, ClipRequest):
-                    await run_clip_pipeline(task_id, req)
-                elif isinstance(req, ShortsGenerateRequest):
-                    await run_shorts_pipeline(task_id, req)
+                # [Resource Control] 세마포어를 획득한 후 작업 수행
+                async with resource_semaphore:
+                    if isinstance(req, TranscriptionRequest):
+                        await run_transcription_pipeline(task_id, req)
+                    elif isinstance(req, SummaryRequest):
+                        await run_summary_pipeline(task_id, req)
+                    elif isinstance(req, BlogGenerationRequest):
+                        await run_blog_pipeline(task_id, req)
+                    elif isinstance(req, ClipRequest):
+                        await run_clip_pipeline(task_id, req)
+                    elif isinstance(req, ShortsGenerateRequest):
+                        await run_shorts_pipeline(task_id, req)
                     
         except Exception as e:
             print(f"[Worker Error] {e}")
@@ -841,6 +847,9 @@ async def read_root():
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
     """로컬 파일 업로드 (비동기 스트림 처리)"""
+    # [Security] 파일명 화이트리스트 검증
+    SecurityManager.validate_filename(file.filename)
+    
     # [수정] downloader.save_uploaded_file이 async로 변경되었으므로 await 추가
     result = await downloader.save_uploaded_file(file, file.filename)
     if result["status"] == "error":
@@ -852,6 +861,10 @@ async def start_transcription(req: TranscriptionRequest):
     """
     [1단계] 영상 다운로드 및 자막 생성 요청
     """
+    # [Security] 파일명 검증 (유튜브 URL이 아닐 경우에만)
+    if not req.url and req.filename:
+        SecurityManager.validate_filename(req.filename)
+
     task_id = str(uuid.uuid4())
     target_name = req.url if req.url else req.filename
     
@@ -906,6 +919,9 @@ async def delete_history(filename: str):
     """
     지정된 파일과 관련된 모든 데이터(영상, JSON, SRT, VTT)를 삭제합니다.
     """
+    # [Security] 파일명 검증
+    SecurityManager.validate_filename(filename)
+    
     try:
         base_name = os.path.splitext(filename)[0]
         
@@ -934,6 +950,9 @@ async def update_history_title(filename: str, req: UpdateTitleRequest):
     """
     [New] 이미 분석된 영상의 제목(메타데이터)만 수정합니다.
     """
+    # [Security] 파일명 검증
+    SecurityManager.validate_filename(filename)
+
     base_name = os.path.splitext(filename)[0]
     json_path = f"static/results/{base_name}_summary.json"
     
