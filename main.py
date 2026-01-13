@@ -82,6 +82,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"], # [Add] 프론트엔드에서 파일명을 읽을 수 있도록 허용
 )
 
 job_queue = asyncio.Queue()
@@ -1391,6 +1392,8 @@ async def stream_video(filename: str, request: Request, range: str = Header(None
 async def export_premiere_xml(req: PremiereExportRequest, background_tasks: BackgroundTasks):
     """
     [Sync] 특정 숏츠(Clip)의 컷 정보를 프리미어 프로용 XML 파일로 변환하여 다운로드합니다.
+    - AI 쇼츠인 경우: XML + SRT 자막을 ZIP으로 패키징하여 제공
+    - 일반 클립인 경우: 기존과 동일하게 XML 단일 파일 제공
     """
     try:
         # 1. 메타데이터(clips.json)에서 해당 클립 정보 조회
@@ -1419,7 +1422,6 @@ async def export_premiere_xml(req: PremiereExportRequest, background_tasks: Back
             except: pass
 
         # 2. 세그먼트 데이터 추출
-        # AI 숏츠는 'segments' 배열을 가지고 있고, 수동 클립은 'start_time'/'end_time'을 가짐
         segments = []
         if target_clip.get("segments"):
             segments = target_clip["segments"]
@@ -1433,25 +1435,54 @@ async def export_premiere_xml(req: PremiereExportRequest, background_tasks: Back
         if not os.path.exists(video_path):
             raise HTTPException(status_code=404, detail="Source video file not found")
 
-        # 4. XML 생성 실행 (동기 함수이므로 run_in_executor 사용 권장되나, 가벼운 작업이라 직렬 실행)
-        # 파일명 안전하게 변환
+        # 4. XML 생성
         safe_title = re.sub(r'[\\/*?:"<>|]', "", target_clip.get("title", "Untitled")).replace(" ", "_")
         xml_filename = f"Premiere_Seq_{safe_title}.xml"
-        
-        # [Update] 사용자가 입력한 파일명이 있다면 그것을 최우선으로 사용, 없으면 기존 display_title 사용
         target_video_name_for_xml = req.custom_video_filename if req.custom_video_filename else video_display_title
 
         xml_path = premiere_exporter.create_xml(
             video_path=video_path,
             segments=segments,
             output_filename=xml_filename,
-            video_name=target_video_name_for_xml # [Fixed] 사용자 지정 이름 또는 정제된 원본 제목 전달
+            video_name=target_video_name_for_xml
         )
 
-        # 5. 전송 후 임시 파일 삭제 예약
+        # 5. [Core Change] AI 쇼츠 여부에 따른 분기 처리
+        is_ai_shorts = target_clip.get("is_ai_generated") is True
+        
+        # AI 쇼츠인 경우 자막 파일을 찾아 ZIP으로 패키징
+        if is_ai_shorts:
+            # 보관된 영상 파일명으로부터 자막 파일명 유추
+            video_filename_in_clips = target_clip.get("filename_video")
+            if video_filename_in_clips:
+                srt_filename = video_filename_in_clips.replace(".mp4", ".srt")
+                srt_path = os.path.join("static/clips", srt_filename)
+                
+                # 자막 파일이 실제로 존재하면 압축 진행
+                if os.path.exists(srt_path):
+                    zip_filename = f"Premiere_Pack_{safe_title}.zip"
+                    
+                    # clipper의 create_zip은 동기 함수이므로 바로 호출
+                    # (XML은 임시 폴더에, SRT는 보관 폴더에 있는 것을 활용)
+                    zip_path = clipper.create_zip(
+                        [xml_path, srt_path], 
+                        zip_filename=zip_filename, 
+                        destination_dir="static/temp"
+                    )
+                    
+                    # ZIP 파일 전송 및 임시 파일(XML, ZIP) 삭제 예약
+                    # 주의: 원본 SRT는 보관용이므로 삭제 목록에서 제외
+                    background_tasks.add_task(remove_temp_files, [xml_path, zip_path])
+                    
+                    return FileResponse(
+                        zip_path,
+                        media_type='application/zip',
+                        filename=zip_filename
+                    )
+
+        # 6. 일반 클립이거나 자막을 찾지 못한 AI 쇼츠인 경우 (기존 로직 100% 보존)
         background_tasks.add_task(remove_temp_files, [xml_path])
 
-        # 6. 파일 다운로드 응답
         return FileResponse(
             xml_path,
             media_type='application/xml',

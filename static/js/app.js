@@ -162,15 +162,24 @@ function App() {
             }, {
                 responseType: 'blob' 
             });
-            const url = window.URL.createObjectURL(new Blob([response.data]));
-            const link = document.createElement('a');
-            link.href = url;
-            let fileName = `Premiere_Seq_${clipId.substring(0,8)}.xml`;
+            
+            // [Fix] 서버 응답 타입에 따라 기본 확장자 결정
+            const isZip = response.data.type === 'application/zip';
+            const defaultExt = isZip ? '.zip' : '.xml';
+            let fileName = `Premiere_Seq_${clipId.substring(0,8)}${defaultExt}`;
+
+            // [Fix] 서버가 보낸 파일명이 있으면 최우선 사용 (CORS expose_headers 설정 필요)
             const contentDisposition = response.headers['content-disposition'];
             if (contentDisposition) {
                 const fileNameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-                if (fileNameMatch && fileNameMatch.length === 2) fileName = fileNameMatch[1];
+                if (fileNameMatch && fileNameMatch.length === 2) {
+                    fileName = fileNameMatch[1];
+                }
             }
+
+            const url = window.URL.createObjectURL(new Blob([response.data], { type: response.data.type }));
+            const link = document.createElement('a');
+            link.href = url;
             link.setAttribute('download', fileName);
             document.body.appendChild(link);
             link.click();
