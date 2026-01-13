@@ -5,6 +5,7 @@ import json
 import shutil
 import unicodedata  # [Add] 유니코드 정규화를 위해 추가
 import re
+import multiprocessing # [Add] 자식 프로세스 관리를 위해 추가
 from functools import partial
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
@@ -49,7 +50,22 @@ async def lifespan(app: FastAPI):
     
     # [Shutdown] 앱 종료 시 실행 (필요시 자원 해제 로직 추가)
     print("--- [Lifespan] Shutting down... ---")
-    # 예: worker_task.cancel() 등을 여기서 수행할 수 있음
+    
+    # [Add] 좀비 프로세스 방기: 모든 자식 프로세스 종료
+    active_children = multiprocessing.active_children()
+    if active_children:
+        print(f"--- [Lifespan] Cleaning up {len(active_children)} child processes... ---")
+        for child in active_children:
+            child.terminate()
+            child.join(timeout=1)
+            if child.is_alive():
+                child.kill()
+    
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
 
 # --- [App Initialization] ---
 # [수정] lifespan 파라미터를 생성자에 전달
@@ -824,8 +840,9 @@ async def read_root():
 
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
-    """로컬 파일 업로드 (동기 처리, 빠름)"""
-    result = downloader.save_uploaded_file(file.file, file.filename)
+    """로컬 파일 업로드 (비동기 스트림 처리)"""
+    # [수정] downloader.save_uploaded_file이 async로 변경되었으므로 await 추가
+    result = await downloader.save_uploaded_file(file, file.filename)
     if result["status"] == "error":
         raise HTTPException(status_code=500, detail=result["message"])
     return result

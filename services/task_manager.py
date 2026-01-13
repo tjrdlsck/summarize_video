@@ -23,12 +23,27 @@ class TaskManager:
         return {}
 
     def _save_tasks(self):
-        """작업 목록을 파일에 저장합니다."""
+        """
+        작업 목록을 파일에 저장합니다.
+        원자적 쓰기(Atomic Write)를 위해 임시 파일에 먼저 쓰고 교체(Replace)합니다.
+        """
+        temp_file = f"{self.persistence_file}.tmp"
         try:
-            with open(self.persistence_file, 'w', encoding='utf-8') as f:
+            # 1. 임시 파일에 쓰기
+            with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(self.tasks, f, ensure_ascii=False, indent=2)
+            
+            # 2. 파일 교체 (Atomic operation)
+            # 이 명령이 실행되는 순간 기존 파일이 새 파일로 교체됩니다.
+            os.replace(temp_file, self.persistence_file)
         except Exception as e:
             print(f"[TaskManager Error] Failed to save tasks: {e}")
+            # 에러 발생 시 남은 임시 파일 제거
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
 
     def add_task(self, task_id: str, filename: str, task_type: str = "analysis"):
         """

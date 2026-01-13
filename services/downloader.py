@@ -3,6 +3,7 @@ import re
 import yt_dlp
 import uuid
 import shutil
+import anyio # [Add] 비동기 파일 I/O를 위해 추가
 
 class VideoDownloader:
     """
@@ -30,13 +31,13 @@ class VideoDownloader:
         clean_name = clean_name.strip().replace(" ", "_")
         return clean_name
 
-    def save_uploaded_file(self, file_object, original_filename, task_manager=None, task_id=None):
+    async def save_uploaded_file(self, upload_file, original_filename, task_manager=None, task_id=None):
         """
-        [New] 사용자가 직접 업로드한 파일을 저장하는 메서드
-        [수정] 저장 시작 전 취소 확인 로직 추가
+        [New] 사용자가 직접 업로드한 파일을 저장하는 메서드 (비동기 방식)
+        [수정] anyio를 사용한 Non-blocking 스트림 저장 적용
         
         Args:
-            file_object: FastAPI의 UploadFile.file 객체 (Binary IO)
+            upload_file: FastAPI의 UploadFile 객체
             original_filename: 사용자가 올린 원본 파일명
             task_manager: (Optional) 취소 확인용
             task_id: (Optional) 취소 확인용
@@ -52,9 +53,11 @@ class VideoDownloader:
             unique_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
             final_path = os.path.join(self.download_dir, unique_name)
 
-            # 파일 저장 (Copy stream)
-            with open(final_path, "wb") as buffer:
-                shutil.copyfileobj(file_object, buffer)
+            # [수정] anyio를 사용한 비동기 파일 저장
+            # 1MB씩 청크 단위로 읽어서 기록하여 메모리 효율성 및 이벤트 루프 응답성 확보
+            async with await anyio.open_file(final_path, "wb") as f:
+                while chunk := await upload_file.read(1024 * 1024): # 1MB 청크
+                    await f.write(chunk)
 
             print(f"--- [Upload] File saved to: {final_path} ---")
             return {
