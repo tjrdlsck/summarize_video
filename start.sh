@@ -8,9 +8,21 @@ cd "$DIR"
 
 echo "=== AI Video Analyst Launcher ==="
 
-# 1. 가상환경이 없으면 설치 진행
+# 1. 가상환경 및 필수 라이브러리 체크
+IS_READY=true
 if [ ! -d "venv" ]; then
-    echo "⚠️  가상환경(venv)이 없습니다. 초기 설치를 시작합니다..."
+    IS_READY=false
+else
+    source venv/bin/activate
+    # fastapi가 설치되어 있는지 확인
+    if ! python3 -c "import fastapi" &> /dev/null; then
+        echo "⚠️  가상환경은 있으나 라이브러리(fastapi)가 설치되지 않았습니다."
+        IS_READY=false
+    fi
+fi
+
+if [ "$IS_READY" = false ]; then
+    echo "⚠️  초기 설정이 필요합니다. setup.sh를 실행합니다..."
     
     # setup.sh 실행 권한 확인
     if [ ! -x "./setup.sh" ]; then
@@ -18,12 +30,11 @@ if [ ! -d "venv" ]; then
     fi
     
     ./setup.sh
-    # setup.sh 마지막에 run.py가 실행되므로 여기서 종료
     exit 0
 fi
 
-# 2. 가상환경이 있으면 바로 실행
-echo "✅  가상환경 발견! 서버를 시작합니다..."
+# 2. 가상환경이 완벽하면 실행
+echo "✅  실행 환경 확인 완료! 서버를 시작합니다..."
 source venv/bin/activate
 
 # run.py가 있는지 확인

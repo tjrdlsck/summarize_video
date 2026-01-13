@@ -51,6 +51,9 @@ fi
 # 2. Python 가상환경 확인 및 생성
 echo -e "${YELLOW}[2/5] Python 가상환경 설정 중...${NC}"
 
+# 에러 발생 시 즉시 중단
+set -e
+
 if [ ! -d "venv" ]; then
     echo "가상환경(venv)을 생성합니다..."
     python3 -m venv venv
@@ -61,8 +64,8 @@ source venv/bin/activate
 
 # 3. 의존성 패키지 설치
 echo -e "${YELLOW}[3/5] 필요한 Python 라이브러리 설치 중... (시간이 좀 걸릴 수 있습니다)${NC}"
-pip install --upgrade pip
-pip install -r requirements.txt
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
 
 # 3.5 AI 모델 사전 다운로드
 if [ -f "model_down.py" ]; then
@@ -71,6 +74,9 @@ if [ -f "model_down.py" ]; then
 else
     echo -e "${YELLOW}[경고] model_down.py를 찾을 수 없어 모델 다운로드 단계를 건너뜁니다.${NC}"
 fi
+
+# 에러 시 중단 옵션 해제 (이후 단계는 사용자 입력이 있으므로)
+set +e
 
 # 4. 환경 변수(.env) 설정
 echo -e "${YELLOW}[4/5] 환경 변수 설정 확인...${NC}"
