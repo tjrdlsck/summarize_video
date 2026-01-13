@@ -1389,6 +1389,16 @@ async def export_premiere_xml(req: PremiereExportRequest, background_tasks: Back
         if not target_clip:
             raise HTTPException(status_code=404, detail="Clip not found")
 
+        # [New] 원본 영상 제목(video_title) 조회하여 XML 자동 매칭 성능 향상
+        summary_path = os.path.join("static/results", f"{base_name}_summary.json")
+        video_display_title = None
+        if os.path.exists(summary_path):
+            try:
+                with open(summary_path, 'r', encoding='utf-8') as f:
+                    s_data = json.load(f)
+                    video_display_title = s_data.get("video_title")
+            except: pass
+
         # 2. 세그먼트 데이터 추출
         # AI 숏츠는 'segments' 배열을 가지고 있고, 수동 클립은 'start_time'/'end_time'을 가짐
         segments = []
@@ -1412,7 +1422,8 @@ async def export_premiere_xml(req: PremiereExportRequest, background_tasks: Back
         xml_path = premiere_exporter.create_xml(
             video_path=video_path,
             segments=segments,
-            output_filename=xml_filename
+            output_filename=xml_filename,
+            video_name=video_display_title # [Fixed] 정제된 원본 제목 전달
         )
 
         # 5. 전송 후 임시 파일 삭제 예약
