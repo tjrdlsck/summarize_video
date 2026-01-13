@@ -110,8 +110,17 @@ if [ ! -d ".git" ]; then
     echo -e "${GREEN}>>> 이제 이 폴더는 'git pull' 명령어로 업데이트가 가능합니다!${NC}"
 fi
 
+# 4.8 macOS 앱 번들 생성
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    if [ -f "make_portable_app.sh" ]; then
+        echo -e "${YELLOW}[4.8/5] macOS 앱 번들(.app) 생성 중...${NC}"
+        chmod +x make_portable_app.sh
+        ./make_portable_app.sh
+    fi
+fi
+
 # 5. 서버 실행
-echo -e "${GREEN}[5/5] 모든 준비 완료! 서버를 시작합니다...${NC}"
+echo -e "${GREEN}5/5] 모든 준비 완료! 서버를 시작합니다...${NC}"
 echo "서버가 켜지면 브라우저에서 http://localhost:8000 으로 접속하세요."
 echo "종료하려면 Ctrl+C를 누르세요."
 echo ""
