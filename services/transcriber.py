@@ -10,6 +10,7 @@ import stable_whisper
 import time
 import multiprocessing
 import sys
+from services.system_manager import ConfigManager
 
 class TaskCancelledError(Exception):
     """작업이 사용자에 의해 취소되었을 때 발생하는 예외"""
@@ -64,7 +65,7 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration):
     stdout을 캡처하여 진행률을 실시간으로 보고합니다.
     """
     try:
-        print(f"[Whisper Worker] PID {os.getpid()} started processing...")
+        print(f"[Whisper Worker] PID {os.getpid()} started processing with model: {model_path}...")
         
         # [New] stdout을 Hook 클래스로 리다이렉트
         # 이제부터 print()나 라이브러리의 stdout 출력은 hook.write()로 전달됨
@@ -106,9 +107,10 @@ class VideoTranscriber:
     def __init__(self, output_dir="static/results"):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
-        # Whisper 모델 설정 (Apple Silicon 최적화 모델 사용)
-        # self.model_path = "mlx-community/whisper-large-v3-mlx-4bit"
-        self.model_path = "mlx-community/whisper-large-v3-turbo-q4"
+
+    def _get_model(self):
+        """설정 매니저를 통해 실시간으로 모델명을 가져옵니다."""
+        return ConfigManager.get_model("whisper")
 
     def _convert_to_16k_wav(self, input_path, task_manager=None, task_id=None):
         """
@@ -398,7 +400,7 @@ class VideoTranscriber:
             # [New] total_duration을 인자로 전달
             worker_process = multiprocessing.Process(
                 target=run_whisper_worker,
-                args=(wav_path, self.model_path, queue, total_duration)
+                args=(wav_path, self._get_model(), queue, total_duration)
             )
             worker_process.start()
             

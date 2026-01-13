@@ -4,13 +4,16 @@ import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from services.system_manager import ConfigManager
 
 class ShortsMaker:
     def __init__(self):
         load_dotenv()
         self.api_key = os.getenv("GOOGLE_API_KEY")
-        # JSON 포맷 준수율이 높은 최신 모델 사용
-        self.model_name = "gemini-2.5-flash"
+
+    def _get_model(self):
+        """실시간 설정을 가져옵니다."""
+        return ConfigManager.get_model("shorts")
 
     def _clean_json_text(self, text):
         """
@@ -167,7 +170,7 @@ class ShortsMaker:
             print(f"[ShortsMaker] Requesting AI Plan... (Topic: {focus_topic})")
             client = genai.Client(api_key=self.api_key)
             response = client.models.generate_content(
-                model=self.model_name,
+                model=self._get_model(),
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.4,

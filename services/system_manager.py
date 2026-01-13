@@ -2,6 +2,56 @@ import os
 import sys
 import subprocess
 import time
+import json
+
+class ConfigManager:
+    """
+    사용자 정의 설정을 관리하는 매니저.
+    data/config.json 파일을 사용하여 개인화된 설정을 유지합니다.
+    """
+    CONFIG_PATH = "data/config.json"
+    DEFAULT_CONFIG = {
+        "models": {
+            "summarizer": "gemini-2.5-flash",
+            "planner": "gemini-2.5-flash-lite",
+            "refiner": "gemma-3-27b-it",
+            "shorts": "gemini-2.5-flash",
+            "whisper": "mlx-community/whisper-large-v3-mlx-4bit"
+        }
+    }
+
+    @classmethod
+    def load_config(cls):
+        """설정 파일을 로드합니다. 파일이 없으면 기본값을 생성합니다."""
+        if not os.path.exists(cls.CONFIG_PATH):
+            cls.save_config(cls.DEFAULT_CONFIG)
+            return cls.DEFAULT_CONFIG
+        
+        try:
+            with open(cls.CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[ConfigManager] Error loading config: {e}")
+            return cls.DEFAULT_CONFIG
+
+    @classmethod
+    def save_config(cls, config):
+        """설정 파일을 저장합니다."""
+        try:
+            os.makedirs(os.path.dirname(cls.CONFIG_PATH), exist_ok=True)
+            with open(cls.CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            print(f"[ConfigManager] Successfully saved config to {os.path.abspath(cls.CONFIG_PATH)}")
+            return True
+        except Exception as e:
+            print(f"[ConfigManager] Error saving config: {e}")
+            raise e # 에러를 상위로 전파하여 API에서 확인 가능하게 함
+
+    @classmethod
+    def get_model(cls, task_type):
+        """특정 작업에 설정된 모델명을 가져옵니다."""
+        config = cls.load_config()
+        return config.get("models", {}).get(task_type, cls.DEFAULT_CONFIG["models"].get(task_type))
 
 class SystemManager:
     @staticmethod

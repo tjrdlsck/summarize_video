@@ -4,6 +4,8 @@ const { useState, useRef, useEffect, useMemo } = React;
 function App() {
     // View Mode: 'dashboard' | 'player' 
     const [viewMode, setViewMode] = useState('dashboard');
+    // Dashboard Mode: 'analysis' | 'subtitle'
+    const [dashboardTab, setDashboardTab] = useState('analysis');
 
     // Data State
     const [urlInput, setUrlInput] = useState("");
@@ -13,10 +15,24 @@ function App() {
     const [playerData, setPlayerData] = useState(null);
     const [blogData, setBlogData] = useState(null);
 
+    // Subtitle Studio State
+    const [selectedStudioItem, setSelectedStudioItem] = useState(null);
+    const [studioTranscript, setStudioTranscript] = useState(null);
+    const [studioSettings, setStudioStudioSettings] = useState({
+        maxChars: 20,
+        maxLines: 2,
+        removePunctuation: true
+    });
+    const [studioSearch, setStudioSearch] = useState("");
+    const [isUploadPanelOpen, setIsUploadPanelOpen] = useState(false);
+
     // [New] System Update State
     const [updateAvailable, setUpdateAvailable] = useState(false);
     const [updateInfo, setUpdateInfo] = useState(null);
     const [isUpdating, setIsUpdating] = useState(false);
+
+    // [New] Settings State
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
     // Player UI State
     const [loading, setLoading] = useState(false);
@@ -286,7 +302,7 @@ function App() {
             });
             setUrlInput("");
             setTitleInput("");
-            alert("1단계: 자막 생성 작업이 시작되었습니다.");
+            alert("자막 생성 작업이 시작되었습니다.");
             fetchActiveTasks();
         } catch (err) {
             alert("요청 실패: " + err.message);
@@ -338,7 +354,7 @@ function App() {
                 custom_title: titleInput
             });
             setTitleInput("");
-            alert("파일 업로드 완료. 1단계: 자막 생성이 시작됩니다.");
+            alert("파일 업로드 완료. 자막 생성이 시작됩니다.");
             fetchActiveTasks();
         } catch (err) {
             alert("오류 발생: " + err.message);
@@ -353,6 +369,10 @@ function App() {
         try {
             await axios.delete(`/api/history/${filename}`);
             fetchHistory();
+            if (selectedStudioItem?.filename === filename) {
+                setSelectedStudioItem(null);
+                setStudioTranscript(null);
+            }
         } catch (err) {
             alert("삭제 실패: " + err.message);
         }
@@ -410,19 +430,6 @@ function App() {
         }
     };
 
-    const handleCopyFullText = async () => {
-        if (!blogContent || blogContent.length === 0) return;
-        const textToCopy = blogContent.map(b => `[${b.title}]
-${b.fullText}`).join('\n\n');
-        try {
-            await navigator.clipboard.writeText(textToCopy);
-            alert('클립보드에 전체 내용이 복사되었습니다!');
-        } catch (err) {
-            console.error('Copy failed:', err);
-            alert('복사에 실패했습니다.\n(보안 문제로 HTTPS 또는 localhost 환경이 필요할 수 있습니다.)');
-        }
-    };
-
     const seekVideo = (time) => {
         if (videoRef.current) {
             videoRef.current.currentTime = time;
@@ -434,7 +441,7 @@ ${b.fullText}`).join('\n\n');
         window.seekFromTimestamp = (seconds) => seekVideo(seconds);
     }, [playerData]);
 
-    const formatTime = (s) => {
+    const formatTimeSimple = (s) => {
         if (!s && s !== 0) return "0:00";
         const m = Math.floor(s / 60);
         const sec = Math.floor(s % 60);
@@ -462,7 +469,7 @@ ${b.fullText}`).join('\n\n');
 
     const handleExportClip = async () => {
         if (clipEnd <= clipStart) return alert("구간 설정이 올바르지 않습니다.");
-        const finalTitle = clipTitle.trim() || `Clip_${formatTime(clipStart)}-${formatTime(clipEnd)}`;
+        const finalTitle = clipTitle.trim() || `Clip_${formatTimeSimple(clipStart)}-${formatTimeSimple(clipEnd)}`;
         setIsClipMode(false);
         try {
             await axios.post('/api/export/clip', {
@@ -496,24 +503,6 @@ ${b.fullText}`).join('\n\n');
             alert(`AI 숏츠 기획이 시작되었습니다!
 (주제: ${userTopic.trim() || '자동 추천'})
 
-우측 하단 작업 모니터에서 진행 상황을 확인하세요.`);
-            fetchActiveTasks();
-        } catch (err) {
-            console.error(err);
-            alert("요청 실패: " + err.message);
-        }
-    };
-
-    const handleRegenerateBlog = async () => {
-        if (!confirm(`기존 블로그 내용을 지우고 AI가 다시 작성합니다.
-(약 1분 소요)
-
-계속하시겠습니까?`)) return;
-        try {
-            await axios.post('/api/blog/regenerate', {
-                filename: playerData.video_filename
-            });
-            alert(`블로그 재생성이 시작되었습니다!
 우측 하단 작업 모니터에서 진행 상황을 확인하세요.`);
             fetchActiveTasks();
         } catch (err) {
@@ -608,33 +597,207 @@ ${b.fullText}`).join('\n\n');
         }
     }, [currentShortsOriginalTime, activeShortsId, activeTab, playerData]);
 
+    const handleDownloadSubtitle = async () => {
+        const format = prompt("다운로드할 포맷을 입력하세요 (srt, vtt, txt):", "srt");
+        if (!format) return;
+        const fmt = format.toLowerCase();
+        if (!['srt', 'vtt', 'txt'].includes(fmt)) {
+            alert("지원하지 않는 포맷입니다. (srt, vtt, txt 중 선택)");
+            return;
+        }
+
+        const maxCharsStr = prompt("한 줄당 최대 글자 수를 입력하세요 (기본값: 20):", "20");
+        const maxChars = parseInt(maxCharsStr) || 20;
+
+        const maxLinesStr = prompt("한 화면당 최대 줄 수를 입력하세요 (기본값: 2):", "2");
+        const maxLines = parseInt(maxLinesStr) || 2;
+
+        const removePunc = confirm("문장 부호(.,!? )를 제거하시겠습니까?\n(숏츠 등 깔끔한 자막을 위해 권장됩니다.)");
+
+        try {
+            const response = await axios.get(`/api/download/subtitle/${playerData.video_filename}`, {
+                params: { 
+                    format: fmt, 
+                    max_chars: maxChars, 
+                    max_lines: maxLines,
+                    remove_punctuation: removePunc 
+                },
+                responseType: 'blob'
+            });
+            
+            const url = window.URL.createObjectURL(new Blob([response.data]));
+            const link = document.createElement('a');
+            link.href = url;
+            
+            let fileName = `${playerData.video_filename.split('.')[0]}_${maxChars}c${maxLines}l${removePunc ? '_nopunc' : ''}.${fmt}`;
+            const contentDisposition = response.headers['content-disposition'];
+            if (contentDisposition) {
+                const fileNameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+                if (fileNameMatch && fileNameMatch.length === 2) fileName = fileNameMatch[1];
+            }
+
+            link.setAttribute('download', fileName);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.URL.revokeObjectURL(url);
+        } catch (err) {
+            console.error("Subtitle download failed:", err);
+            alert("자막 다운로드 실패: " + err.message);
+        }
+    };
+
+    // --- Subtitle Studio Logic ---
+    const loadStudioTranscript = async (item) => {
+        if (!item.result_data.has_transcript_file) {
+            if (confirm("이 영상의 자막 데이터가 없습니다. 지금 생성하시겠습니까?")) {
+                try {
+                    await axios.post('/api/transcribe', { filename: item.filename });
+                    alert("자막 생성이 시작되었습니다. 잠시 후 완료되면 다시 선택해주세요.");
+                    fetchActiveTasks();
+                } catch (e) { alert("요청 실패: " + e.message); }
+            }
+            return;
+        }
+        
+        setSelectedStudioItem(item);
+        try {
+            const res = await axios.get(`/static/results/${item.result_data.transcript_json_filename}?t=${Date.now()}`);
+            setStudioTranscript(res.data);
+        } catch (err) { console.error(err); alert("데이터 로드 실패"); }
+    };
+
+    const reflowedStudioSubtitle = useMemo(() => {
+        if (!studioTranscript) return [];
+        const { maxChars, maxLines, removePunctuation } = studioSettings;
+        
+        let newSegments = [];
+        for (let seg of studioTranscript) {
+            let words = seg.words || [];
+            if (words.length === 0) {
+                let text = seg.text;
+                if (removePunctuation) text = text.replace(/[.,?!]/g, "");
+                newSegments.push({ start: seg.start, end: seg.end, text: text });
+                continue;
+            }
+
+            let currentBlockWords = [];
+            let currentLines = [];
+            let currentLineText = "";
+
+            for (let wordInfo of words) {
+                let wordText = wordInfo.word;
+                if (removePunctuation) wordText = wordText.replace(/[.,?!]/g, "");
+                if (!wordText.trim()) continue;
+
+                let pad = currentLineText.length > 0 ? 1 : 0;
+                let predictedLen = currentLineText.length + pad + wordText.length;
+
+                if (predictedLen > maxChars) {
+                    if (currentLineText) currentLines.push(currentLineText);
+                    currentLineText = wordText;
+
+                    if (currentLines.length >= maxLines) {
+                        if (currentBlockWords.length > 0) {
+                            newSegments.push({
+                                start: currentBlockWords[0].start,
+                                end: currentBlockWords[currentBlockWords.length - 1].end,
+                                text: currentLines.join("\n")
+                            });
+                        }
+                        currentLines = [];
+                        currentBlockWords = [];
+                    }
+                } else {
+                    currentLineText = currentLineText ? (currentLineText + " " + wordText) : wordText;
+                }
+                currentBlockWords.push(wordInfo);
+            }
+
+            if (currentLineText) currentLines.push(currentLineText);
+            if (currentLines.length > 0 && currentBlockWords.length > 0) {
+                newSegments.push({
+                    start: currentBlockWords[0].start,
+                    end: currentBlockWords[currentBlockWords.length - 1].end,
+                    text: currentLines.join("\n")
+                });
+            }
+        }
+        return newSegments;
+    }, [studioTranscript, studioSettings]);
+
+    const handleStudioDownload = async (format) => {
+        if (!selectedStudioItem) return;
+        try {
+            const response = await axios.get(`/api/download/subtitle/${selectedStudioItem.filename}`, {
+                params: { 
+                    format: format, 
+                    max_chars: studioSettings.maxChars, 
+                    max_lines: studioSettings.maxLines,
+                    remove_punctuation: studioSettings.removePunctuation 
+                },
+                responseType: 'blob'
+            });
+            const url = window.URL.createObjectURL(new Blob([response.data]));
+            const link = document.createElement('a');
+            link.href = url;
+            link.setAttribute('download', `${selectedStudioItem.title.replace(/\s+/g, '_')}_studio.${format}`);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        } catch (err) { alert("다운로드 실패: " + err.message); }
+    };
+
     return (
         <div className="flex flex-col h-screen overflow-hidden">
             <header className="shrink-0 bg-white border-b py-4 px-6 shadow-sm z-30">
-                <div className="max-w-7xl mx-auto flex justify-between items-center w-full">
-                    <h1 onClick={() => setViewMode('dashboard')}
-                        className="text-2xl font-bold text-indigo-600 flex items-center gap-2 cursor-pointer hover:opacity-80 transition">
+                <div className="max-w-7xl mx-auto flex justify-between items-center w-full relative">
+                    <h1 onClick={() => { setViewMode('dashboard'); setDashboardTab('analysis'); }}
+                        className="text-2xl font-bold text-indigo-600 flex items-center gap-2 cursor-pointer hover:opacity-80 transition shrink-0">
                         🤖 AI Video Analyst
                     </h1>
-                    {viewMode === 'player' && (
-                        <button onClick={() => setViewMode('dashboard')} className="text-sm font-bold text-gray-500 hover:text-indigo-600 flex items-center gap-1">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
-                            대시보드로 나가기
-                        </button>
+                    
+                    {/* Centered Segmented Control */} 
+                    {viewMode === 'dashboard' && (
+                        <div className="absolute left-1/2 -translate-x-1/2">
+                            <SegmentedControl 
+                                activeTab={dashboardTab} 
+                                onChange={setDashboardTab} 
+                            />
+                        </div>
                     )}
+
+                    <div className="flex items-center gap-3 shrink-0">
+                        <button 
+                            onClick={() => setIsSettingsOpen(true)}
+                            className="text-gray-400 hover:text-indigo-600 transition p-2 rounded-full hover:bg-indigo-50"
+                            title="설정"
+                        >
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        </button>
+                        
+                        {viewMode === 'player' && (
+                            <button onClick={() => setViewMode('dashboard')} className="text-sm font-bold text-gray-500 hover:text-indigo-600 flex items-center gap-1">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                대시보드로 나가기
+                            </button>
+                        )}
+                    </div>
                 </div>
             </header>
 
+            <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
             <TaskMonitor tasks={activeTasks} onCancel={handleCancelTask} />
 
             <main className="flex-1 flex overflow-hidden bg-gray-50">
-                        {/* --- View 1: Dashboard --- */}
-                        {viewMode === 'dashboard' && (
-                            // [수정] 전체 높이(h-full)와 스크롤(overflow-y-auto)을 적용하여 목록이 많아져도 스크롤 가능하게 함
+                {/* --- View 1: Dashboard --- */} 
+                {viewMode === 'dashboard' && (
+                    <div className="w-full h-full flex flex-col overflow-hidden">
+                        {/* Tab Content Switching */} 
+                        {dashboardTab === 'analysis' ? (
                             <div className="w-full h-full overflow-y-auto custom-scrollbar">
                                 <div className="max-w-6xl mx-auto p-4 md:p-8 fade-in space-y-12">
-                                    
-                                    {/* [New] System Update Banner */}
+                                    {/* System Update Banner */} 
                                     {updateAvailable && (
                                         <div className="bg-indigo-600 rounded-2xl p-4 mb-8 text-white shadow-lg flex flex-col md:flex-row justify-between items-center gap-4 animate-bounce-subtle">
                                             <div className="flex items-center gap-3">
@@ -656,65 +819,249 @@ ${b.fullText}`).join('\n\n');
                                         </div>
                                     )}
 
-                                    {/* Input Section */}
+                                    {/* Input Section */} 
                                     <section className="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
-                                <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">새 영상 분석하기</h2>
-                                <div className="max-w-2xl mx-auto space-y-6">
-                                    <div className="flex gap-3">
-                                        <input type="text" placeholder="YouTube URL을 입력하세요..." className="flex-1 p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} disabled={loading} />
-                                    </div>
-                                    <div>
-                                        <input type="text" placeholder="영상 제목을 미리 설정할 수 있습니다 (선택사항)" className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm" value={titleInput} onChange={(e) => setTitleInput(e.target.value)} disabled={loading} />
-                                        <p className="text-xs text-gray-400 mt-1 ml-1">* 비워두면 유튜브 제목이나 파일명을 그대로 사용합니다.</p>
-                                    </div>
-                                    <div className="flex gap-4">
-                                        <button onClick={handleAnalyze} disabled={loading} className="flex-1 bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:bg-gray-400 transition shadow-md">{loading ? "분석 요청 중..." : "🚀 URL 분석 시작"}</button>
-                                    </div>
-                                    <div className="relative flex py-2 items-center">
-                                        <div className="flex-grow border-t border-gray-200"></div>
-                                        <span className="flex-shrink-0 mx-4 text-gray-400 text-xs">OR</span>
-                                        <div className="flex-grow border-t border-gray-200"></div>
-                                    </div>
-                                    <label className="block w-full cursor-pointer bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl p-4 text-center hover:bg-indigo-50 transition group">
-                                        <span className="text-gray-500 group-hover:text-indigo-600 font-medium">📁 로컬 MP4 파일 업로드 (제목 입력 후 선택)</span>
-                                        <input type="file" accept="video/mp4" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} />
-                                    </label>
-                                </div>
-                            </section>
+                                        <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">새 영상 분석하기</h2>
+                                        <div className="max-w-2xl mx-auto space-y-6">
+                                            <div className="flex gap-3">
+                                                <input type="text" placeholder="YouTube URL을 입력하세요..." className="flex-1 p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} disabled={loading} />
+                                            </div>
+                                            <div>
+                                                <input type="text" placeholder="영상 제목을 미리 설정할 수 있습니다 (선택사항)" className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm" value={titleInput} onChange={(e) => setTitleInput(e.target.value)} disabled={loading} />
+                                                <p className="text-xs text-gray-400 mt-1 ml-1">* 비워두면 유튜브 제목이나 파일명을 그대로 사용합니다.</p>
+                                            </div>
+                                            <div className="flex gap-4">
+                                                <button onClick={handleAnalyze} disabled={loading} className="flex-1 bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:bg-gray-400 transition shadow-md">{loading ? "분석 요청 중..." : "🚀 URL 분석 시작"}</button>
+                                            </div>
+                                            <div className="relative flex py-2 items-center">
+                                                <div className="flex-grow border-t border-gray-200"></div>
+                                                <span className="flex-shrink-0 mx-4 text-gray-400 text-xs">OR</span>
+                                                <div className="flex-grow border-t border-gray-200"></div>
+                                            </div>
+                                            <label className="block w-full cursor-pointer bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl p-4 text-center hover:bg-indigo-50 transition group">
+                                                <span className="text-gray-500 group-hover:text-indigo-600 font-medium">📁 로컬 MP4 파일 업로드 (제목 입력 후 선택)</span>
+                                                <input type="file" accept="video/mp4" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} />
+                                            </label>
+                                        </div>
+                                    </section>
 
-                            <section>
-                                <h3 className="text-lg font-bold text-gray-700 mb-4 flex items-center gap-2">📚 내 작업 목록 <span className="bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded-full">{historyList.length}</span></h3>
-                                {historyList.length === 0 ? (
-                                    <div className="text-center py-12 text-gray-400 bg-white rounded-xl border border-dashed">아직 작업된 영상이 없습니다.</div>
-                                ) : (
-                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-10">
-                                        {historyList.map((item, idx) => {
-                                            const hasChapters = item.total_chapters > 0;
-                                            const hasBlog = hasChapters && item.result_data.chapters.some(c => c.blog_content);
-                                            return (
-                                                <div key={idx} onClick={() => loadPlayer(item)} className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 cursor-pointer hover:shadow-md hover:border-indigo-300 transition group relative overflow-hidden flex flex-col">
-                                                    <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition"></div>
-                                                    <button onClick={(e) => handleDelete(e, item.filename)} className="absolute top-4 right-4 text-gray-300 hover:text-red-500 transition p-1 z-10"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
-                                                    <div className="flex flex-col mb-4">
-                                                        <h4 className="font-bold text-gray-800 line-clamp-2 mb-1 group-hover:text-indigo-600 transition">{normalizeLegacyTitle(item.title)}</h4>
-                                                        <p className="text-[10px] text-gray-400">{new Date(item.timestamp * 1000).toLocaleString()}</p>
+                                    <section>
+                                        <h3 className="text-lg font-bold text-gray-700 mb-4 flex items-center gap-2">📚 내 작업 목록 <span className="bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded-full">{historyList.length}</span></h3>
+                                        {historyList.length === 0 ? (
+                                            <div className="text-center py-12 text-gray-400 bg-white rounded-xl border border-dashed">아직 작업된 영상이 없습니다.</div>
+                                        ) : (
+                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-10">
+                                                {historyList.map((item, idx) => {
+                                                    const hasChapters = item.total_chapters > 0;
+                                                    const hasBlog = hasChapters && item.result_data.chapters.some(c => c.blog_content);
+                                                    return (
+                                                        <div key={idx} onClick={() => loadPlayer(item)} className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 cursor-pointer hover:shadow-md hover:border-indigo-300 transition group relative overflow-hidden flex flex-col">
+                                                            <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition"></div>
+                                                            <button onClick={(e) => handleDelete(e, item.filename)} className="absolute top-4 right-4 text-gray-300 hover:text-red-500 transition p-1 z-10"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                                                            <div className="flex flex-col mb-4">
+                                                                <h4 className="font-bold text-gray-800 line-clamp-2 mb-1 group-hover:text-indigo-600 transition">{normalizeLegacyTitle(item.title)}</h4>
+                                                                <p className="text-[10px] text-gray-400">{new Date(item.timestamp * 1000).toLocaleString()}</p>
+                                                            </div>
+                                                            <div className="flex flex-wrap gap-1.5 mb-4">
+                                                                <span className="text-[9px] font-bold bg-green-100 text-green-700 px-1.5 py-0.5 rounded border border-green-200 uppercase tracking-tighter">자막 완료</span>
+                                                                {hasChapters ? <span className="text-[9px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 uppercase tracking-tighter">분석 완료</span> : <span className="text-[9px] font-bold bg-gray-100 text-gray-400 px-1.5 py-0.5 rounded border border-gray-200 uppercase tracking-tighter">분석 대기</span>}
+                                                                {hasBlog && <span className="text-[9px] font-bold bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200 uppercase tracking-tighter">블로그 완료</span>}
+                                                            </div>
+                                                            <div className="mt-auto grid grid-cols-2 gap-2 pt-3 border-t border-gray-50">
+                                                                <button onClick={(e) => handleStartAnalysis(e, item.filename, item.title)} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}>{hasChapters ? '🔄 2. 재분석' : '✨ 2. AI 분석'}</button>
+                                                                <button onClick={(e) => hasChapters ? handleGenerateBlog(e, item.filename) : alert('먼저 AI 분석을 완료해주세요.')} disabled={!hasChapters} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-purple-50 text-purple-600 hover:bg-purple-100' : 'bg-gray-50 text-gray-300 cursor-not-allowed'}`}>{hasBlog ? '🔄 3. 재작성' : '📝 3. 블로그'}</button>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </section>
+                                </div>
+                            </div>
+                        ) : (
+                            /* Subtitle Studio Tab Content */
+                            <div className="flex-1 flex overflow-hidden">
+                                {/* Left Sidebar: Work List & Upload */} 
+                                <aside className="w-1/3 border-r bg-white flex flex-col overflow-hidden">
+                                    <div className="p-4 border-b space-y-4">
+                                        <button 
+                                            onClick={() => setIsUploadPanelOpen(!isUploadPanelOpen)}
+                                            className="w-full bg-indigo-600 text-white py-2 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 transition shadow-sm"
+                                        >
+                                            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                                            새 작업 추가
+                                        </button>
+
+                                        {isUploadPanelOpen && (
+                                            <div className="bg-gray-50 p-4 rounded-xl border border-indigo-100 space-y-3 animate-fade-in">
+                                                <input 
+                                                    type="text" 
+                                                    placeholder="YouTube URL..."
+                                                    className="w-full p-2 text-sm border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                                                    value={urlInput}
+                                                    onChange={(e) => setUrlInput(e.target.value)}
+                                                />
+                                                <div className="flex gap-2">
+                                                    <button 
+                                                        onClick={handleAnalyze}
+                                                        className="flex-1 bg-indigo-100 text-indigo-700 py-1.5 rounded-lg text-xs font-bold hover:bg-indigo-200 transition"
+                                                    >
+                                                        URL 추가
+                                                    </button>
+                                                    <label className="flex-1 bg-white border border-gray-300 py-1.5 rounded-lg text-xs font-bold text-gray-600 text-center cursor-pointer hover:bg-gray-50 transition">
+                                                        파일 업로드
+                                                        <input type="file" accept="video/mp4" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} />
+                                                    </label>
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        <div className="relative">
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                            </span>
+                                            <input 
+                                                type="text" 
+                                                placeholder="제목 검색..."
+                                                className="w-full pl-9 pr-4 py-2 bg-gray-100 border-0 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
+                                                value={studioSearch}
+                                                onChange={(e) => setStudioSearch(e.target.value)}
+                                            />
+                                        </div>
+                                    </div>
+
+                                    <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
+                                        {historyList
+                                            .filter(item => item.title.toLowerCase().includes(studioSearch.toLowerCase()))
+                                            .map((item, idx) => {
+                                                const isSelected = selectedStudioItem?.filename === item.filename;
+                                                const hasTranscript = item.result_data.has_transcript_file;
+                                                const isProcessing = activeTasks.some(t => t.filename === item.filename && t.type === 'transcription');
+
+                                                return (
+                                                    <div 
+                                                        key={idx} 
+                                                        onClick={() => loadStudioTranscript(item)}
+                                                        className={`p-3 rounded-xl cursor-pointer transition flex justify-between items-center group ${isSelected ? 'bg-indigo-50 border border-indigo-200' : 'hover:bg-gray-50 border border-transparent'}`}
+                                                    >
+                                                        <div className="overflow-hidden">
+                                                            <h4 className={`text-sm font-bold truncate ${isSelected ? 'text-indigo-700' : 'text-gray-700'}`}>{normalizeLegacyTitle(item.title)}</h4>
+                                                            <div className="flex items-center gap-2 mt-1">
+                                                                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${hasTranscript ? 'bg-green-100 text-green-600' : isProcessing ? 'bg-indigo-100 text-indigo-600 animate-pulse' : 'bg-gray-100 text-gray-400'}`}>
+                                                                    {hasTranscript ? '✅ 자막완료' : isProcessing ? '🔄 생성중' : '⚠️ 자막없음'}
+                                                                </span>
+                                                                <span className="text-[10px] text-gray-400">{new Date(item.timestamp * 1000).toLocaleDateString()}</span>
+                                                            </div>
+                                                        </div>
+                                                        <button onClick={(e) => handleDelete(e, item.filename)} className="opacity-0 group-hover:opacity-100 p-1.5 text-gray-300 hover:text-red-500 transition"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
                                                     </div>
-                                                    <div className="flex flex-wrap gap-1.5 mb-4">
-                                                        <span className="text-[9px] font-bold bg-green-100 text-green-700 px-1.5 py-0.5 rounded border border-green-200 uppercase tracking-tighter">자막 완료</span>
-                                                        {hasChapters ? <span className="text-[9px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 uppercase tracking-tighter">분석 완료</span> : <span className="text-[9px] font-bold bg-gray-100 text-gray-400 px-1.5 py-0.5 rounded border border-gray-200 uppercase tracking-tighter">분석 대기</span>}
-                                                        {hasBlog && <span className="text-[9px] font-bold bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200 uppercase tracking-tighter">블로그 완료</span>}
+                                                );
+                                            })}
+                                    </div>
+                                </aside>
+
+                                {/* Right Main: Subtitle Studio Workspace */} 
+                                <section className="flex-1 bg-gray-50 flex flex-col overflow-hidden relative">
+                                    {!selectedStudioItem ? (
+                                        <div className="flex-1 flex flex-col items-center justify-center text-gray-400 text-center p-8">
+                                            <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-200 mb-4 text-6xl">🎞️</div>
+                                            <h3 className="text-xl font-bold text-gray-600 mb-2">자막 스튜디오에 오신 것을 환영합니다!</h3>
+                                            <p className="max-w-xs leading-relaxed">왼쪽 목록에서 영상을 선택하여 자막 가공을 시작하세요.<br/>자막이 없는 경우 자동으로 생성을 요청합니다.</p>
+                                        </div>
+                                    ) : (
+                                        <div className="flex-1 flex flex-col overflow-hidden">
+                                            {/* Studio Header */} 
+                                            <div className="bg-white p-6 border-b shadow-sm shrink-0">
+                                                <div className="flex justify-between items-start mb-6">
+                                                    <div>
+                                                        <h2 className="text-xl font-bold text-gray-800 mb-1">{normalizeLegacyTitle(selectedStudioItem.title)}</h2>
+                                                        <p className="text-sm text-gray-400">자막 블록 수: {reflowedStudioSubtitle.length}개</p>
                                                     </div>
-                                                    <div className="mt-auto grid grid-cols-2 gap-2 pt-3 border-t border-gray-50">
-                                                        <button onClick={(e) => handleStartAnalysis(e, item.filename, item.title)} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}>{hasChapters ? '🔄 2. 재분석' : '✨ 2. AI 분석'}</button>
-                                                        <button onClick={(e) => hasChapters ? handleGenerateBlog(e, item.filename) : alert('먼저 AI 분석을 완료해주세요.')} disabled={!hasChapters} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-purple-50 text-purple-600 hover:bg-purple-100' : 'bg-gray-50 text-gray-300 cursor-not-allowed'}`}>{hasBlog ? '🔄 3. 재작성' : '📝 3. 블로그'}</button>
+                                                    <div className="flex gap-2">
+                                                        <button onClick={() => handleStudioDownload('srt')} className="bg-indigo-600 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-indigo-700 transition shadow-md flex items-center gap-2">
+                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                                            SRT 다운로드
+                                                        </button>
+                                                        <button onClick={() => handleStudioDownload('vtt')} className="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-gray-50 transition shadow-sm">VTT</button>
+                                                        <button onClick={() => handleStudioDownload('txt')} className="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-gray-50 transition shadow-sm">TXT</button>
                                                     </div>
                                                 </div>
-                                            );
-                                        })}
-                                    </div>
-                                )}
-                            </section>
-                        </div>
+
+                                                {/* Studio Controls */} 
+                                                <div className="grid grid-cols-1 md:grid-cols-3 gap-8 bg-gray-50 p-5 rounded-2xl border border-gray-100">
+                                                    <div className="space-y-3">
+                                                        <div className="flex justify-between items-center">
+                                                            <label className="text-xs font-bold text-gray-500 uppercase tracking-wider">📏 한 줄당 최대 글자 수</label>
+                                                            <span className="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded text-sm font-mono font-bold">{studioSettings.maxChars}자</span>
+                                                        </div>
+                                                        <input 
+                                                            type="range" min="5" max="50" step="1" 
+                                                            className="w-full accent-indigo-600"
+                                                            value={studioSettings.maxChars}
+                                                            onChange={(e) => setStudioStudioSettings(prev => ({...prev, maxChars: parseInt(e.target.value)}))}
+                                                        />
+                                                        <div className="flex justify-between text-[10px] text-gray-400 font-mono"><span>5자</span><span>50자</span></div>
+                                                    </div>
+
+                                                    <div className="space-y-3">
+                                                        <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">≣ 최대 표시 줄 수</label>
+                                                        <div className="flex bg-white p-1 rounded-xl border border-gray-200">
+                                                            {[1, 2, 3, 4].map(num => (
+                                                                <button 
+                                                                    key={num}
+                                                                    onClick={() => setStudioStudioSettings(prev => ({...prev, maxLines: num}))}
+                                                                    className={`flex-1 py-1.5 rounded-lg text-sm font-bold transition ${studioSettings.maxLines === num ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
+                                                                >
+                                                                    {num}줄
+                                                                </button>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex items-center gap-3 h-full">
+                                                        <div className="flex-1 bg-white p-3 rounded-xl border border-gray-200 flex justify-between items-center">
+                                                            <span className="text-xs font-bold text-gray-500">✨ 문장 부호 제거</span>
+                                                            <button 
+                                                                onClick={() => setStudioStudioSettings(prev => ({...prev, removePunctuation: !prev.removePunctuation}))}
+                                                                className={`w-12 h-6 rounded-full transition-all relative ${studioSettings.removePunctuation ? 'bg-indigo-600' : 'bg-gray-300'}`}
+                                                            >
+                                                                <div className={`absolute top-1 bg-white w-4 h-4 rounded-full transition-all ${studioSettings.removePunctuation ? 'left-7' : 'left-1'}`}></div>
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* Preview List */} 
+                                            <div className="flex-1 overflow-y-auto p-6 space-y-4 custom-scrollbar bg-white/50">
+                                                <div className="max-w-2xl mx-auto space-y-4">
+                                                    <h3 className="text-sm font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2 mb-6">
+                                                        <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+                                                        Live Preview
+                                                    </h3>
+                                                    {reflowedStudioSubtitle.length === 0 ? (
+                                                        <div className="py-20 text-center text-gray-400 animate-pulse">데이터를 처리 중입니다...</div>
+                                                    ) : (
+                                                        reflowedStudioSubtitle.map((seg, idx) => (
+                                                            <div key={idx} className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5 group hover:border-indigo-200 transition-all">
+                                                                <div className="flex items-center gap-3 mb-3">
+                                                                    <span className="text-[10px] font-bold text-white bg-gray-300 px-2 py-0.5 rounded-full">{idx + 1}</span>
+                                                                    <span className="text-xs font-mono text-indigo-400 font-bold">{formatTimeSimple(seg.start)} → {formatTimeSimple(seg.end)}</span>
+                                                                </div>
+                                                                <p className="text-gray-800 text-lg leading-relaxed whitespace-pre-wrap font-medium">
+                                                                    {seg.text}
+                                                                </p>
+                                                            </div>
+                                                        ))
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+                                </section>
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -735,7 +1082,11 @@ ${b.fullText}`).join('\n\n');
                                 </div>
                                 <div className="mt-4 space-y-4">
                                     {playerData.vtt_filename && (
-                                        <div className="flex justify-end">
+                                        <div className="flex justify-end gap-2">
+                                            <button onClick={handleDownloadSubtitle} className="px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-2 transition bg-white text-gray-600 border-gray-300 hover:bg-gray-50" title="자막 파일 다운로드 (SRT, VTT, TXT)">
+                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                                자막 다운로드
+                                            </button>
                                             <button onClick={() => setShowSubtitle(!showSubtitle)} className={`px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-2 transition ${showSubtitle ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>
                                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"></path></svg>
                                                 {showSubtitle ? '자막 끄기 (CC ON)' : '자막 켜기 (CC OFF)'}
@@ -805,7 +1156,7 @@ ${b.fullText}`).join('\n\n');
                                                                     {(clip.is_ai_generated || clip.duration) ? (
                                                                         <span>Total: {clip.duration ? clip.duration.toFixed(1) : "0.0"}s</span>
                                                                     ) : (
-                                                                        <span>{formatTime(clip.start_time)} ~ {formatTime(clip.end_time)} ({(clip.end_time - clip.start_time).toFixed(1)}s)</span>
+                                                                        <span>{formatTimeSimple(clip.start_time)} ~ {formatTimeSimple(clip.end_time)} ({(clip.end_time - clip.start_time).toFixed(1)}s)</span>
                                                                     )}
                                                                 </span>
                                                             </div>
@@ -864,7 +1215,7 @@ ${b.fullText}`).join('\n\n');
                                                                     <div className="flex-1">
                                                                         <div className="flex items-center gap-2 mb-2"><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-600 border border-purple-200">AI SHORTS</span><span className="text-xs text-gray-400">{createdDate}</span></div>
                                                                         <h4 className="font-bold text-gray-900 text-lg group-open/item:text-indigo-600 transition flex items-center gap-2">{clip.title}<svg className="w-4 h-4 text-gray-400 transform group-open/item:rotate-180 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg></h4>
-                                                                        <div className="flex flex-wrap gap-2 mt-2">{clip.segments && clip.segments.map((seg, sIdx) => (<span key={sIdx} className="text-xs font-mono bg-gray-100 text-gray-600 px-2 py-0.5 rounded border border-gray-200">{formatTime(seg.start)}~{formatTime(seg.end)}</span>))}<span className="text-xs font-bold text-indigo-500 self-center">총 {clip.duration ? clip.duration.toFixed(1) : 0}초</span></div>
+                                                                        <div className="flex flex-wrap gap-2 mt-2">{clip.segments && clip.segments.map((seg, sIdx) => (<span key={sIdx} className="text-xs font-mono bg-gray-100 text-gray-600 px-2 py-0.5 rounded border border-gray-200">{formatTimeSimple(seg.start)}~{formatTimeSimple(seg.end)}</span>))}<span className="text-xs font-bold text-indigo-500 self-center">총 {clip.duration ? clip.duration.toFixed(1) : 0}초</span></div>
                                                                     </div>
                                                                     <div className="flex gap-2 shrink-0 ml-4">
                                                                         <button onClick={(e) => handleExportPremiere(e, safeId)} className="px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-bold text-sm flex items-center gap-1 shadow-sm" title="프리미어 프로용 시퀀스(XML) 다운로드"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>XML</button>
@@ -897,7 +1248,10 @@ ${b.fullText}`).join('\n\n');
                                                                                         const originalIndex = playerData.transcripts.indexOf(t);
                                                                                         const isActive = activeShortsId === uniqueKey && currentShortsOriginalTime >= t.start && currentShortsOriginalTime <= t.end;
                                                                                         return (
-                                                                                            <div key={i} id={`shorts-script-item-${uniqueKey}-${originalIndex}`} onClick={(e) => handleJumpToShortsScript(e, videoElementId, t.start, clip.segments)} className={`p-2 rounded-lg cursor-pointer transition mb-1 flex gap-2 ${isActive ? 'bg-indigo-50 border border-indigo-200 text-indigo-900 shadow-sm scroll-mt-10' : 'hover:bg-gray-50 text-gray-600 border border-transparent'}`}><span className={`text-xs font-mono whitespace-nowrap mt-0.5 ${isActive ? 'text-indigo-600 font-bold' : 'text-indigo-300'}`}>{formatTime(t.start)}</span><p className={`${isActive ? 'font-medium' : ''}`}>{t.text}</p></div>
+                                                                                            <div key={i} id={`shorts-script-item-${uniqueKey}-${originalIndex}`} onClick={(e) => handleJumpToShortsScript(e, videoElementId, t.start, clip.segments)} className={`p-2 rounded-lg cursor-pointer transition mb-1 flex gap-2 ${isActive ? 'bg-indigo-50 border border-indigo-200 text-indigo-900 shadow-sm scroll-mt-10' : 'hover:bg-gray-50 text-gray-600 border border-transparent'}`}>
+                                                                                                <span className={`text-xs font-mono whitespace-nowrap mt-0.5 ${isActive ? 'text-indigo-600 font-bold' : 'text-indigo-300'}`}>{formatTimeSimple(t.start)}</span>
+                                                                                                <p className={`${isActive ? 'font-medium' : ''}`}>{t.text}</p>
+                                                                                            </div>
                                                                                         );
                                                                                     })
                                                                                 ) : (<p className="text-gray-400 italic p-4">스크립트 정보를 불러올 수 없습니다.</p>)}
@@ -909,7 +1263,7 @@ ${b.fullText}`).join('\n\n');
                                                         );
                                                     })}
                                                 </div>
-                                            )} 
+                                            )}
                                         </div>
                                     </div>
                                 )}
@@ -922,7 +1276,7 @@ ${b.fullText}`).join('\n\n');
                                                 return (
                                                     <div key={idx} className="group bg-white rounded-xl border border-gray-200 hover:border-indigo-300 transition overflow-hidden shadow-sm">
                                                         <div onClick={() => toggleChapter(idx)} className="p-4 flex gap-3 items-start cursor-pointer bg-white hover:bg-gray-50 transition select-none">
-                                                            <button onClick={(e) => { e.stopPropagation(); seekVideo(chap.time.start); }} className="shrink-0 mt-0.5 px-2 py-1 bg-indigo-50 text-indigo-600 text-xs font-mono font-bold rounded hover:bg-indigo-600 hover:text-white transition flex items-center gap-1 z-10 border border-indigo-100">▶ {formatTime(chap.time.start)}</button>
+                                                            <button onClick={(e) => { e.stopPropagation(); seekVideo(chap.time.start); }} className="shrink-0 mt-0.5 px-2 py-1 bg-indigo-50 text-indigo-600 text-xs font-mono font-bold rounded hover:bg-indigo-600 hover:text-white transition flex items-center gap-1 z-10 border border-indigo-100">▶ {formatTimeSimple(chap.time.start)}</button>
                                                             <div className="flex-1">
                                                                 <div className="flex justify-between items-center gap-4">
                                                                     <h3 className={`text-base font-bold transition leading-relaxed flex items-center gap-2 ${isExpanded ? 'text-indigo-700' : 'text-gray-700'}`}>
@@ -970,13 +1324,14 @@ ${b.fullText}`).join('\n\n');
                                                         return (
                                                             <div key={idx} className="bg-white border border-gray-200 rounded-2xl shadow-sm hover:border-indigo-300 transition-all overflow-hidden">
                                                                 <div onClick={() => toggleChapter(idx)} className="p-5 flex items-center gap-4 cursor-pointer hover:bg-gray-50 transition select-none">
-                                                                    <button onClick={(e) => { e.stopPropagation(); seekVideo(chapter.time.start); }} className="shrink-0 px-3 py-1.5 bg-indigo-50 text-indigo-600 text-[10px] font-mono font-bold rounded-lg hover:bg-indigo-600 hover:text-white transition border border-indigo-100 shadow-sm">▶ {formatTime(chapter.time.start)}</button>
+                                                                    <button onClick={(e) => { e.stopPropagation(); seekVideo(chapter.time.start); }} className="shrink-0 px-3 py-1.5 bg-indigo-50 text-indigo-600 text-[10px] font-mono font-bold rounded-lg hover:bg-indigo-600 hover:text-white transition border border-indigo-100 shadow-sm">▶ {formatTimeSimple(chapter.time.start)}</button>
                                                                     <h3 className={`flex-1 text-lg font-bold transition ${isExpanded ? 'text-indigo-700' : 'text-gray-800'}`}>{chapter.title}</h3>
                                                                     <svg className={`w-5 h-5 text-gray-400 transform transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
                                                                 </div>
                                                                 {isExpanded && (
                                                                     <div className="px-6 pb-8 pt-2 border-t border-gray-50 animate-fade-in">
-                                                                        <div className="markdown-body prose-custom text-[15px] leading-relaxed" dangerouslySetInnerHTML={{ __html: marked.parse(chapter.content).replace(/[[\]\[\]\(\]]\s*(\d{1,2}):(\d{2}):(\d{2})\s*\[[\]\(\)]/g, (match, h, m, s) => { const totalSeconds = parseInt(h) * 3600 + parseInt(m) * 60 + parseInt(s); return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${h}:${m}:${s}</span>`; }).replace(/[[\]\[\]\(\]]\s*(\d{1,2}):(\d{2})\s*\[[\]\(\)]/g, (match, m, s) => { const totalSeconds = parseInt(m) * 60 + parseInt(s); return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${m}:${s}</span>`; }) }} />
+                                                                        <div className="markdown-body prose-custom text-[15px] leading-relaxed" dangerouslySetInnerHTML={{ __html: marked.parse(chapter.content).replace(/[[\]\[\]\(\]]\s*(\d{1,2}):(\d{2}):(\d{2})\s*\[[\]\[\]\(\]]/g, (match, h, m, s) => { const totalSeconds = parseInt(h) * 3600 + parseInt(m) * 60 + parseInt(s); return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${h}:${m}:${s}</span>`; }).replace(/[[\]\[\]\(\]]\s*(\d{1,2}):(\d{2})\s*\[[\]\[\]\(\]]/g, (match, m, s) => { const totalSeconds = parseInt(m) * 60 + parseInt(s); return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${m}:${s}</span>`; }) }}
+                                                                        />
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -1001,7 +1356,7 @@ ${b.fullText}`).join('\n\n');
                                         {playerData.transcripts && playerData.transcripts.length > 0 ? (
                                             playerData.transcripts.map((line, idx) => (
                                                 <div key={idx} ref={el => itemRefs.current[idx] = el} onClick={() => seekVideo(line.start)} className={`flex gap-4 p-4 rounded-xl transition cursor-pointer items-baseline border-l-4 ${activeIndex === idx ? 'bg-white border-indigo-500 shadow-md ring-1 ring-indigo-100 scroll-mt-24' : 'border-transparent hover:bg-white hover:shadow-sm text-gray-500'}`}>
-                                                    <span className={`text-xs font-mono w-14 shrink-0 text-right ${activeIndex === idx ? 'text-indigo-600 font-bold' : 'text-gray-400'}`}>{formatTime(line.start)}</span>
+                                                    <span className={`text-xs font-mono w-14 shrink-0 text-right ${activeIndex === idx ? 'text-indigo-600 font-bold' : 'text-gray-400'}`}>{formatTimeSimple(line.start)}</span>
                                                     <p className={`text-sm leading-relaxed flex-1 ${activeIndex === idx ? 'text-gray-900 font-bold' : ''}`}>{removePunctuation(line.text)}</p>
                                                 </div>
                                             ))
