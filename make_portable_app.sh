@@ -4,8 +4,11 @@
 APP_NAME="AI Video Analyst"
 APP_DIR="${APP_NAME}.app"
 
-# 1. 기존 앱 제거 및 디렉토리 생성
-rm -rf "$APP_DIR"
+# 1. 디렉토리 구조 최신화 (루트 폴더 Inode 보존을 위해 내부만 삭제)
+if [ -d "$APP_DIR/Contents" ]; then
+    # Contents만 삭제하여 앱 루트의 바로가기(Alias)가 깨지는 것을 방지합니다.
+    rm -rf "$APP_DIR/Contents"
+fi
 mkdir -p "$APP_DIR/Contents/MacOS"
 mkdir -p "$APP_DIR/Contents/Resources"
 
