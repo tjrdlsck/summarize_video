@@ -4,6 +4,7 @@ import json
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from tenacity import retry, stop_after_attempt, wait_exponential # [Add] 재시도 로직 추가
 
 # --- [Helper Class] Resource Usage Tracker ---
 class UsageTracker:
@@ -155,13 +156,18 @@ class VideoSummarizer:
         )
         return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
     def generate_blog_post(
         self, 
         segments: list[dict], 
         video_filename: str, 
         status_callback: callable = None
     ) -> dict:
-        """Gemini를 사용하여 주제 중심의 블로그 포스트를 생성합니다.
+        """Gemini를 사용하여 주제 중심의 블로그 포스트를 생성합니다. (Retry 적용)
 
         타임스탬프를 인용(`[[ID:숫자]]`) 형태로 받아 실제 시간으로 치환합니다.
 
@@ -237,15 +243,20 @@ class VideoSummarizer:
 
         except Exception as e:
             print(f"[Error] Blog generation failed: {e}")
-            return {"error": str(e)}
+            raise e # retry가 잡을 수 있도록 예외 전파
 
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
     def plan_blog_structure(
         self, 
         segments: list[dict], 
         video_filename: str, 
         status_callback: callable = None
     ) -> dict:
-        """Gemini 2.5 Flash-Lite를 사용하여 영상 전체의 블로그 구조를 설계합니다.
+        """Gemini 2.5 Flash-Lite를 사용하여 영상 전체의 블로그 구조를 설계합니다. (Retry 적용)
 
         Args:
             segments: 분석된 자막 세그먼트 리스트.
@@ -314,8 +325,13 @@ class VideoSummarizer:
 
         except Exception as e:
             print(f"[Error] Blog planning failed: {e}")
-            return {"error": str(e)}
+            raise e # retry 전파
 
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
     def summarize(
         self, 
         segments: list[dict], 
@@ -323,7 +339,7 @@ class VideoSummarizer:
         custom_title: str = None, 
         status_callback: callable = None
     ) -> dict:
-        """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다.
+        """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다. (Retry 적용)
 
         Args:
             segments: 분석된 자막 세그먼트 리스트.
@@ -448,7 +464,7 @@ class VideoSummarizer:
 
         except Exception as e:
             print(f"[Error] Summarization failed: {e}")
-            return {"error": str(e)}
+            raise e # retry 전파
         
     def _format_time(self, seconds: float) -> str:
         """초(seconds)를 HH:MM:SS 형식의 문자열로 변환합니다.

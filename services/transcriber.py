@@ -10,6 +10,7 @@ import stable_whisper
 import time
 import multiprocessing
 import sys
+import gc # [Add] 가비지 컬렉션을 위해 추가
 from services.system_manager import ConfigManager
 
 class TaskCancelledError(Exception):
@@ -96,6 +97,10 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration):
         sys.stdout = sys.__stdout__ # 혹시 모르니 표준출력 복구
         print(f"[Whisper Worker] Error: {e}")
         result_queue.put({"status": "error", "message": str(e)})
+    finally:
+        # [Add] 워커 프로세스 종료 전 메모리 정리
+        gc.collect()
+        # MLX의 경우 별도의 cache clear 명령어가 없으나 gc로 어느 정도 해소 가능
 
 class VideoTranscriber:
     """
@@ -227,6 +232,11 @@ class VideoTranscriber:
         except Exception as e:
             print(f"[Warning] VAD execution failed: {e}")
             return []
+        finally:
+            # [Add] VAD 모델 메모리 해제 시도
+            if 'model' in locals():
+                del model
+            gc.collect()
 
     def _filter_hallucinations(self, whisper_segments, vad_segments):
         """Whisper 세그먼트가 VAD 구간과 겹치지 않으면(환각이면) 제거"""
@@ -521,6 +531,13 @@ class VideoTranscriber:
             raise 
 
         finally:
+            # [Add] 최종 메모리 정리
+            if 'result_obj' in locals(): del result_obj
+            if 'output' in locals(): del output
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
             if os.path.exists(wav_path):
                 os.remove(wav_path)
 

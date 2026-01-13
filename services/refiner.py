@@ -3,6 +3,7 @@ import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from tenacity import retry, stop_after_attempt, wait_exponential # [Add] 재시도 로직 추가
 from services.system_manager import ConfigManager
 
 class TextRefiner:
@@ -26,19 +27,13 @@ class TextRefiner:
         h, m = divmod(m, 60)
         return f"{h:02}:{m:02}:{s:02}"
 
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
     def refine_chapter(self, raw_text: str, chapter_title: str, segments: list[dict] = None) -> str:
-        """챕터별 텍스트를 입력받아 가독성이 극대화된 Markdown 형식으로 윤문합니다.
-        
-        [Updated] 인용(Citation) 방식을 적용하여 근거 타임스탬프를 표시합니다.
-
-        Args:
-            raw_text (str): (Legacy) 윤문할 원본 텍스트. segments가 제공되면 무시될 수 있음.
-            chapter_title (str): 해당 챕터의 제목.
-            segments (list[dict]): 해당 챕터에 속하는 자막 세그먼트 리스트. (ID 매핑용)
-
-        Returns:
-            str: 인용 타임스탬프가 포함된 구조화된 Markdown 텍스트.
-        """
+        """챕터별 텍스트를 입력받아 가독성이 극대화된 Markdown 형식으로 윤문합니다. (Retry 적용)"""
         if not self.client:
             return "API Key missing."
 
@@ -121,4 +116,4 @@ class TextRefiner:
 
         except Exception as e:
             print(f"[Refiner Error] {e}")
-            return f"### {chapter_title}\n\n(AI 작성 중 오류 발생: {e})\n\n{raw_text}"
+            raise e # retry 전파 로직을 위해 예외를 다시 던짐
