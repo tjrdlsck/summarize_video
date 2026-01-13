@@ -152,6 +152,7 @@ class ShortsGenerateRequest(BaseModel):
 class PremiereExportRequest(BaseModel): # [Add] 프리미어 내보내기 요청 모델
     video_filename: str
     clip_id: str
+    custom_video_filename: Optional[str] = None # [New] 사용자가 프리미어에서 연결할 실제 영상 파일명
 
 # --- [Helper: Progress Wrapper] ---
 class TaskProgressWrapper:
@@ -1419,11 +1420,14 @@ async def export_premiere_xml(req: PremiereExportRequest, background_tasks: Back
         safe_title = re.sub(r'[\\/*?:"<>|]', "", target_clip.get("title", "Untitled")).replace(" ", "_")
         xml_filename = f"Premiere_Seq_{safe_title}.xml"
         
+        # [Update] 사용자가 입력한 파일명이 있다면 그것을 최우선으로 사용, 없으면 기존 display_title 사용
+        target_video_name_for_xml = req.custom_video_filename if req.custom_video_filename else video_display_title
+
         xml_path = premiere_exporter.create_xml(
             video_path=video_path,
             segments=segments,
             output_filename=xml_filename,
-            video_name=video_display_title # [Fixed] 정제된 원본 제목 전달
+            video_name=target_video_name_for_xml # [Fixed] 사용자 지정 이름 또는 정제된 원본 제목 전달
         )
 
         # 5. 전송 후 임시 파일 삭제 예약

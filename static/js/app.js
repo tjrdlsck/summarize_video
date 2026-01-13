@@ -115,20 +115,51 @@ function App() {
             alert("삭제 실패: " + err.message);
         }
     };
+
+    const handleDownloadOriginalVideo = () => {
+        const link = document.createElement('a');
+        link.href = `/api/stream/video/${playerData.video_filename}`;
+        
+        // 유튜브 링크인 경우 정제된 제목으로 저장 유도
+        const isYoutubeSource = !/^[0-9a-fA-F]{8}_/.test(playerData.video_filename);
+        let downloadName = playerData.video_filename;
+        
+        if (isYoutubeSource) {
+            downloadName = (playerData.video_title || "original_video").replace(/\s+/g, '_') + ".mp4";
+        } else {
+            // 로컬 업로드인 경우 UUID_ 제거 시도
+            downloadName = playerData.video_filename.replace(/^[0-9a-fA-F]{8}_/, '');
+        }
+
+        link.setAttribute('download', downloadName);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    };
     
     const handleExportPremiere = async (e, clipId) => {
         e.preventDefault();
         e.stopPropagation();
-        if (!confirm(`프리미어 프로용 XML 시퀀스 파일을 다운로드하시겠습니까?
 
-[사용법]
-1. 다운로드된 XML 파일을 프리미어 프로에서 [File] -> [Import] 하세요.
-2. 원본 영상과 자동으로 연결됩니다.`)) return;
+        // [New Logic] 영상 출처에 따른 기본 파일명 제안
+        const isYoutubeSource = !/^[0-9a-fA-F]{8}_/.test(playerData.video_filename);
+        let defaultFileName = playerData.video_filename;
+        if (isYoutubeSource) {
+            defaultFileName = (playerData.video_title || "video").trim() + ".mp4";
+        } else {
+            defaultFileName = playerData.video_filename.replace(/^[0-9a-fA-F]{8}_/, '');
+        }
+
+        const customFilename = prompt(`프리미어 프로에서 연결할 실제 영상 파일의 이름을 확인해주세요.
+(정확히 일치해야 자동으로 연결됩니다)`, defaultFileName);
+
+        if (customFilename === null) return; // 취소 시 중단
 
         try {
             const response = await axios.post('/api/export/premiere', {
                 video_filename: playerData.video_filename,
-                clip_id: clipId
+                clip_id: clipId,
+                custom_video_filename: customFilename.trim()
             }, {
                 responseType: 'blob' 
             });
@@ -1083,18 +1114,16 @@ function App() {
                                     )}
                                 </div>
                                 <div className="mt-4 space-y-4">
-                                    {playerData.vtt_filename && (
-                                        <div className="flex justify-end gap-2">
-                                            <button onClick={handleDownloadSubtitle} className="px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-2 transition bg-white text-gray-600 border-gray-300 hover:bg-gray-50" title="자막 파일 다운로드 (SRT, VTT, TXT)">
-                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-                                                자막 다운로드
-                                            </button>
-                                            <button onClick={() => setShowSubtitle(!showSubtitle)} className={`px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-2 transition ${showSubtitle ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>
-                                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"></path></svg>
-                                                {showSubtitle ? '자막 끄기 (CC ON)' : '자막 켜기 (CC OFF)'}
-                                            </button>
-                                        </div>
-                                    )}
+                                    <div className="flex justify-end gap-2">
+                                        <button onClick={handleDownloadOriginalVideo} className="px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-2 transition bg-indigo-50 text-indigo-600 border-indigo-200 hover:bg-indigo-100" title="원본 영상 파일 다운로드">
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                                            원본 영상 다운로드
+                                        </button>
+                                        <button onClick={() => setShowSubtitle(!showSubtitle)} className={`px-3 py-1.5 text-xs font-bold rounded-lg border flex items-center gap-2 transition ${showSubtitle ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"></path></svg>
+                                            {showSubtitle ? '자막 끄기' : '자막 켜기'}
+                                        </button>
+                                    </div>
                                     <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
                                         <div className="flex items-start justify-between gap-2 mb-2">
                                             {isEditingTitle ? (
@@ -1220,9 +1249,11 @@ function App() {
                                                                         <div className="flex flex-wrap gap-2 mt-2">{clip.segments && clip.segments.map((seg, sIdx) => (<span key={sIdx} className="text-xs font-mono bg-gray-100 text-gray-600 px-2 py-0.5 rounded border border-gray-200">{formatTimeSimple(seg.start)}~{formatTimeSimple(seg.end)}</span>))}<span className="text-xs font-bold text-indigo-500 self-center">총 {clip.duration ? clip.duration.toFixed(1) : 0}초</span></div>
                                                                     </div>
                                                                     <div className="flex gap-2 shrink-0 ml-4">
-                                                                        <button onClick={(e) => handleExportPremiere(e, safeId)} className="px-3 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition font-bold text-sm flex items-center gap-1 shadow-sm" title="프리미어 프로용 시퀀스(XML) 다운로드"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>XML</button>
-                                                                        <a href={clip.download_url} download className="px-3 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-bold text-sm flex items-center gap-1 shadow-sm"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>영상+자막 다운</a>
-                                                                        <button onClick={(e) => { e.preventDefault(); handleDeleteClip(safeId); }} className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                                                                        <button onClick={(e) => handleExportPremiere(e, safeId)} className="px-4 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 transition font-bold text-sm flex items-center gap-2 shadow-md" title="프리미어 프로용 패키지(XML + 자막) 다운로드">
+                                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>
+                                                                            프리미어 프로 패키지 내보내기
+                                                                        </button>
+                                                                        <button onClick={(e) => { e.preventDefault(); handleDeleteClip(safeId); }} className="p-2 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition" title="삭제"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
                                                                     </div>
                                                                 </summary>
                                                                 <div className="p-5 border-t border-gray-100 bg-gray-50/50 flex flex-col gap-6 animate-fade-in">
