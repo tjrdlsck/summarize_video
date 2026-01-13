@@ -1340,6 +1340,9 @@ async def stream_video(filename: str, request: Request, range: str = Header(None
     # 청크 길이 계산 ($L = E - S + 1$)
     chunk_length = byte_end - byte_start + 1
     
+    # [개선] 쿼리 파라미터로 다운로드 모드 확인
+    is_download_request = request.query_params.get("download") == "true"
+
     # 파일 열기 및 제너레이터 생성
     def iterfile():
         with open(video_path, "rb") as f:
@@ -1356,15 +1359,30 @@ async def stream_video(filename: str, request: Request, range: str = Header(None
 
     # 헤더 설정
     headers = {
-        "Content-Range": f"bytes {byte_start}-{byte_end}/{file_size}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(chunk_length),
         "Content-Type": "video/mp4",
     }
 
+    # Range 요청이 실제 있었을 때만 Content-Range 헤더를 추가하고 206 상태 코드를 사용
+    # 단, 다운로드 요청 시에는 전체 파일을 안정적으로 받기 위해 200 OK로 처리하는 것이 크롬 호환성에 좋습니다.
+    if range and not is_download_request:
+        headers["Content-Range"] = f"bytes {byte_start}-{byte_end}/{file_size}"
+        status_code = 206
+    else:
+        status_code = 200
+
+    # 다운로드 요청 시 Content-Disposition 헤더 추가
+    if is_download_request:
+        from urllib.parse import quote
+        # 파일명 정제 (사용자가 지정한 제목이 있다면 그것을 사용하도록 app.js에서 처리하겠지만, 
+        # 서버에서도 기본적인 안전장치를 마련합니다.)
+        safe_filename = quote(filename)
+        headers["Content-Disposition"] = f'attachment; filename="{safe_filename}"; filename*=UTF-8\'\'{safe_filename}'
+
     return StreamingResponse(
         iterfile(),
-        status_code=206, # [중요] 206 Partial Content
+        status_code=status_code,
         headers=headers,
         media_type="video/mp4"
     )
