@@ -177,18 +177,16 @@ class TaskProgressWrapper:
 
 def cleanup_orphaned_files():
     """
-    [Startup] 서버 시작 시, 이전 실행에서 비정상 종료 등으로 남겨진 임시 파일들을 정리합니다.
-    대상: static/temp/*, static/results/*_temp.wav
+    [Startup] 서버 시작 시, 불필요한 임시 파일 및 원본 영상이 없는 좀비 결과 파일들을 정리합니다.
     """
-    print("--- [Cleanup] Scanning for orphaned temporary files... ---")
+    print("--- [Cleanup] Scanning for orphaned and zombie files... ---")
     cleanup_count = 0
     
-    # 1. static/temp 폴더 비우기 (Zip, MP4 조각 등)
+    # 1. static/temp 폴더 비우기
     temp_dir = "static/temp"
     if os.path.exists(temp_dir):
         for filename in os.listdir(temp_dir):
-            if filename == ".gitkeep": continue # .gitkeep은 유지
-            
+            if filename == ".gitkeep": continue
             file_path = os.path.join(temp_dir, filename)
             try:
                 if os.path.isfile(file_path) or os.path.islink(file_path):
@@ -200,20 +198,86 @@ def cleanup_orphaned_files():
             except Exception as e:
                 print(f"[Cleanup Error] Failed to delete {file_path}: {e}")
 
-    # 2. static/results 내부의 임시 wav 파일 정리
+    # 2. static/videos 및 static/clips 내부의 다운로드/편집 찌꺼기 정리
+    target_dirs = ["static/videos", "static/clips"]
+    for d in target_dirs:
+        if os.path.exists(d):
+            for filename in os.listdir(d):
+                if filename.endswith(".part") or filename.endswith(".ytdl") or filename.endswith(".temp") or ".tmp" in filename:
+                    file_path = os.path.join(d, filename)
+                    try:
+                        os.remove(file_path)
+                        cleanup_count += 1
+                    except: pass
+
+    # 3. [핵심 추가] 원본 영상이 없는 좀비 결과 파일 정리 (Data Integrity)
     results_dir = "static/results"
+    videos_dir = "static/videos"
     if os.path.exists(results_dir):
+        # (A) 먼저 모든 _summary.json 파일을 검사하여 원본 영상 존재 여부 확인
         for filename in os.listdir(results_dir):
-            if filename.endswith("_temp.wav"):
-                file_path = os.path.join(results_dir, filename)
+            if filename.endswith("_summary.json"):
+                summary_path = os.path.join(results_dir, filename)
                 try:
-                    os.remove(file_path)
-                    cleanup_count += 1
-                except Exception as e:
-                    print(f"[Cleanup Error] Failed to delete {file_path}: {e}")
+                    with open(summary_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    video_source = data.get("video_source")
+                    if video_source:
+                        video_path = os.path.join(videos_dir, video_source)
+                        # 만약 원본 영상이 없다면? -> 이 요약본과 관련된 모든 파일은 찌꺼기임
+                        if not os.path.exists(video_path):
+                            print(f"[Cleanup] Found zombie record: {video_source} (Source missing)")
+                            base_name = os.path.splitext(video_source)[0]
+                            
+                            # 연관 파일 패턴 삭제 (삭제 API 로직 재활용)
+                            zombie_targets = [
+                                f"{base_name}_summary.json",
+                                f"{base_name}_transcript.json",
+                                f"{base_name}_blog_view.json",
+                                f"{base_name}_blog.json", # 레거시
+                                f"{base_name}_clips.json",
+                                f"{base_name}.srt",
+                                f"{base_name}.vtt"
+                            ]
+                            for t in zombie_targets:
+                                t_path = os.path.join(results_dir, t)
+                                if os.path.exists(t_path):
+                                    os.remove(t_path)
+                                    cleanup_count += 1
+                except Exception:
+                    continue
+
+        # (B) _summary.json에 등록되지 않은 정체불명의 결과 파일들 추가 정리 (Heuristic)
+        # 모든 JSON/SRT/VTT 파일을 돌며, 이 파일의 prefix를 가진 summary.json이 있는지 확인
+        # (이 단계는 아주 보수적으로 접근)
+        for filename in os.listdir(results_dir):
+            if filename.endswith((".json", ".srt", ".vtt")):
+                # 이미 위에서 처리된 케이스 제외
+                file_path = os.path.join(results_dir, filename)
+                # 파일명에서 base_name 추출 시도 (가장 긴 매칭 기준)
+                parts = filename.split('_')
+                if len(parts) > 1:
+                    base_candidate = parts[0] # UUID_ 방식 대응
+                    # 해당 base를 가지는 영상이 있는지 체크
+                    found_video = False
+                    for v in os.listdir(videos_dir):
+                        if v.startswith(base_candidate):
+                            found_video = True
+                            break
+                    
+                    if not found_video and not filename.startswith("."):
+                        # 어떤 영상과도 매칭되지 않는 고립된 파일
+                        try:
+                            os.remove(file_path)
+                            cleanup_count += 1
+                            print(f"[Cleanup] Removed orphaned result: {filename}")
+                        except: pass
                     
     if cleanup_count > 0:
-        print(f"--- [Cleanup] Removed {cleanup_count} orphaned files. ---")
+        print(f"--- [Cleanup] Removed {cleanup_count} orphaned/zombie files in total. ---")
+    else:
+        print("--- [Cleanup] System is clean. ---")
 
 def remove_temp_files(file_paths: list):
     """
@@ -240,7 +304,10 @@ async def run_transcription_pipeline(task_id: str, req: TranscriptionRequest):
     def cleanup_files(filename):
         if not filename: return
         try:
+            # 확장자를 제외한 순수 파일명 (예: Apple.mp4 -> Apple)
             base_name = os.path.splitext(filename)[0]
+            
+            # 1. 고정된 타겟 파일들 (Results 폴더 위주)
             targets = [
                 os.path.join("static/videos", filename),           
                 os.path.join("static/results", f"{base_name}.srt"),      
@@ -250,8 +317,20 @@ async def run_transcription_pipeline(task_id: str, req: TranscriptionRequest):
             ]
             for path in targets:
                 if os.path.exists(path): os.remove(path)
-        except Exception:
-            pass
+
+            # 2. [개선] 다운로드 중 남겨진 모든 임시 파일들 정리
+            video_dir = "static/videos"
+            if os.path.exists(video_dir):
+                for f in os.listdir(video_dir):
+                    # (A) 원본 파일명과 정확히 일치하거나 
+                    # (B) 파일명 중간에 코덱 정보 등이 끼어들었더라도 base_name을 포함하고 임시 확장자를 가진 경우
+                    if f == filename or (base_name in f and (".part" in f or ".ytdl" in f or ".temp" in f)):
+                        try:
+                            os.remove(os.path.join(video_dir, f))
+                            print(f"[Cleanup] Removed partial/temp file: {f}")
+                        except: pass
+        except Exception as e:
+            print(f"[Cleanup Error] {e}")
 
     try:
         loop = asyncio.get_running_loop()
@@ -280,7 +359,12 @@ async def run_transcription_pipeline(task_id: str, req: TranscriptionRequest):
                 )
             )
             
-            if result["status"] == "error": raise Exception(result["message"])
+            if result["status"] == "error":
+                # 에러(취소 포함) 시에도 파일명이 있다면 정리 시도
+                if result.get("filename"):
+                    video_filename = result["filename"]
+                raise Exception(result["message"])
+
             video_filename = result["filename"]
             
             if not display_title and result.get("meta") and result["meta"].get("title"):
@@ -847,12 +931,18 @@ async def read_root():
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
     """로컬 파일 업로드 (비동기 스트림 처리)"""
-    # [Security] 파일명 화이트리스트 검증
-    SecurityManager.validate_filename(file.filename)
+    print(f"--- [Upload Request] Filename: {file.filename}, Content-Type: {file.content_type} ---")
+    try:
+        # [Security] 파일명 화이트리스트 검증
+        SecurityManager.validate_filename(file.filename)
+    except HTTPException as e:
+        print(f"--- [Upload Rejected] Reason: {e.detail} ---")
+        raise e
     
     # [수정] downloader.save_uploaded_file이 async로 변경되었으므로 await 추가
     result = await downloader.save_uploaded_file(file, file.filename)
     if result["status"] == "error":
+        print(f"--- [Upload Error] {result['message']} ---")
         raise HTTPException(status_code=500, detail=result["message"])
     return result
 
@@ -917,7 +1007,7 @@ async def get_active_tasks():
 @app.delete("/api/history/{filename}")
 async def delete_history(filename: str):
     """
-    지정된 파일과 관련된 모든 데이터(영상, JSON, SRT, VTT)를 삭제합니다.
+    지정된 파일과 관련된 모든 데이터(영상, 분석 JSON, 자막, 클립 미디어)를 삭제합니다.
     """
     # [Security] 파일명 검증
     SecurityManager.validate_filename(filename)
@@ -925,24 +1015,52 @@ async def delete_history(filename: str):
     try:
         base_name = os.path.splitext(filename)[0]
         
-        # 삭제할 파일 목록
-        targets = [
-            f"static/videos/{filename}",
-            f"static/results/{base_name}_summary.json",
-            f"static/results/{base_name}_transcript.json",
-            f"static/results/{base_name}.srt",
-            f"static/results/{base_name}.vtt"  # [New] VTT 파일도 삭제
+        # 1. static/results 폴더 내의 분석 데이터들 삭제
+        results_dir = "static/results"
+        result_targets = [
+            f"{base_name}_summary.json",
+            f"{base_name}_transcript.json",
+            f"{base_name}_blog_view.json", # [추가] 블로그 데이터
+            f"{base_name}_clips.json",     # [추가] 클립 메타데이터
+            f"{base_name}.srt",
+            f"{base_name}.vtt"
         ]
         
         deleted_count = 0
-        for path in targets:
+        for target in result_targets:
+            path = os.path.join(results_dir, target)
             if os.path.exists(path):
                 os.remove(path)
                 deleted_count += 1
+
+        # 2. static/videos 폴더 내의 원본 영상 및 임시 파일 (.part 등) 삭제
+        video_dir = "static/videos"
+        if os.path.exists(video_dir):
+            for f in os.listdir(video_dir):
+                # 원본 파일명과 일치하거나, 확장자 제외 파일명(base_name)을 포함한 임시 파일인 경우
+                if f == filename or (base_name in f and (".part" in f or ".ytdl" in f or ".temp" in f)):
+                    try:
+                        os.remove(os.path.join(video_dir, f))
+                        deleted_count += 1
+                    except: pass
+
+        # 3. [추가] static/clips 폴더 내의 파생된 모든 클립 미디어 삭제
+        # 원본 영상이 사라지면 파생된 클립들도 더 이상 유효하지 않으므로 함께 정리합니다.
+        clip_dir = "static/clips"
+        if os.path.exists(clip_dir):
+            for f in os.listdir(clip_dir):
+                # 클립 파일명 규칙: clip_{base_name}_...mp4 또는 AI_Shorts_{base_name}_...
+                # 혹은 단순히 파일명에 원본 영상의 base_name이 포함된 경우
+                if base_name in f:
+                    try:
+                        os.remove(os.path.join(clip_dir, f))
+                        deleted_count += 1
+                    except: pass
                 
         return {"status": "success", "message": f"Deleted {deleted_count} files related to {filename}"}
         
     except Exception as e:
+        print(f"[Delete History Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.patch("/api/history/{filename}")
@@ -1033,20 +1151,20 @@ async def get_history():
     return history
 
 @app.post("/api/export/clip")
-async def export_clip(req: ClipRequest, background_tasks: BackgroundTasks):
+async def export_clip(req: ClipRequest):
     """
     [Async] 클립 내보내기 요청
-    파일을 직접 반환하지 않고, 백그라운드 작업 ID를 반환합니다.
+    - [Modify] BackgroundTasks 대신 job_queue를 사용하여 순차 처리 보장
     """
     task_id = str(uuid.uuid4())
     
     # 작업 등록 (task_type="clip_export" 명시)
     task_manager.add_task(task_id, req.filename, task_type="clip_export")
     
-    # 백그라운드 파이프라인 시작
-    background_tasks.add_task(run_clip_pipeline, task_id, req)
+    # [수정] 큐에 작업 추가 (Worker가 세마포어를 잡고 실행함)
+    await job_queue.put((task_id, req))
     
-    return {"task_id": task_id, "message": "Clip generation started"}
+    return {"task_id": task_id, "message": "Clip generation queued"}
 
 @app.post("/api/shorts/auto-generate")
 async def auto_generate_shorts(req: ShortsGenerateRequest, background_tasks: BackgroundTasks):

@@ -436,6 +436,8 @@ function App() {
             videoRef.current.play();
         }
     };
+    // [Add] 타임스탬프 링크 클릭을 위해 글로벌 노출
+    window.seekFromTimestamp = seekVideo;
 
     useEffect(() => {
         window.seekFromTimestamp = (seconds) => seekVideo(seconds);
@@ -1330,7 +1332,19 @@ function App() {
                                                                 </div>
                                                                 {isExpanded && (
                                                                     <div className="px-6 pb-8 pt-2 border-t border-gray-50 animate-fade-in">
-                                                                        <div className="markdown-body prose-custom text-[15px] leading-relaxed" dangerouslySetInnerHTML={{ __html: marked.parse(chapter.content).replace(/[[\]\[\]\(\]]\s*(\d{1,2}):(\d{2}):(\d{2})\s*\[[\]\[\]\(\]]/g, (match, h, m, s) => { const totalSeconds = parseInt(h) * 3600 + parseInt(m) * 60 + parseInt(s); return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${h}:${m}:${s}</span>`; }).replace(/[[\]\[\]\(\]]\s*(\d{1,2}):(\d{2})\s*\[[\]\[\]\(\]]/g, (match, m, s) => { const totalSeconds = parseInt(m) * 60 + parseInt(s); return `<span class="timestamp-link" onclick="window.seekFromTimestamp(${totalSeconds})">${m}:${s}</span>`; }) }}
+                                                                        <div className="markdown-body prose-custom text-[15px] leading-relaxed" dangerouslySetInnerHTML={{ __html: marked.parse(chapter.content)
+                                                                            .replace(/(\(?|\[?)(\d{1,2}:\d{2}:\d{2}|\d{1,2}:\d{2})(\)?|\]?)/g, (match, p1, timeStr, p2) => {
+                                                                                const parts = timeStr.split(':');
+                                                                                let totalSeconds = 0;
+                                                                                if (parts.length === 3) {
+                                                                                    totalSeconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseInt(parts[2]);
+                                                                                } else {
+                                                                                    totalSeconds = parseInt(parts[0]) * 60 + parseInt(parts[1]);
+                                                                                }
+                                                                                // p1, p2는 괄호들을 유지하기 위함. 스타일과 이벤트를 포함한 span 반환
+                                                                                return `<span class="timestamp-link" style="color: #4f46e5; text-decoration: underline; cursor: pointer; font-weight: bold;" onclick="if(window.seekFromTimestamp) window.seekFromTimestamp(${totalSeconds})">${p1}${timeStr}${p2}</span>`;
+                                                                            })
+                                                                        }}
                                                                         />
                                                                     </div>
                                                                 )}
