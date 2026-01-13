@@ -17,8 +17,14 @@ echo -e "${GREEN}=== AI Video Analyst 설치 및 실행 마법사 ===${NC}"
 echo "이 프로그램은 Apple Silicon (M1/M2/M3) Mac에 최적화되어 있습니다."
 echo ""
 
-# 1. Homebrew 확인 및 FFmpeg 설치
+# 1. Python3 및 Homebrew 확인
 echo -e "${YELLOW}[1/5] 시스템 도구 확인 중...${NC}"
+
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}[오류] Python3가 설치되어 있지 않습니다.${NC}"
+    echo "https://www.python.org/ 에서 Python을 설치하거나 'brew install python'을 실행하세요."
+    exit 1
+fi
 
 if ! command -v brew &> /dev/null; then
     echo -e "${RED}[오류] Homebrew가 설치되어 있지 않습니다.${NC}"
@@ -57,6 +63,14 @@ source venv/bin/activate
 echo -e "${YELLOW}[3/5] 필요한 Python 라이브러리 설치 중... (시간이 좀 걸릴 수 있습니다)${NC}"
 pip install --upgrade pip
 pip install -r requirements.txt
+
+# 3.5 AI 모델 사전 다운로드
+if [ -f "model_down.py" ]; then
+    echo -e "${YELLOW}[3.5/5] AI 모델을 사전에 다운로드 중... (최초 1회)${NC}"
+    python3 model_down.py
+else
+    echo -e "${YELLOW}[경고] model_down.py를 찾을 수 없어 모델 다운로드 단계를 건너뜁니다.${NC}"
+fi
 
 # 4. 환경 변수(.env) 설정
 echo -e "${YELLOW}[4/5] 환경 변수 설정 확인...${NC}"
