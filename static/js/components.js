@@ -164,3 +164,32 @@ const TimelineVisualizer = ({ totalDuration, start, end }) => {
         </div>
     );
 };
+
+// --- [Sub Component] Segmented Control (Slide Tab) ---
+function SegmentedControl({ activeTab, onChange }) {
+    return (
+        <div className="bg-gray-100 p-1 rounded-xl flex relative w-48 h-10 shadow-inner">
+            {/* Sliding Background */}
+            <div 
+                className="absolute top-1 bottom-1 bg-white rounded-lg shadow-sm transition-all duration-300 ease-out z-0"
+                style={{ 
+                    width: 'calc(50% - 4px)',
+                    left: activeTab === 'analysis' ? '4px' : '50%'
+                }}
+            ></div>
+            
+            <button 
+                onClick={() => onChange('analysis')}
+                className={`flex-1 text-sm font-bold z-10 transition-colors duration-200 ${activeTab === 'analysis' ? 'text-indigo-600' : 'text-gray-400 hover:text-gray-600'}`}
+            >
+                분석
+            </button>
+            <button 
+                onClick={() => onChange('subtitle')}
+                className={`flex-1 text-sm font-bold z-10 transition-colors duration-200 ${activeTab === 'subtitle' ? 'text-indigo-600' : 'text-gray-400 hover:text-gray-600'}`}
+            >
+                자막
+            </button>
+        </div>
+    );
+}
