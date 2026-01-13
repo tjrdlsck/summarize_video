@@ -27,6 +27,7 @@ from services.refiner import TextRefiner
 from services.shorts_maker import ShortsMaker
 from services.premiere_exporter import PremiereExporter
 from services.system_manager import SystemManager
+from services.subtitle_builder import SubtitleBuilder
 
 
 # --- [Lifespan Manager] ---
@@ -1272,6 +1273,65 @@ async def cancel_task(task_id: str):
     task_manager.request_cancel(task_id)
     
     return {"status": "success", "message": "Cancel requested"}
+
+@app.get("/api/download/subtitle/{filename}")
+async def download_custom_subtitle(
+    filename: str,
+    format: str = "srt",
+    max_chars: Optional[int] = 20,
+    max_lines: Optional[int] = 2,
+    remove_punctuation: Optional[bool] = True, # [New]
+    background_tasks: BackgroundTasks = None
+):
+    """
+    [New] 저장된 단어 단위 자막 데이터(transcript.json)를 기반으로
+    사용자가 원하는 포맷(SRT, VTT, TXT)과 글자 수/줄 수/문장 부호 옵션에 맞춰
+    자막 파일을 즉시 생성하여 다운로드합니다.
+    """
+    base_name = os.path.splitext(filename)[0]
+    json_path = os.path.join("static/results", f"{base_name}_transcript.json")
+    
+    if not os.path.exists(json_path):
+        raise HTTPException(status_code=404, detail="Transcript data not found. Please transcribe the video first.")
+
+    try:
+        # SubtitleBuilder 인스턴스 생성
+        builder = SubtitleBuilder(json_path=json_path)
+        
+        content = ""
+        ext = format.lower()
+        
+        if ext == "srt":
+            content = builder.to_srt(max_chars=max_chars, max_lines=max_lines, remove_punctuation=remove_punctuation)
+        elif ext == "vtt":
+            content = builder.to_vtt(max_chars=max_chars, max_lines=max_lines, remove_punctuation=remove_punctuation)
+        elif ext == "txt":
+            content = builder.to_txt() # TXT는 문장부호 제거 옵션 적용 여부 고민 필요 (현재는 안 함)
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported format. Use srt, vtt, or txt.")
+            
+        # 임시 파일 생성
+        # 파일명에 옵션 정보 추가 (예: _30c2l_nopunc.srt)
+        punc_tag = "_nopunc" if remove_punctuation else ""
+        temp_filename = f"custom_{base_name}_{uuid.uuid4().hex[:8]}.{ext}"
+        temp_path = os.path.join("static/temp", temp_filename)
+        
+        with open(temp_path, "w", encoding="utf-8") as f:
+            f.write(content)
+            
+        # 전송 후 삭제 예약
+        if background_tasks:
+            background_tasks.add_task(remove_temp_files, [temp_path])
+            
+        return FileResponse(
+            temp_path,
+            media_type="text/plain" if ext == "txt" else "application/octet-stream",
+            filename=f"{base_name}_custom{punc_tag}.{ext}"
+        )
+
+    except Exception as e:
+        print(f"[Subtitle Gen Error] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- [System Management Endpoints] ---
 
