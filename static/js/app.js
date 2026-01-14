@@ -154,23 +154,43 @@ function App() {
 
         if (customFilename === null) return; // 취소 시 중단
 
+        // [Add] 자막 규격 입력 (쇼츠 최적화 기본값 10자, 2줄)
+        const maxCharsStr = prompt("자막 한 줄당 최대 글자 수를 입력하세요 (쇼츠 권장: 10~15):", "10");
+        if (maxCharsStr === null) return;
+        const maxChars = parseInt(maxCharsStr) || 10;
+
+        const maxLinesStr = prompt("자막 최대 표시 줄 수를 입력하세요 (기본값: 2):", "2");
+        if (maxLinesStr === null) return;
+        const maxLines = parseInt(maxLinesStr) || 2;
+
         try {
             const response = await axios.post('/api/export/premiere', {
                 video_filename: playerData.video_filename,
                 clip_id: clipId,
-                custom_video_filename: customFilename.trim()
+                custom_video_filename: customFilename.trim(),
+                max_chars: maxChars,
+                max_lines: maxLines
             }, {
                 responseType: 'blob' 
             });
-            const url = window.URL.createObjectURL(new Blob([response.data]));
-            const link = document.createElement('a');
-            link.href = url;
-            let fileName = `Premiere_Seq_${clipId.substring(0,8)}.xml`;
+            
+            // [Fix] 서버 응답 타입에 따라 기본 확장자 결정
+            const isZip = response.data.type === 'application/zip';
+            const defaultExt = isZip ? '.zip' : '.xml';
+            let fileName = `Premiere_Seq_${clipId.substring(0,8)}${defaultExt}`;
+
+            // [Fix] 서버가 보낸 파일명이 있으면 최우선 사용 (CORS expose_headers 설정 필요)
             const contentDisposition = response.headers['content-disposition'];
             if (contentDisposition) {
                 const fileNameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-                if (fileNameMatch && fileNameMatch.length === 2) fileName = fileNameMatch[1];
+                if (fileNameMatch && fileNameMatch.length === 2) {
+                    fileName = fileNameMatch[1];
+                }
             }
+
+            const url = window.URL.createObjectURL(new Blob([response.data], { type: response.data.type }));
+            const link = document.createElement('a');
+            link.href = url;
             link.setAttribute('download', fileName);
             document.body.appendChild(link);
             link.click();
