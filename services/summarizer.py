@@ -431,17 +431,58 @@ class VideoSummarizer:
             raise e # retry 전파
         
     def _format_time(self, seconds: float) -> str:
-        """초(seconds)를 HH:MM:SS 형식의 문자열로 변환합니다.
-
-        Args:
-            seconds: 변환할 초 단위 시간.
-
-        Returns:
-            HH:MM:SS 형식의 시간 문자열.
-        """
+        """초(seconds)를 HH:MM:SS 형식의 문자열로 변환합니다."""
         m, s = divmod(int(seconds), 60)
         h, m = divmod(m, 60)
         return f"{h:02}:{m:02}:{s:02}"
+
+    def filter_highlights(self, chapters: list[dict], target_duration_sec: float = 600.0) -> list[dict]:
+        """
+        서사적 중요도와 에너지를 기반으로 타겟 시간 내의 하이라이트 구간을 선별합니다.
+        
+        Args:
+            chapters: 전체 분석된 챕터 리스트.
+            target_duration_sec: 목표 총 길이 (기본 10분).
+            
+        Returns:
+            선별된 하이라이트 챕터 리스트.
+        """
+        if not chapters: return []
+
+        # 1. 점수 계산: (서사 가중치 * 0.7) + (에너지 레벨/5 * 0.3)
+        scored_chapters = []
+        for chap in chapters:
+            n_weight = chap.get('narrative_weight', 0.5)
+            e_level = chap.get('energy_level', 3) / 5.0
+            score = (n_weight * 0.7) + (e_level * 0.3)
+            
+            # Payoff 구간은 가산점 부여
+            if chap.get('is_payoff'):
+                score += 0.2
+                
+            scored_chapters.append((score, chap))
+
+        # 2. 점수순 정렬
+        scored_chapters.sort(key=lambda x: x[0], reverse=True)
+
+        # 3. 시간 제한 내에서 선택
+        selected = []
+        current_total_sec = 0.0
+        
+        for score, chap in scored_chapters:
+            duration = chap['time']['end'] - chap['time']['start']
+            if current_total_sec + duration <= target_duration_sec:
+                selected.append(chap)
+                current_total_sec += duration
+            
+            if current_total_sec >= target_duration_sec:
+                break
+
+        # 4. 원본 시간 순서로 재정렬
+        selected.sort(key=lambda x: x['time']['start'])
+        
+        print(f"--- [Summarizer] Selected {len(selected)} highlights ({current_total_sec:.1f}s) ---")
+        return selected
 
 # --- [Module Test] ---
 if __name__ == "__main__":

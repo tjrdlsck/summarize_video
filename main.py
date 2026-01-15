@@ -499,14 +499,23 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
         )
         summary_result["chapters"] = refined_chapters
 
-        # 최종 저장 (Refined 버전으로 덮어쓰기)
+        # [Phase 4] 롱폼 하이라이트 추출 (10분 타겟)
+        highlights = summarizer.filter_highlights(refined_chapters, target_duration_sec=600.0)
+        summary_result["longform_highlights"] = highlights
+
+        # 최종 저장 (Highlights 정보 포함)
         output_path = os.path.join("static/results", f"{base_name}_summary.json")
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(summary_result, f, ensure_ascii=False, indent=2)
 
+        # 별도의 하이라이트 전용 파일로도 저장 (프리미어 연동 용이성)
+        highlight_path = os.path.join("static/results", f"{base_name}_highlights.json")
+        with open(highlight_path, 'w', encoding='utf-8') as f:
+            json.dump({"video_source": req.filename, "highlights": highlights}, f, ensure_ascii=False, indent=2)
+
         # 완료
         task_manager.complete_task(task_id, summary_result)
-        print(f"[{task_id}] Cinematic Summary Completed: {req.filename}")
+        print(f"[{task_id}] Cinematic Summary & Highlights Completed: {req.filename}")
 
     except TaskCancelledError:
         print(f"[{task_id}] Summary Task Cancelled.")

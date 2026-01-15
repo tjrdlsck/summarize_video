@@ -11,7 +11,7 @@ class PremiereExporter:
     영상 파일과 구간(Segment) 정보를 받아 Adobe Premiere Pro 호환 XML(FCP7 포맷)을 생성하는 클래스.
     [Feature] Stereo/Multi-channel Audio 지원.
     [Feature] 완벽한 Video-Audio Link (Clipindex, Groupindex, Masterclipid) 지원.
-    [Optimization] File Node 참조 최적화 (Reference mode).
+    [Feature] AI Marker 및 편집 지시문 자동 삽입 지원.
     """
     
     def __init__(self, output_dir="static/temp"):
@@ -85,33 +85,46 @@ class PremiereExporter:
     def _sec_to_frame(self, seconds, fps):
         return int(round(seconds * fps))
 
+    def _create_marker_xml(self, seg, fps):
+        """
+        클립 아이템 내부에 마커 정보를 생성합니다.
+        """
+        markers_xml = ""
+        # 1. 챕터 요약 마커
+        if seg.get('summary'):
+            markers_xml += f"""
+            <marker>
+                <name>[AI 요약] {seg.get('title', 'Highlight')}</name>
+                <comment>{seg['summary']}</comment>
+                <in>0</in>
+                <out>0</out>
+            </marker>"""
+        
+        # 2. 편집 가이드 마커 (중요)
+        if seg.get('edit_guide'):
+            markers_xml += f"""
+            <marker>
+                <name>✂️ 편집 지시문</name>
+                <comment>{seg['edit_guide']}</comment>
+                <in>0</in>
+                <out>0</out>
+            </marker>"""
+            
+        return markers_xml
+
     def _create_clip_item(self, idx, track_type, meta, video_name, 
                           file_id, master_clip_id, is_file_defined, relative_filename,
                           duration_frame, current_timeline_frame, in_frame, out_frame, 
-                          audio_source_channel=1, link_ids=None):
+                          audio_source_channel=1, link_ids=None, seg_data=None):
         """
         [Helper] 클립 아이템 생성.
-        - file_id: 모든 클립이 공유하는 파일 ID
-        - master_clip_id: 모든 클립이 공유하는 마스터 클립 ID
-        - is_file_defined: True면 <file> 내용을 전체 기록, False면 <file id="..."/> 참조만 기록
-        - link_ids: 링크 정보 리스트
         """
-        # 고유 ID 생성
         suffix = f"-{audio_source_channel}" if track_type == "audio" else ""
         clip_id = f"clipitem-{idx+1}-{track_type}{suffix}" 
         
-        # 1. 미디어 특성 (Media Characteristics)
-        # XML 구조상 <file> 내부에 media가 있지만, clipitem 직계 자식으로도 media 정보를 일부 가질 수 있음.
-        # test2.xml 패턴을 따름.
-        # 그러나 test2.xml은 clipitem 내부에 media 관련 태그를 크게 두지 않고 file 내부에 둠.
-        # 여기서는 최소한의 정보만 남기거나 생략 가능하지만, 안전을 위해 유지.
-        
-        # 2. 파일 노드 (File Node)
         if not is_file_defined:
-            # 이미 정의된 파일 참조
             file_node = f'<file id="{file_id}"/>'
         else:
-            # 최초 파일 정의 (Full Definition)
             encoded_filename = urllib.parse.quote(relative_filename)
             file_node = f"""
             <file id="{file_id}">
@@ -140,7 +153,6 @@ class PremiereExporter:
             </file>
             """
 
-        # 3. 소스 트랙 매핑
         sourcetrack = ""
         if track_type == "audio":
             sourcetrack = f"""
@@ -150,13 +162,10 @@ class PremiereExporter:
             </sourcetrack>
             """
 
-        # 4. 링크 (Links)
         links_xml = ""
         if link_ids:
             for link in link_ids:
-                # 오디오 링크인 경우 groupindex="1" 추가 (test2.xml 분석 결과)
                 group_attr = ' <groupindex>1</groupindex>' if link['type'] == 'audio' else ''
-                
                 links_xml += f"""
                 <link>
                     <linkclipref>{link['id']}</linkclipref>
@@ -166,7 +175,11 @@ class PremiereExporter:
                 </link>
                 """
 
-        # 마스터 클립 ID 추가
+        # 마커 추가 (비디오 트랙에만 표시)
+        markers_xml = ""
+        if track_type == "video" and seg_data:
+            markers_xml = self._create_marker_xml(seg_data, meta['fps'])
+
         master_clip_node = f"<masterclipid>{master_clip_id}</masterclipid>" if master_clip_id else ""
 
         return f"""
@@ -182,21 +195,19 @@ class PremiereExporter:
             <start>{current_timeline_frame}</start>
             <end>{current_timeline_frame + duration_frame}</end>
             <in>{in_frame}</in>
-            <out>{out_frame}</out>
+            <out>{out_frame} </out>
             {file_node}
             {sourcetrack}
             {links_xml}
+            {markers_xml}
           </clipitem>
         """
 
     def create_xml(self, video_path, segments, output_filename="export.xml", video_name=None):
         meta = self._get_video_info(video_path)
-        
         server_filename = os.path.basename(video_path)
         
         if video_name:
-            # 외부에서 이름이 주어진 경우 (예: 메타데이터의 video_title)
-            # 확장자가 없다면 원본 파일에서 가져옴
             base_name = video_name
             ext = os.path.splitext(server_filename)[1]
             if not base_name.lower().endswith(ext.lower()):
@@ -204,21 +215,15 @@ class PremiereExporter:
             else:
                 original_filename = base_name
         else:
-            # 외부 지정이 없을 경우 파일명에서 추론
-            # 1. 8자리 hex + _ 패턴 제거 시도
             if re.match(r'^[0-9a-fA-F]{8}_', server_filename):
-                guessed_name = server_filename[9:] # 8 chars + 1 underscore
+                guessed_name = server_filename[9:] 
             else:
                 guessed_name = server_filename
-                
-            # 2. 언더스코어를 공백으로 복원 (사용자가 가진 원본 파일과의 매칭 확률을 높임)
             name_part, ext_part = os.path.splitext(guessed_name)
             original_filename = name_part.replace('_', ' ') + ext_part
         
-        # 공백이 제거된 최종 결과물 확인
         original_filename = original_filename.strip()
 
-        # 공통 ID 생성
         video_uuid = str(uuid.uuid4())
         file_id = f"file-{video_uuid}"
         master_clip_id = f"masterclip-{video_uuid}"
@@ -227,7 +232,7 @@ class PremiereExporter:
         audio_tracks_items = [[] for _ in range(meta['channels'])]
         
         current_timeline_frame = 0 
-        file_defined_flag = False  # 파일을 XML에 한 번이라도 썼는지 체크
+        file_defined_flag = False  
         
         for idx, seg in enumerate(segments):
             start_sec = seg['start']
@@ -239,38 +244,17 @@ class PremiereExporter:
             
             if duration_frame <= 0: continue
 
-            # Clip Index: 트랙 내에서 몇 번째 클립인가? (1-based)
             clip_index = idx + 1
-
-            # --- ID 미리 생성 ---
             vid_id = f"clipitem-{idx+1}-video"
             aud_ids = []
             for ch in range(meta['channels']):
                 aud_ids.append(f"clipitem-{idx+1}-audio-{ch+1}")
 
-            # --- Link 정보 구성 (test2.xml 로직 적용) ---
-            # 모든 링크는 trackindex와 clipindex를 가져야 함.
             links = []
-            
-            # 1. Video Link info
-            links.append({
-                'id': vid_id, 
-                'type': 'video', 
-                'trackindex': 1, 
-                'clipindex': clip_index
-            })
-            
-            # 2. Audio Links info
+            links.append({'id': vid_id, 'type': 'video', 'trackindex': 1, 'clipindex': clip_index})
             for i, aid in enumerate(aud_ids):
-                links.append({
-                    'id': aid, 
-                    'type': 'audio', 
-                    'trackindex': i + 1, 
-                    'clipindex': clip_index
-                })
+                links.append({'id': aid, 'type': 'audio', 'trackindex': i + 1, 'clipindex': clip_index})
             
-            # --- 비디오 아이템 생성 ---
-            # 첫 번째 아이템(보통 비디오 첫 컷)에서 파일 정의를 수행
             is_file_def = not file_defined_flag
             if is_file_def: file_defined_flag = True
             
@@ -278,14 +262,11 @@ class PremiereExporter:
                 idx, "video", meta, original_filename, 
                 file_id, master_clip_id, is_file_def, original_filename,
                 duration_frame, current_timeline_frame, in_frame, out_frame,
-                link_ids=links
+                link_ids=links, seg_data=seg # 세그먼트 데이터 전달 (마커용)
             )
             video_track_items.append(v_item)
             
-            # --- 오디오 아이템 생성 ---
             for ch_idx in range(meta['channels']):
-                # 파일은 이미 비디오에서 정의되었으므로 False
-                # (만약 비디오 트랙이 없는 예외 상황이라면 여기서 정의해야 하겠지만, 보통 비디오는 존재함)
                 a_item = self._create_clip_item(
                     idx, "audio", meta, original_filename, 
                     file_id, master_clip_id, False, original_filename,
@@ -297,13 +278,12 @@ class PremiereExporter:
             
             current_timeline_frame += duration_frame
 
-        # XML 조립
         header = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<!DOCTYPE xmeml>',
             '<xmeml version="4">',
             '  <sequence>',
-            '    <name>AI_Shorts_Sequence</name>',
+            '    <name>AI_Longform_Sequence</name>',
             f'    <duration>{current_timeline_frame}</duration>',
             '    <rate>',
             f'      <timebase>{meta["timebase"]}</timebase>',
@@ -345,10 +325,9 @@ class PremiereExporter:
         ]
         
         final_xml_str = "\n".join(header + video_block + audio_block + footer)
-        
         output_path = os.path.join(self.output_dir, output_filename)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(final_xml_str)
             
-        print(f"--- [Exporter] XML Generated (Full Link Support): {output_path} ---")
+        print(f"--- [Exporter] XML Generated with Markers: {output_path} ---")
         return output_path
