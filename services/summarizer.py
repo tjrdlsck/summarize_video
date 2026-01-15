@@ -316,9 +316,10 @@ class VideoSummarizer:
         video_filename: str, 
         custom_title: str = None, 
         status_callback: callable = None,
-        mode: str = "sermon"
+        mode: str = "sermon",
+        audio_metadata: dict = None
     ) -> dict:
-        """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다. (Retry 적용)
+        """Gemini API의 JSON Mode를 사용하여 자막과 오디오 데이터를 통합 분석합니다.
 
         Args:
             segments: 분석된 자막 세그먼트 리스트.
@@ -326,6 +327,7 @@ class VideoSummarizer:
             custom_title: 사용자가 지정한 영상 제목 (선택 사항).
             status_callback: 진행 상태를 보고할 콜백 함수 (선택 사항).
             mode: 분석 모드 (sermon, humor 등)
+            audio_metadata: AudioAnalyst에서 분석된 에너지 및 피크 정보 (선택 사항).
 
         Returns:
             요약 결과, 챕터 리스트, 토큰 사용량 등이 포함된 결과 딕셔너리.
@@ -337,19 +339,31 @@ class VideoSummarizer:
         if total_lines == 0: return {"error": "Empty segments"}
 
         print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini ({mode.upper()} Mode) ---")
-        if status_callback: status_callback(f"Gemini가 내용을 분석 중 ({mode.upper()} 모드)...")
+        if status_callback: status_callback(f"Gemini가 자막과 오디오를 통합 분석 중 ({mode.upper()} 모드)...")
 
         tracker = UsageTracker()
         
-        # Prompt Factory를 통한 동적 프롬프트 생성
+        # 1. Prompt Factory를 통한 기초 프롬프트 생성
         system_instruction, response_schema, script_text = PromptFactory.create_summarize_prompt(segments, mode)
+
+        # 2. [Phase 2] 오디오 메타데이터 주입 (Hybrid Context)
+        audio_info_context = ""
+        if audio_metadata and audio_metadata.get("peaks"):
+            audio_info_context = "\n\n[Important Audio Events (Non-verbal)]:\n"
+            for peak in audio_metadata["peaks"]:
+                audio_info_context += f"- At {peak['start']:.1f}s: High Sound Energy (Potential Laughter/Reaction)\n"
+            
+            system_instruction += "\n\n**[Hybrid Analysis Task]**\n자막(Script)뿐만 아니라 제공된 '오디오 이벤트' 데이터를 함께 고려하세요. 자막이 없거나 평범하더라도 오디오 에너지가 높은 구간은 리액션이 큰 하이라이트일 가능성이 높으므로 챕터 구성 시 적극 반영하세요."
 
         try:
             client = genai.Client(api_key=self.api_key)
             
+            # 최종 프롬프트 구성 (스크립트 + 오디오 정보)
+            full_prompt = f"{system_instruction}\n\n[Script]:\n{script_text}{audio_info_context}"
+
             response = client.models.generate_content(
                 model=self._get_model("summarizer"),
-                contents=f"{system_instruction}\n\n[Script]:\n{script_text}",
+                contents=full_prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.2,
                     response_mime_type="application/json", 
