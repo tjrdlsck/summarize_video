@@ -133,6 +133,7 @@ async def update_settings(req: SettingsUpdateRequest):
 class SummaryRequest(BaseModel):
     filename: str
     custom_title: Optional[str] = None
+    mode: Optional[str] = "sermon" # [New] 분석 모드 (sermon, humor 등)
 
 class BlogGenerationRequest(BaseModel):
     filename: str
@@ -469,7 +470,8 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
                 segments, 
                 req.filename, 
                 custom_title=req.custom_title,
-                status_callback=summarizer_callback
+                status_callback=summarizer_callback,
+                mode=req.mode # [New] 모드 전달
             )
         )
         
