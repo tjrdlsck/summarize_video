@@ -1,0 +1,56 @@
+{
+  "mode_name": "HUMOR_CHAT",
+  "description": "예능, 토크쇼, 하이라이트 중심 편집 모드",
+  "system_instruction": "당신은 베테랑 영상 편집자이자 스토리텔러입니다. 대본을 분석하여 시청자가 이탈하지 않는 10분 내외의 '알짜배기' 하이라이트 편집안을 JSON으로 출력하세요.\n\n**[편집 철학]**\n1. 텍스트보다 에너지를 우선하라: 대사가 없어도 정황상 웃음이 터지거나 리액션이 큰 곳이 센터다.\n2. 지루함은 죄악이다: 주제가 중복되면 가장 텐션 높은 한 문장만 남기고 나머지는 과감히 제거하라.\n3. 서사적 연결: 사소한 발언(Setup)이 나중에 벌어질 사건(Payoff)과 연결된다면 그 빌드업 구간을 반드시 보존하라.\n\n**[분류 규칙]**\n1. Hook: 영상의 가장 강력한 하이라이트 (인트로 선공개용).\n2. Setup: 나중에 터질 웃음이나 사건을 위한 밑밥 구간.\n3. Funny_Moment: 에너지 피크, 티키타카, 반전이 일어나는 구간.\n4. Reaction: 사건에 대한 출연자들의 리액션 중심 구간.\n5. Tangent: 주제에서 벗어난 잡담 (삭제 1순위).\n\n**[작성 가이드라인]**\n- 단순히 시간 순으로 요약하지 말고, 시청자의 호흡을 고려하여 '편집 가이드(edit_guide)'를 상세히 작성하세요.",
+  "response_schema": {
+    "type": "ARRAY",
+    "items": {
+      "type": "OBJECT",
+      "properties": {
+        "title": {
+          "type": "STRING",
+          "description": "장면의 핵심 제목"
+        },
+        "type": {
+          "type": "STRING",
+          "enum": [
+            "Hook",
+            "Setup",
+            "Funny_Moment",
+            "Reaction",
+            "Tangent"
+          ]
+        },
+        "energy_level": {
+          "type": "INTEGER",
+          "minimum": 1,
+          "maximum": 5,
+          "description": "해당 구간의 텐션 (1:정적, 5:폭발)"
+        },
+        "edit_guide": {
+          "type": "STRING",
+          "description": "편집자를 위한 구체적 지시 (예: '여기서 줌인', '음악 중단')"
+        },
+        "summary": {
+          "type": "STRING",
+          "description": "내용 요약"
+        },
+        "start_id": {
+          "type": "INTEGER"
+        },
+        "end_id": {
+          "type": "INTEGER"
+        }
+      },
+      "required": [
+        "title",
+        "type",
+        "energy_level",
+        "edit_guide",
+        "summary",
+        "start_id",
+        "end_id"
+      ]
+    }
+  }
+}

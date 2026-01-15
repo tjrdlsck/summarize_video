@@ -87,6 +87,7 @@ class ChapterHealer:
         return healed
 
 from services.system_manager import ConfigManager
+from services.prompts import PromptFactory
 
 # --- [Main Class] Video Summarizer ---
 class VideoSummarizer:
@@ -102,29 +103,6 @@ class VideoSummarizer:
     def _get_model(self, task_type):
         """설정 매니저를 통해 실시간으로 모델명을 가져옵니다."""
         return ConfigManager.get_model(task_type)
-
-    def _create_prompt(self, segments: list[dict]) -> str:
-        """LLM에게 전달할 경량화된 스크립트 데이터를 생성합니다.
-
-        Args:
-            segments: 분석된 자막 세그먼트 리스트.
-
-        Returns:
-            ID와 텍스트가 결합된 문자열 형태의 스크립트 데이터.
-        """
-        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
-        script_text = "\n".join(lines)
-        
-        system_instruction = (
-            "당신은 영상 콘텐츠 분석가입니다. 대본(Script)을 정밀 분석하여 논리적인 '챕터(Chapter)'로 구분하세요.\n"
-            "반드시 아래 **Markdown 형식**으로만 출력해야 합니다.\n"
-            "## 챕터 제목\n"
-            "- 요약: (상세 서술)\n"
-            "- 구간: [시작ID - 종료ID]\n\n"
-            "조건 1: 영상의 처음(ID:1)부터 끝까지 빈틈없이 나누세요.\n"
-            "조건 2: 요약은 구체적인 행동과 상황을 포함하여 서술하세요."
-        )
-        return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
     def _create_blog_prompt(self, segments: list[dict]) -> str:
         """블로그 포스트 생성을 위한 프롬프트를 생성합니다.
@@ -337,7 +315,8 @@ class VideoSummarizer:
         segments: list[dict], 
         video_filename: str, 
         custom_title: str = None, 
-        status_callback: callable = None
+        status_callback: callable = None,
+        mode: str = "sermon"
     ) -> dict:
         """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다. (Retry 적용)
 
@@ -346,6 +325,7 @@ class VideoSummarizer:
             video_filename: 원본 영상 파일명.
             custom_title: 사용자가 지정한 영상 제목 (선택 사항).
             status_callback: 진행 상태를 보고할 콜백 함수 (선택 사항).
+            mode: 분석 모드 (sermon, humor 등)
 
         Returns:
             요약 결과, 챕터 리스트, 토큰 사용량 등이 포함된 결과 딕셔너리.
@@ -356,51 +336,13 @@ class VideoSummarizer:
         total_lines = len(segments)
         if total_lines == 0: return {"error": "Empty segments"}
 
-        print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini (JSON Mode) ---")
-        if status_callback: status_callback("Gemini가 내용을 정밀 분석 중 (JSON Mode)...")
+        print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini ({mode.upper()} Mode) ---")
+        if status_callback: status_callback(f"Gemini가 내용을 분석 중 ({mode.upper()} 모드)...")
 
         tracker = UsageTracker()
         
-        # 프롬프트 구성
-        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
-        script_text = "\n".join(lines)
-        
-        # JSON 스키마 정의
-        response_schema = {
-            "type": "ARRAY",
-            "items": {
-                "type": "OBJECT",
-                "properties": {
-                    "title": {"type": "STRING", "description": "내용을 직관적으로 알 수 있는 챕터 제목 (예: '예화: 탕자의 비유')"},
-                    "type": {
-                        "type": "STRING", 
-                        "enum": ["Intro_Icebreak", "Scripture", "Preaching_Main", "Illustration", "Application", "Announcement", "Prayer"],
-                        "description": "편집 작업을 위한 구간 성격 분류"
-                    },
-                    "summary": {"type": "STRING", "description": "편집자가 내용을 파악할 수 있는 핵심 내용 요약"},
-                    "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
-                    "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
-                },
-                "required": ["title", "type", "summary", "start_id", "end_id"]
-            }
-        }
-
-        system_instruction = (
-            "당신은 설교 영상 전문 미디어 팀장입니다. 제공된 대본을 분석하여 '1차 컷편집(Rough Cut)'을 위한 기획안을 JSON으로 출력하세요.\n"
-            "목표: 편집자가 불필요한 구간을 빠르게 제거하고, 핵심 구간(예화, 강조점)을 찾아낼 수 있도록 돕는 것.\n\n"
-            "**[분류 규칙]**\n"
-            "1. Intro_Icebreak: 설교 전 인사, 가벼운 대화, 날씨 이야기 등.\n"
-            "2. Scripture: 성경 본문 봉독 구간. (정확한 시작과 끝 지점 포착 필수)\n"
-            "3. Preaching_Main: 본문 해석, 교리 설명 등 설교의 메인 흐름.\n"
-            "4. Illustration: 시청자의 몰입을 돕는 예화, 에피소드, 유머 구간. (중요: 별도 챕터로 분리하여 하이라이트화)\n"
-            "5. Application: 성도들을 향한 삶의 권면, 핵심 메시지 선포, 결단.\n"
-            "6. Announcement: 교회 광고, 캠페인, 내빈 소개 등. (편집 시 삭제 1순위 후보)\n"
-            "7. Prayer: 마무리 기도, 축도.\n\n"
-            "**[작성 가이드라인]**\n"
-            "- 영상의 처음(ID:1)부터 끝까지 빈틈없이 나누세요.\n"
-            "- 'Announcement' 구간을 아주 정밀하게 분리하세요. 유튜브 업로드 시 이 구간을 잘라내는 것이 편집자의 주된 업무입니다.\n"
-            "- 모든 텍스트는 한국어로 작성하세요."
-        )
+        # Prompt Factory를 통한 동적 프롬프트 생성
+        system_instruction, response_schema, script_text = PromptFactory.create_summarize_prompt(segments, mode)
 
         try:
             client = genai.Client(api_key=self.api_key)
@@ -419,35 +361,43 @@ class VideoSummarizer:
             # JSON 파싱
             final_chapters = json.loads(response.text)
             
-            # ID -> Time 매핑 & 챕터 제목 정제
+            # ID -> Time 매핑 & 챕터 정보 정제
             mapped_result = []
             for chap in final_chapters:
-                s_idx = max(0, min(chap['start_id'] - 1, total_lines - 1))
-                e_idx = max(0, min(chap['end_id'] - 1, total_lines - 1))
+                s_id = chap.get('start_id', 1)
+                e_id = chap.get('end_id', total_lines)
+                
+                s_idx = max(0, min(s_id - 1, total_lines - 1))
+                e_idx = max(0, min(e_id - 1, total_lines - 1))
                 
                 start_time = segments[s_idx]['start']
                 end_time = segments[e_idx]['end']
                 
-                # 챕터 제목 내 불필요한 마크다운(**, __) 제거
-                clean_chapter_title = re.sub(r'\*\*|__', '', chap['title']).strip()
-                
-                mapped_result.append({
-                    "title": clean_chapter_title,
-                    "type": chap['type'],
-                    "summary": chap['summary'],
+                # 공통 필드 매핑
+                clean_chapter = {
+                    "title": re.sub(r'\*\*|__', '', chap.get('title', '제목 없음')).strip(),
+                    "summary": chap.get('summary', ''),
                     "time": {
                         "start": start_time,
                         "end": end_time,
                         "start_formatted": self._format_time(start_time),
                         "end_formatted": self._format_time(end_time)
                     }
-                })
+                }
+                
+                # 모드별 추가 필드 유지 (예: type, energy_level, edit_guide)
+                for key, value in chap.items():
+                    if key not in ['start_id', 'end_id', 'title', 'summary']:
+                        clean_chapter[key] = value
+                
+                mapped_result.append(clean_chapter)
 
             display_title = custom_title if custom_title and custom_title.strip() else video_filename
 
             result_data = {
                 "video_source": video_filename,
                 "video_title": display_title,
+                "mode": mode,
                 "total_chapters": len(mapped_result),
                 "token_usage": tracker.get_report(),
                 "chapters": mapped_result
