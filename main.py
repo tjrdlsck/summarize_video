@@ -30,6 +30,7 @@ from services.shorts_maker import ShortsMaker
 from services.premiere_exporter import PremiereExporter
 from services.system_manager import SystemManager, ConfigManager
 from services.subtitle_builder import SubtitleBuilder
+from services.audio_analyst import AudioAnalyst # [New] Phase 2
 
 
 # --- [Lifespan Manager] ---
@@ -98,6 +99,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 downloader = VideoDownloader(download_dir="static/videos")
 transcriber = VideoTranscriber(output_dir="static/results")
 summarizer = VideoSummarizer(output_dir="static/results")
+audio_analyst = AudioAnalyst(output_dir="static/temp") # [New] Phase 2
 refiner = TextRefiner() # [New] Refiner 인스턴스 추가
 task_manager = TaskManager()  # [New] Task Manager Instance
 clipper = VideoClipper(temp_dir="static/temp") # [New] 편집기 인스턴스 생성
@@ -441,13 +443,14 @@ async def run_transcription_pipeline(task_id: str, req: TranscriptionRequest):
 async def run_summary_pipeline(task_id: str, req: SummaryRequest):
     """
     [Background] 2단계: AI 챕터 분석 및 요약 파이프라인
-    - 기존 자막(Transcript) 데이터를 기반으로 Gemini 분석 수행.
+    - 오디오 분석(Phase 2)과 텍스트 분석을 결합하여 Gemini에 전달.
     """
     base_name = os.path.splitext(req.filename)[0]
     transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
+    video_path = os.path.join("static/videos", req.filename)
     
     try:
-        task_manager.update_progress(task_id, 0, "AI 분석 시작...")
+        task_manager.update_progress(task_id, 0, "분석 데이터 준비 중...")
         
         if not os.path.exists(transcript_path):
             raise FileNotFoundError("자막 데이터가 없습니다. 먼저 자막 생성을 진행해주세요.")
@@ -456,12 +459,18 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
             segments = json.load(f)
 
         loop = asyncio.get_running_loop()
+
+        # --- Phase 2: Audio Analysis (0~30%) ---
+        task_manager.update_progress(task_id, 5, "로컬 오디오 분석 중 (MacOS 가속)...")
+        audio_meta = await loop.run_in_executor(
+            None,
+            partial(audio_analyst.get_audio_metadata, video_path)
+        )
+        task_manager.update_progress(task_id, 30, "오디오 분석 완료. Gemini 분석 시작...")
         
-        # --- Summarization (0~100%) ---
-        task_manager.update_progress(task_id, 10, "Gemini가 내용을 분석하고 있습니다...")
-        
+        # --- Phase 3: Hybrid Summarization (30~100%) ---
         def summarizer_callback(msg):
-             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 50, msg)
+             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 60, msg)
 
         summary_result = await loop.run_in_executor(
             None,
@@ -471,7 +480,8 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
                 req.filename, 
                 custom_title=req.custom_title,
                 status_callback=summarizer_callback,
-                mode=req.mode # [New] 모드 전달
+                mode=req.mode,
+                audio_metadata=audio_meta # [New] 오디오 데이터 전달
             )
         )
         
@@ -480,7 +490,7 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
 
         # 완료
         task_manager.complete_task(task_id, summary_result)
-        print(f"[{task_id}] Summary Completed: {req.filename}")
+        print(f"[{task_id}] Hybrid Summary Completed: {req.filename}")
 
     except TaskCancelledError:
         print(f"[{task_id}] Summary Task Cancelled.")
