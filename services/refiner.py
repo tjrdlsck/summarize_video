@@ -22,10 +22,74 @@ class TextRefiner:
         """실시간 설정을 가져옵니다."""
         return ConfigManager.get_model("refiner")
 
-    def _format_time(self, seconds: float) -> str:
-        m, s = divmod(int(seconds), 60)
-        h, m = divmod(m, 60)
-        return f"{h:02}:{m:02}:{s:02}"
+    @retry(
+        stop=stop_after_attempt(2), 
+        wait=wait_exponential(multiplier=1, min=2, max=5),
+        reraise=True
+    )
+    def refine_edit_plan(self, chapters: list[dict], mode: str = "humor") -> list[dict]:
+        """
+        분석된 챕터들의 편집 지시문을 심리적 편집 기법에 따라 정교화합니다.
+        
+        Args:
+            chapters: VideoSummarizer가 생성한 챕터 리스트.
+            mode: 영상 모드 (humor, sermon 등)
+            
+        Returns:
+            정교화된 편집 가이드가 포함된 챕터 리스트.
+        """
+        if not self.client: return chapters
+
+        # 모드별 심리적 편집 규칙 정의
+        rules = {
+            "humor": "반전이 있는 웃음 뒤에는 0.8~1.2초의 정적(Reaction Gap)을 두어 시청자가 웃을 시간을 확보하세요. 티키타카가 빠른 구간은 점프컷으로 속도감을 높이세요.",
+            "sermon": "중요한 선포 뒤에는 1.5초 이상의 여백을 두어 메시지가 각인되도록 하세요. 컷은 부드러운 디졸브나 긴 호흡을 유지하세요.",
+            "vlog": "감성적인 구간은 화면을 천천히 줌인하고, 정보 전달 구간은 빠른 컷으로 전환하세요."
+        }
+        
+        current_rule = rules.get(mode.lower(), rules["humor"])
+        
+        # 챕터 데이터를 텍스트로 요약하여 LLM에게 전달
+        plan_summary = "\n".join([f"- Chapter: {c['title']} | Type: {c.get('type')} | Energy: {c.get('energy_level', 'N/A')} | Guide: {c.get('edit_guide', '')}" for c in chapters])
+
+        prompt = f"""
+        당신은 베테랑 영상 편집 실장입니다. 아래의 초안 편집 계획을 검토하여, 시청자의 심리를 자극하는 **'전문가용 편집 지시문'**으로 업그레이드하세요.
+
+        ### [전문가 편집 규칙: {mode.upper()}]
+        {current_rule}
+
+        ### [초안 편집 계획]
+        {plan_summary}
+
+        ### [요구사항]
+        1. 각 챕터의 'edit_guide'를 구체적인 행동 지침(Action Item)으로 변환하세요.
+        2. '0.5초 여백', '화면 확대', 'BGM 페이드아웃' 등 프리미어 편집자가 바로 이해할 수 있는 용어를 쓰세요.
+        3. 반드시 JSON 형식의 배열로만 응답하세요. 예: [{{"title": "...", "refined_guide": "..."}}, ...]
+        """
+
+        try:
+            response = self.client.models.generate_content(
+                model=self._get_model(),
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json"
+                )
+            )
+            
+            refined_guides = json.loads(response.text)
+            
+            # 기존 챕터 데이터에 정교화된 가이드 병합
+            guide_map = {item['title']: item['refined_guide'] for item in refined_guides}
+            for chap in chapters:
+                if chap['title'] in guide_map:
+                    chap['edit_guide'] = guide_map[chap['title']]
+            
+            return chapters
+
+        except Exception as e:
+            print(f"[Refiner] Edit plan refinement failed: {e}")
+            return chapters # 실패 시 원본 반환
 
     @retry(
         stop=stop_after_attempt(3), 
