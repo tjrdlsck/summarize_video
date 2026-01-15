@@ -444,6 +444,7 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
     """
     [Background] 2단계: AI 챕터 분석 및 요약 파이프라인
     - 오디오 분석(Phase 2)과 텍스트 분석을 결합하여 Gemini에 전달.
+    - [Phase 3] 심리적 컷 가이드(Cinematic Intelligence) 추가.
     """
     base_name = os.path.splitext(req.filename)[0]
     transcript_path = os.path.join("static/results", f"{base_name}_transcript.json")
@@ -460,17 +461,18 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
 
         loop = asyncio.get_running_loop()
 
-        # --- Phase 2: Audio Analysis (0~30%) ---
+        # --- Phase 2: Audio Analysis (0~20%) ---
         task_manager.update_progress(task_id, 5, "로컬 오디오 분석 중 (MacOS 가속)...")
         audio_meta = await loop.run_in_executor(
             None,
             partial(audio_analyst.get_audio_metadata, video_path)
         )
-        task_manager.update_progress(task_id, 30, "오디오 분석 완료. Gemini 분석 시작...")
         
-        # --- Phase 3: Hybrid Summarization (30~100%) ---
+        # --- Phase 3: Hybrid Summarization (20~80%) ---
+        task_manager.update_progress(task_id, 20, "Gemini가 서사를 분석하고 있습니다...")
+        
         def summarizer_callback(msg):
-             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 60, msg)
+             loop.call_soon_threadsafe(task_manager.update_progress, task_id, 50, msg)
 
         summary_result = await loop.run_in_executor(
             None,
@@ -481,16 +483,30 @@ async def run_summary_pipeline(task_id: str, req: SummaryRequest):
                 custom_title=req.custom_title,
                 status_callback=summarizer_callback,
                 mode=req.mode,
-                audio_metadata=audio_meta # [New] 오디오 데이터 전달
+                audio_metadata=audio_meta
             )
         )
         
         if summary_result.get("error"): raise Exception(summary_result["error"])
         if task_manager.is_cancelled(task_id): raise TaskCancelledError()
 
+        # --- Phase 3: Cinematic Refinement (80~100%) ---
+        task_manager.update_progress(task_id, 85, "전문 편집자의 지시문으로 정교화 중...")
+        
+        refined_chapters = await loop.run_in_executor(
+            None,
+            partial(refiner.refine_edit_plan, summary_result["chapters"], mode=req.mode)
+        )
+        summary_result["chapters"] = refined_chapters
+
+        # 최종 저장 (Refined 버전으로 덮어쓰기)
+        output_path = os.path.join("static/results", f"{base_name}_summary.json")
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(summary_result, f, ensure_ascii=False, indent=2)
+
         # 완료
         task_manager.complete_task(task_id, summary_result)
-        print(f"[{task_id}] Hybrid Summary Completed: {req.filename}")
+        print(f"[{task_id}] Cinematic Summary Completed: {req.filename}")
 
     except TaskCancelledError:
         print(f"[{task_id}] Summary Task Cancelled.")
