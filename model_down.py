@@ -1,30 +1,45 @@
-from huggingface_hub import snapshot_download
 import os
+import sys
+from huggingface_hub import snapshot_download
 from services.system_manager import ConfigManager
 
 def download_whisper_model():
     """
-    MLX Whisper 모델을 Hugging Face에서 명시적으로 다운로드하여
-    로컬 캐시에 저장합니다. (추론 실행 X)
-    [Updated] ConfigManager를 사용하여 현재 설정된 모델을 가져옵니다.
+    Whisper 모델을 다운로드하여 로컬 캐시에 저장합니다.
+    OS에 따라 다운로드 방식이 다릅니다.
+    - Mac: MLX 모델 (via huggingface_hub)
+    - Windows: Faster-Whisper 모델 (via faster_whisper)
     """
     
     # 설정에서 현재 Whisper 모델명 가져오기
-    REPO_ID = ConfigManager.get_model("whisper")
+    model_name = ConfigManager.get_model("whisper")
     
-    print(f"--- [Start] Downloading Model: {REPO_ID} ---")
+    print(f"--- [Start] Downloading Model: {model_name} ---")
     print("This may take a while depending on your internet connection...")
     
     try:
-        # snapshot_download: 리포지토리의 모든 파일(가중치, 설정파일 등)을 다운로드
-        local_dir = snapshot_download(
-            repo_id=REPO_ID,
-            repo_type="model",
-            # local_dir를 지정하지 않으면 기본 캐시 폴더(~/.cache/huggingface)에 저장됨 (권장)
-        )
-        
-        print(f"\n--- [Success] Model downloaded successfully! ---")
-        print(f"Location: {local_dir}")
+        if sys.platform != "darwin":
+            # [Windows/Linux] Faster-Whisper
+            print("[Info] Detected Windows/Linux environment. Using faster-whisper downloader.")
+            from faster_whisper import download_model
+            
+            # model_name이 'large-v3' 같은 단순 이름이면 알아서 systran/.. 에서 받음
+            # 이미 경로가 포함된 경우(systran/...)도 처리 가능
+            local_path = download_model(model_name)
+            
+            print(f"\n--- [Success] Model downloaded successfully! ---")
+            print(f"Location: {local_path}")
+            
+        else:
+            # [Mac] MLX Whisper (via HuggingFace Hub)
+            print("[Info] Detected macOS environment. Using huggingface_hub downloader.")
+            local_dir = snapshot_download(
+                repo_id=model_name,
+                repo_type="model",
+            )
+            print(f"\n--- [Success] Model downloaded successfully! ---")
+            print(f"Location: {local_dir}")
+
         print("이제 transcribe 함수를 호출하면 다운로드 없이 즉시 실행됩니다.")
         
     except Exception as e:
