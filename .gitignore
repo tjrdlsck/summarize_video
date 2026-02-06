@@ -24,3 +24,4 @@ debug_transcribe.py
 # User Custom Config
 data/config.json
 
+test_results/
