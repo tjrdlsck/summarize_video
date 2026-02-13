@@ -4,6 +4,7 @@ import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from services.content_profiles import get_content_profile
 from services.system_manager import ConfigManager
 
 class ShortsMaker:
@@ -67,7 +68,235 @@ class ShortsMaker:
 
         return segment_start
 
-    def make_shorts_candidates(self, transcripts, video_title, chapters=None, focus_topic=None):
+    def _clamp(self, value, lo=0.0, hi=1.0):
+        return max(lo, min(hi, value))
+
+    def _resolve_duration_bounds(self, min_duration, max_duration):
+        try:
+            min_d = float(min_duration)
+        except Exception:
+            min_d = 40.0
+
+        try:
+            max_d = float(max_duration)
+        except Exception:
+            max_d = 90.0
+
+        min_d = max(20.0, min_d)
+        max_d = min(180.0, max_d)
+        if max_d <= min_d:
+            max_d = min_d + 10.0
+        return min_d, max_d
+
+    def _attach_turn_ids(self, transcripts, speaker_mode="pseudo"):
+        if not transcripts:
+            return []
+
+        sorted_transcripts = sorted(transcripts, key=lambda x: float(x.get("start", 0.0)))
+        has_real_speaker = (
+            speaker_mode == "full"
+            and any(segment.get("speaker_id") is not None for segment in sorted_transcripts)
+        )
+
+        annotated = []
+        turn_id = 1
+        prev = None
+        for segment in sorted_transcripts:
+            current = dict(segment)
+            if prev is not None:
+                gap = max(0.0, float(current.get("start", 0.0)) - float(prev.get("end", 0.0)))
+                if speaker_mode == "none":
+                    pass
+                elif has_real_speaker:
+                    if current.get("speaker_id") != prev.get("speaker_id") or gap > 1.2:
+                        turn_id += 1
+                else:
+                    prev_text = str(prev.get("text", "")).strip()
+                    curr_text = str(current.get("text", "")).strip()
+                    short_exchange = len(prev_text) <= 14 or len(curr_text) <= 14
+                    punctuation_trigger = prev_text.endswith(("?", "？", "!", "！"))
+                    if gap > 1.1 or punctuation_trigger or (gap > 0.25 and short_exchange):
+                        turn_id += 1
+
+            current["pseudo_turn_id"] = 1 if speaker_mode == "none" else turn_id
+            annotated.append(current)
+            prev = current
+
+        return annotated
+
+    def _collect_candidate_transcripts(self, transcripts, ranges):
+        if not transcripts or not ranges:
+            return []
+
+        matched = []
+        for segment in transcripts:
+            s_start = float(segment.get("start", 0.0))
+            s_end = float(segment.get("end", 0.0))
+            for target in ranges:
+                r_start = float(target.get("start", 0.0))
+                r_end = float(target.get("end", 0.0))
+                if s_end > r_start and s_start < r_end:
+                    matched.append(segment)
+                    break
+        return sorted(matched, key=lambda x: float(x.get("start", 0.0)))
+
+    def _candidate_span(self, segments):
+        if not segments:
+            return 0.0, 0.0
+        return float(segments[0]["start"]), float(segments[-1]["end"])
+
+    def _span_overlap_ratio(self, a_segments, b_segments):
+        a_start, a_end = self._candidate_span(a_segments)
+        b_start, b_end = self._candidate_span(b_segments)
+
+        a_len = max(0.001, a_end - a_start)
+        overlap_start = max(a_start, b_start)
+        overlap_end = min(a_end, b_end)
+        overlap = max(0.0, overlap_end - overlap_start)
+        return overlap / a_len
+
+    def _estimate_funniness_score(self, title, reason, overlap_segments):
+        transcript_snippet = " ".join(str(seg.get("text", "")) for seg in overlap_segments[:16])
+        source = f"{title} {reason} {transcript_snippet}"
+        humor_keywords = [
+            "웃긴", "웃음", "폭소", "빵터", "터짐", "개웃", "드립", "농담", "미친", "레전드",
+            "당황", "실화", "미쳤", "대환장", "킹받", "헛웃", "ㅋㅋ", "ㅎㅎ",
+        ]
+        hit_count = sum(1 for keyword in humor_keywords if keyword in source)
+
+        score = 0.2 + min(0.55, hit_count * 0.08)
+        if "ㅋㅋ" in source or "ㅎㅎ" in source:
+            score += 0.15
+        if "!" in source or "?" in source:
+            score += 0.06
+        return self._clamp(score)
+
+    def _estimate_hook_score(self, overlap_segments, candidate_start):
+        if not overlap_segments:
+            return 0.0
+
+        first_window_end = candidate_start + 3.0
+        early_lines = [
+            str(seg.get("text", ""))
+            for seg in overlap_segments
+            if float(seg.get("start", 0.0)) < first_window_end
+        ]
+        early_text = " ".join(early_lines).strip()
+        if not early_text:
+            return 0.2
+
+        hook_keywords = ["뭐야", "진짜", "와", "헉", "잠깐", "레전드", "미쳤", "실화"]
+        score = 0.25
+        if any(keyword in early_text for keyword in hook_keywords):
+            score += 0.35
+        if "!" in early_text or "?" in early_text:
+            score += 0.2
+        if len(early_text) <= 40:
+            score += 0.1
+        if "ㅋㅋ" in early_text or "ㅎㅎ" in early_text:
+            score += 0.1
+        return self._clamp(score)
+
+    def _estimate_tikkitaka_score(self, overlap_segments, duration):
+        if len(overlap_segments) < 2:
+            return 0.0, 0
+
+        switches = 0
+        short_lines = 0
+        prev_turn = overlap_segments[0].get("pseudo_turn_id", 1)
+        prev_end = float(overlap_segments[0].get("end", 0.0))
+
+        for segment in overlap_segments:
+            if len(str(segment.get("text", "")).strip()) <= 14:
+                short_lines += 1
+
+        for segment in overlap_segments[1:]:
+            turn = segment.get("pseudo_turn_id", prev_turn)
+            gap = max(0.0, float(segment.get("start", 0.0)) - prev_end)
+            if turn != prev_turn and gap <= 2.0:
+                switches += 1
+            prev_turn = turn
+            prev_end = float(segment.get("end", prev_end))
+
+        density = switches / max(1.0, duration)
+        score = min(1.0, density * 3.5)
+        score += min(0.25, (short_lines / max(1, len(overlap_segments))) * 0.25)
+        if switches >= 3:
+            score += 0.15
+        return self._clamp(score), switches
+
+    def _estimate_context_score(self, validated_segments, overlap_segments, duration):
+        score = 0.55
+        if 40.0 <= duration <= 75.0:
+            score += 0.15
+        if len(validated_segments) == 1:
+            score += 0.15
+
+        if len(validated_segments) > 1:
+            gaps = []
+            for idx in range(1, len(validated_segments)):
+                prev_end = float(validated_segments[idx - 1]["end"])
+                cur_start = float(validated_segments[idx]["start"])
+                gaps.append(max(0.0, cur_start - prev_end))
+            if gaps:
+                if max(gaps) <= 1.5:
+                    score += 0.1
+                elif max(gaps) > 5.0:
+                    score -= 0.2
+
+        if overlap_segments:
+            ending_text = str(overlap_segments[-1].get("text", "")).strip()
+            if ending_text.endswith(("!", "?", ".", "다", "요")):
+                score += 0.1
+        else:
+            score -= 0.2
+
+        return self._clamp(score)
+
+    def _estimate_topic_match(self, focus_topic, title, reason, overlap_segments):
+        if not focus_topic or not focus_topic.strip():
+            return 0.5
+
+        source = f"{title} {reason} {' '.join(str(seg.get('text', '')) for seg in overlap_segments)}"
+        tokens = [token for token in re.split(r"\s+", focus_topic.strip()) if token]
+        if not tokens:
+            return 0.5
+
+        matches = sum(1 for token in tokens if token in source)
+        if matches == 0:
+            return 0.2
+        return self._clamp(0.2 + (0.8 * matches / len(tokens)))
+
+    def _build_weights(self, humor_weight):
+        try:
+            humor_int = int(humor_weight)
+        except Exception:
+            humor_int = 50
+
+        humor_ratio = self._clamp(humor_int / 100.0, 0.0, 0.8)
+        remaining = 1.0 - humor_ratio
+        return {
+            "funniness": humor_ratio,
+            "tikkitaka": remaining * 0.4,
+            "hook": remaining * 0.3,
+            "context": remaining * 0.2,
+            "topic": remaining * 0.1,
+        }
+
+    def make_shorts_candidates(
+        self,
+        transcripts,
+        video_title,
+        chapters=None,
+        focus_topic=None,
+        content_type="sermon",
+        style="funny",
+        min_duration=40.0,
+        max_duration=90.0,
+        humor_weight=50,
+        keep_original_tone=True,
+        speaker_mode="pseudo",
+    ):
         """
         [Advanced] 챕터 메타데이터와 사용자 주제(Topic)를 활용하여 최적의 숏츠 후보를 생성합니다.
         
@@ -81,10 +310,27 @@ class ShortsMaker:
             print("[ShortsMaker] Error: API Key missing")
             return []
 
+        profile = get_content_profile(content_type)
+        min_duration, max_duration = self._resolve_duration_bounds(min_duration, max_duration)
+
+        if style == "balanced":
+            try:
+                humor_weight = min(int(humor_weight), 35)
+            except Exception:
+                humor_weight = 35
+        else:
+            try:
+                humor_weight = int(humor_weight)
+            except Exception:
+                humor_weight = 50
+
+        weights = self._build_weights(humor_weight)
+        annotated_transcripts = self._attach_turn_ids(transcripts, speaker_mode=speaker_mode)
+
         # 1. 챕터 기반 데이터 필터링 (Whitelist 방식)
         filtered_script = ""
         # 숏츠로 쓰기에 적합한 챕터 타입
-        TARGET_TYPES = ["Illustration", "Preaching_Main", "Application"]
+        TARGET_TYPES = profile.shorts_target_types
         
         if chapters:
             print(f"[ShortsMaker] Filtering chapters... (Target: {TARGET_TYPES})")
@@ -153,16 +399,17 @@ class ShortsMaker:
             }
         }
 
-        system_instruction = (
-            "당신은 수백만 조회수를 기록하는 **유튜브 쇼츠 전문 PD**입니다.\n"
-            "제공된 설교 대본(Script)에서 시청자의 이목을 사로잡을 수 있는 '알짜배기' 구간을 발굴하여 기획안을 작성하세요.\n\n"
-            "**[편집 원칙]**\n"
-            "1. **Viral Selection**: 지루한 서론은 버리고, **'Hook(도입)-Body(전개)-Climax(결말)'**가 확실한 구간을 선택하세요.\n"
-            "2. **Time Constraint**: 길이는 **최소 40초 ~ 최대 120초(2분)**로 제한합니다. 문맥이 끊기지 않고 완결성을 갖추는 것이 60초 제한보다 더 중요합니다.\n"
-            "3. **Contextual Integrity**: 문장이 중간에 잘리거나, 앞뒤 맥락 없이 대명사(그, 저기 등)로 시작하지 않도록 주의하세요.\n"
-            "4. **Priority**: '예화(Illustration)'나 '강렬한 메시지(Application)' 위주로 선정하세요. (광고나 성경 봉독은 절대 금지)\n"
-            f"{user_intent_guide}\n"
+        tone_guide = (
+            "원문 말투/감탄/밈을 유지하세요."
+            if keep_original_tone
+            else "욕설/비속어는 과도하지 않게 완화하세요."
         )
+        runtime_rules = (
+            f"- 길이는 반드시 {int(min_duration)}초~{int(max_duration)}초 사이로 맞추세요.\n"
+            f"- 웃긴 장면 우선순위를 {int(humor_weight)}%로 두고 후보를 제안하세요.\n"
+            f"- {tone_guide}"
+        )
+        system_instruction = f"{profile.shorts_system_instruction}\n{runtime_rules}\n{user_intent_guide}\n"
 
         prompt = f"{system_instruction}\n\n[Selected Script Data]:\n{filtered_script}"
 
@@ -178,10 +425,8 @@ class ShortsMaker:
                     response_schema=candidates_schema
                 )
             )
-            
             candidates = json.loads(response.text)
-            valid_candidates = []
-            MAX_DURATION = 130.0 # 여유 있게 130초
+            scored_candidates = []
 
             for item in candidates:
                 if not item.get('segments'):
@@ -199,8 +444,8 @@ class ShortsMaker:
                         continue
 
                     seg_duration = e - s
-                    if current_total_duration + seg_duration > MAX_DURATION:
-                        remaining = MAX_DURATION - current_total_duration
+                    if current_total_duration + seg_duration > max_duration:
+                        remaining = max_duration - current_total_duration
                         if remaining > 1.0:
                             validated_segments.append({"start": s, "end": s + remaining})
                             current_total_duration += remaining
@@ -209,37 +454,72 @@ class ShortsMaker:
                         validated_segments.append({"start": s, "end": e})
                         current_total_duration += seg_duration
 
-                # 40초 이상 120초 이하 조건 체크 (약간의 오차 허용)
-                if validated_segments and current_total_duration >= 35.0:
-                    item['segments'] = validated_segments
-                    item['total_duration'] = current_total_duration
-                    
-                    # 중복 필터링 (Overlap Filtering)
-                    is_duplicate = False
-                    for existing in valid_candidates:
-                        # 교집합 계산 (첫 번째 세그먼트 기준)
-                        # *주의: 멀티 컷일 경우 전체 범위를 단순 비교하기 어려우나, 
-                        # 보통 전체 범위(Total Span)를 기준으로 판단
-                        
-                        my_start = validated_segments[0]['start']
-                        my_end = validated_segments[-1]['end']
-                        ex_start = existing['segments'][0]['start']
-                        ex_end = existing['segments'][-1]['end']
-                        
-                        overlap_start = max(my_start, ex_start)
-                        overlap_end = min(my_end, ex_end)
-                        overlap_len = max(0, overlap_end - overlap_start)
-                        
-                        # 기존 구간 대비 50% 이상 겹치면 중복
-                        if overlap_len > (existing['total_duration'] * 0.5):
-                            is_duplicate = True
-                            break
-                    
-                    if not is_duplicate:
-                        valid_candidates.append(item)
+                if not validated_segments:
+                    continue
 
-            print(f"[ShortsMaker] Generated {len(valid_candidates)} candidates.")
-            return valid_candidates
+                validated_segments = sorted(validated_segments, key=lambda x: x["start"])
+                if current_total_duration < min_duration:
+                    continue
+
+                overlap_segments = self._collect_candidate_transcripts(annotated_transcripts, validated_segments)
+                funniness = self._estimate_funniness_score(
+                    item.get("title", ""),
+                    item.get("reason", ""),
+                    overlap_segments,
+                )
+                tikkitaka, turn_switch_count = self._estimate_tikkitaka_score(overlap_segments, current_total_duration)
+                hook = self._estimate_hook_score(overlap_segments, validated_segments[0]["start"])
+                context = self._estimate_context_score(validated_segments, overlap_segments, current_total_duration)
+                topic = self._estimate_topic_match(focus_topic, item.get("title", ""), item.get("reason", ""), overlap_segments)
+
+                score_base = (
+                    (weights["funniness"] * funniness)
+                    + (weights["tikkitaka"] * tikkitaka)
+                    + (weights["hook"] * hook)
+                    + (weights["context"] * context)
+                    + (weights["topic"] * topic)
+                )
+
+                item["segments"] = validated_segments
+                item["total_duration"] = round(current_total_duration, 3)
+                item["score_base"] = round(score_base, 3)
+                item["score_breakdown"] = {
+                    "funniness": round(funniness, 3),
+                    "tikkitaka": round(tikkitaka, 3),
+                    "hook": round(hook, 3),
+                    "context": round(context, 3),
+                    "topic_match": round(topic, 3),
+                }
+                item["diagnostics"] = {
+                    "duration_sec": round(current_total_duration, 3),
+                    "turn_switch_count": int(turn_switch_count),
+                    "speaker_mode": speaker_mode,
+                }
+                scored_candidates.append(item)
+
+            scored_candidates.sort(key=lambda x: x.get("score_base", 0.0), reverse=True)
+
+            selected = []
+            for item in scored_candidates:
+                overlap_penalty = 0.0
+                for existing in selected:
+                    overlap_penalty = max(
+                        overlap_penalty,
+                        self._span_overlap_ratio(item["segments"], existing["segments"]),
+                    )
+
+                final_score = self._clamp(float(item.get("score_base", 0.0)) - (0.2 * overlap_penalty))
+                item["score_breakdown"]["overlap_penalty"] = round(overlap_penalty, 3)
+                item["score_total"] = round(final_score, 3)
+
+                if overlap_penalty >= 0.65:
+                    continue
+
+                selected.append(item)
+
+            selected.sort(key=lambda x: x.get("score_total", 0.0), reverse=True)
+            print(f"[ShortsMaker] Generated {len(selected)} candidates.")
+            return selected
 
         except Exception as e:
             print(f"[ShortsMaker Error] {e}")

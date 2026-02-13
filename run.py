@@ -11,8 +11,11 @@ def run_server():
     python_exe = sys.executable
     server_script = "main.py"
     
-    # Exit code 5 will be our signal for "Update and Restart"
+    # Exit code signals:
+    # 5 -> Update and Restart
+    # 6 -> Restart only
     UPDATE_SIGNAL = 5
+    RESTART_SIGNAL = 6
     
     while True:
         print(f"\n--- [Guardian] Starting Server Process ({server_script}) ---")
@@ -60,6 +63,11 @@ def run_server():
                 time.sleep(5)
             
             # Restart the loop
+            continue
+
+        elif exit_code == RESTART_SIGNAL:
+            print("\n--- [Guardian] Restart-only signal received. Restarting server... ---")
+            time.sleep(2) # Grace period for port release
             continue
             
         elif exit_code == 0:

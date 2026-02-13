@@ -11,6 +11,7 @@ import time
 import multiprocessing
 import sys
 import gc # [Add] 가비지 컬렉션을 위해 추가
+from services.content_profiles import get_content_profile
 from services.system_manager import ConfigManager
 
 class TaskCancelledError(Exception):
@@ -60,7 +61,7 @@ class WhisperProgressHook:
     def flush(self):
         self.terminal.flush()
 
-def run_whisper_worker(wav_path, model_path, result_queue, total_duration):
+def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt):
     """
     [Worker Process] 별도 프로세스에서 실행되는 Whisper 추론 함수입니다.
     stdout을 캡처하여 진행률을 실시간으로 보고합니다.
@@ -82,7 +83,7 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration):
             word_timestamps=True,
             condition_on_previous_text=False,
             temperature=(0.0, 0.2, 0.4),
-            initial_prompt="이 영상은 한국 교회의 기독교 목사님 설교 영상입니다. 성경 말씀, 기도, 하나님, 예수님, 은혜, 아멘, 할렐루야 등의 기독교 용어가 포함되어 있습니다."
+            initial_prompt=initial_prompt,
         )
         
         # stdout 복구
@@ -373,11 +374,19 @@ class VideoTranscriber:
                 raise TaskCancelledError("User cancelled the task.")
 
     # [Modify] 시그니처 변경: task_manager와 task_id를 선택적 인자로 받음
-    def transcribe(self, video_path, progress_callback=None, task_manager=None, task_id=None):
+    def transcribe(
+        self,
+        video_path,
+        progress_callback=None,
+        task_manager=None,
+        task_id=None,
+        content_type: str = "sermon",
+    ):
         """
         [Main Pipeline] 프로세스 격리 + 정밀 진행률 추적이 적용된 Transcribe 메서드
         """
         print(f"--- [Transcriber] Start processing: {video_path} ---")
+        profile = get_content_profile(content_type)
         
         self._check_cancel(task_manager, task_id)
         
@@ -410,7 +419,7 @@ class VideoTranscriber:
             # [New] total_duration을 인자로 전달
             worker_process = multiprocessing.Process(
                 target=run_whisper_worker,
-                args=(wav_path, self._get_model(), queue, total_duration)
+                args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt),
             )
             worker_process.start()
             
