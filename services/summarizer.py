@@ -1,10 +1,12 @@
 import os
 import re
 import json
+from typing import Any
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential # [Add] 재시도 로직 추가
+from services.content_profiles import get_content_profile
 
 # --- [Helper Class] Resource Usage Tracker ---
 class UsageTracker:
@@ -98,10 +100,341 @@ class VideoSummarizer:
         self.api_key = os.getenv("GOOGLE_API_KEY")
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
+        # 요약용 coarse 압축 전략 (입력 토큰 절감용)
+        self.coarse_enabled = os.getenv("SUMMARY_COARSE_ENABLED", "1") == "1"
+        self.coarse_trigger_lines = int(os.getenv("SUMMARY_COARSE_TRIGGER_LINES", "320"))
+        self.coarse_target_seconds = float(os.getenv("SUMMARY_COARSE_TARGET_SECONDS", "14"))
+        self.coarse_min_seconds = float(os.getenv("SUMMARY_COARSE_MIN_SECONDS", "9"))
+        self.coarse_max_seconds = float(os.getenv("SUMMARY_COARSE_MAX_SECONDS", "20"))
+        self.boundary_refine_enabled = os.getenv("SUMMARY_BOUNDARY_REFINE_ENABLED", "1") == "1"
+        self.boundary_refine_max = int(os.getenv("SUMMARY_BOUNDARY_REFINE_MAX", "6"))
+        self.boundary_refine_context_span = int(os.getenv("SUMMARY_BOUNDARY_REFINE_CONTEXT_SPAN", "12"))
+        self.boundary_refine_min_score = int(os.getenv("SUMMARY_BOUNDARY_REFINE_MIN_SCORE", "2"))
 
     def _get_model(self, task_type):
         """설정 매니저를 통해 실시간으로 모델명을 가져옵니다."""
         return ConfigManager.get_model(task_type)
+
+    def _build_coarse_segments(self, segments: list[dict]) -> list[dict]:
+        """원본 세그먼트를 요약용 coarse 세그먼트로 병합합니다."""
+        if not segments:
+            return []
+
+        sorted_segments = sorted(segments, key=lambda x: int(x.get("id", 0)))
+        coarse_segments = []
+        buffer = []
+        coarse_id = 1
+
+        def flush_buffer():
+            nonlocal coarse_id
+            if not buffer:
+                return
+            merged_text = " ".join(str(seg.get("text", "")).strip() for seg in buffer).strip()
+            if not merged_text:
+                merged_text = "(무음)"
+            coarse_segments.append(
+                {
+                    "id": coarse_id,
+                    "start": float(buffer[0]["start"]),
+                    "end": float(buffer[-1]["end"]),
+                    "text": merged_text,
+                    "source_start_id": int(buffer[0]["id"]),
+                    "source_end_id": int(buffer[-1]["id"]),
+                }
+            )
+            coarse_id += 1
+            buffer.clear()
+
+        for index, seg in enumerate(sorted_segments):
+            buffer.append(seg)
+
+            current_duration = float(buffer[-1]["end"]) - float(buffer[0]["start"])
+            seg_text = str(seg.get("text", "")).strip()
+            next_seg = sorted_segments[index + 1] if index + 1 < len(sorted_segments) else None
+            gap_to_next = 0.0
+            if next_seg:
+                gap_to_next = max(0.0, float(next_seg["start"]) - float(seg["end"]))
+
+            end_of_sentence = seg_text.endswith((".", "!", "?", "다", "요"))
+            should_flush = False
+
+            if current_duration >= self.coarse_max_seconds:
+                should_flush = True
+            elif current_duration >= self.coarse_target_seconds and (end_of_sentence or gap_to_next >= 1.2):
+                should_flush = True
+            elif current_duration >= self.coarse_min_seconds and gap_to_next >= 2.0:
+                should_flush = True
+            elif not next_seg:
+                should_flush = True
+
+            if should_flush:
+                flush_buffer()
+
+        flush_buffer()
+        return coarse_segments
+
+    def _normalize_chapter_ranges(self, chapters: list[dict], total_lines: int) -> list[dict]:
+        """챕터 범위를 1..total_lines에서 빈틈 없이 정규화합니다."""
+        if total_lines <= 0:
+            return []
+        if not chapters:
+            return [
+                {
+                    "title": "전체 요약",
+                    "type": "Preaching_Main",
+                    "summary": "자동 생성 챕터가 없어 전체를 하나의 구간으로 설정했습니다.",
+                    "start_id": 1,
+                    "end_id": total_lines,
+                }
+            ]
+
+        sorted_chapters = sorted(chapters, key=lambda x: int(x.get("start_id", 1)))
+        normalized = []
+        current_start = 1
+
+        for index, chapter in enumerate(sorted_chapters):
+            raw_end = int(chapter.get("end_id", current_start))
+            if index < len(sorted_chapters) - 1:
+                next_start = int(sorted_chapters[index + 1].get("start_id", raw_end + 1))
+                final_end = min(raw_end, next_start - 1)
+            else:
+                final_end = raw_end
+
+            if final_end < current_start:
+                final_end = current_start
+            final_end = min(final_end, total_lines)
+
+            normalized.append(
+                {
+                    "title": str(chapter.get("title", "")).strip() or f"챕터 {index + 1}",
+                    "type": str(chapter.get("type", "")).strip() or "Preaching_Main",
+                    "summary": str(chapter.get("summary", "")).strip() or "요약 정보 없음",
+                    "start_id": current_start,
+                    "end_id": final_end,
+                }
+            )
+
+            current_start = final_end + 1
+            if current_start > total_lines:
+                break
+
+        if normalized:
+            normalized[-1]["end_id"] = total_lines
+
+        return normalized
+
+    def _map_coarse_chapters_to_original(self, coarse_chapters: list[dict], coarse_segments: list[dict], total_lines: int) -> list[dict]:
+        """coarse ID 기반 챕터를 원본 세그먼트 ID 기준으로 복원합니다."""
+        if not coarse_chapters or not coarse_segments:
+            return []
+
+        max_coarse_id = len(coarse_segments)
+        mapped = []
+        for chapter in coarse_chapters:
+            s_coarse = max(1, min(int(chapter["start_id"]), max_coarse_id))
+            e_coarse = max(1, min(int(chapter["end_id"]), max_coarse_id))
+            if e_coarse < s_coarse:
+                e_coarse = s_coarse
+
+            left = coarse_segments[s_coarse - 1]
+            right = coarse_segments[e_coarse - 1]
+            mapped.append(
+                {
+                    "title": chapter["title"],
+                    "type": chapter["type"],
+                    "summary": chapter["summary"],
+                    "start_id": int(left["source_start_id"]),
+                    "end_id": int(right["source_end_id"]),
+                }
+            )
+
+        return self._normalize_chapter_ranges(mapped, total_lines)
+
+    def _is_conjunction_start(self, text: str) -> bool:
+        if not text:
+            return False
+        stripped = text.strip()
+        if not stripped:
+            return False
+        return bool(re.match(r"^(그리고|근데|그래서|하지만|그런데|또|또한|왜냐하면|즉)\b", stripped))
+
+    def _chapter_duration(self, chapter: dict, segments: list[dict]) -> float:
+        s_idx = max(0, min(int(chapter["start_id"]) - 1, len(segments) - 1))
+        e_idx = max(0, min(int(chapter["end_id"]) - 1, len(segments) - 1))
+        return max(0.0, float(segments[e_idx]["end"]) - float(segments[s_idx]["start"]))
+
+    def _find_low_confidence_boundaries(self, chapters: list[dict], segments: list[dict]) -> list[dict]:
+        """애매한 경계를 찾아 선택적 정밀화 후보를 만듭니다."""
+        if len(chapters) < 2:
+            return []
+
+        picked = []
+        for index in range(len(chapters) - 1):
+            current = chapters[index]
+            nxt = chapters[index + 1]
+            score = 0
+
+            current_duration = self._chapter_duration(current, segments)
+            next_duration = self._chapter_duration(nxt, segments)
+            if current_duration < 45.0 or next_duration < 45.0:
+                score += 1
+            if current.get("type") == nxt.get("type"):
+                score += 1
+
+            boundary_end_id = max(1, min(int(current["end_id"]), len(segments)))
+            boundary_start_id = max(1, min(int(nxt["start_id"]), len(segments)))
+            prev_text = str(segments[boundary_end_id - 1].get("text", "")).strip()
+            next_text = str(segments[boundary_start_id - 1].get("text", "")).strip()
+            if not prev_text.endswith((".", "!", "?", "다", "요")):
+                score += 1
+            if self._is_conjunction_start(next_text):
+                score += 1
+
+            if score < self.boundary_refine_min_score:
+                continue
+
+            left_limit = max(int(current["start_id"]), boundary_end_id - self.boundary_refine_context_span)
+            right_limit = min(int(nxt["end_id"]) - 1, boundary_start_id + self.boundary_refine_context_span - 1)
+            if right_limit <= left_limit:
+                continue
+
+            picked.append(
+                {
+                    "boundary_index": index,
+                    "score": score,
+                    "current_end_id": boundary_end_id,
+                    "min_end_id": left_limit,
+                    "max_end_id": right_limit,
+                }
+            )
+
+        picked.sort(key=lambda x: x["score"], reverse=True)
+
+        # 인접 경계가 동시에 바뀌면 충돌 가능성이 커서 하나만 선택
+        selected = []
+        for item in picked:
+            if any(abs(item["boundary_index"] - existing["boundary_index"]) <= 1 for existing in selected):
+                continue
+            selected.append(item)
+            if len(selected) >= self.boundary_refine_max:
+                break
+
+        selected.sort(key=lambda x: x["boundary_index"])
+        return selected
+
+    def _run_boundary_refinement(
+        self,
+        chapters: list[dict],
+        segments: list[dict],
+        profile,
+        tracker: UsageTracker,
+        status_callback: callable = None,
+    ) -> tuple[list[dict], int]:
+        """저신뢰 경계를 단일 추가 호출로 보정합니다."""
+        if not self.boundary_refine_enabled:
+            return chapters, 0
+
+        candidates = self._find_low_confidence_boundaries(chapters, segments)
+        if not candidates:
+            return chapters, 0
+
+        if status_callback:
+            status_callback("경계가 애매한 구간을 선택적으로 보정 중...")
+
+        boundary_payload = []
+        for candidate in candidates:
+            idx = candidate["boundary_index"]
+            left_ch = chapters[idx]
+            right_ch = chapters[idx + 1]
+            min_id = candidate["min_end_id"]
+            max_id = candidate["max_end_id"]
+            context_lines = []
+            for seg_id in range(min_id, max_id + 2):
+                if 1 <= seg_id <= len(segments):
+                    context_lines.append(f"{seg_id} | {segments[seg_id - 1]['text']}")
+            boundary_payload.append(
+                {
+                    "boundary_index": idx,
+                    "current_end_id": candidate["current_end_id"],
+                    "allowed_min_end_id": min_id,
+                    "allowed_max_end_id": max_id,
+                    "left_chapter_title": left_ch.get("title", ""),
+                    "left_chapter_type": left_ch.get("type", ""),
+                    "right_chapter_title": right_ch.get("title", ""),
+                    "right_chapter_type": right_ch.get("type", ""),
+                    "context_lines": context_lines,
+                }
+            )
+
+        refine_schema = {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "boundary_index": {"type": "INTEGER"},
+                    "new_end_id": {"type": "INTEGER"},
+                },
+                "required": ["boundary_index", "new_end_id"],
+            },
+        }
+
+        prompt = (
+            "다음은 영상 챕터 경계 보정 요청입니다.\n"
+            "각 항목에 대해 문맥이 자연스럽게 이어지도록 boundary를 조정하세요.\n"
+            "반드시 allowed_min_end_id~allowed_max_end_id 범위 내에서만 new_end_id를 선택하세요.\n"
+            "출력은 JSON 배열만 반환하세요.\n\n"
+            f"[분류 타입 참고]: {profile.summary_type_enum}\n"
+            f"[경계 후보 데이터]:\n{json.dumps(boundary_payload, ensure_ascii=False)}"
+        )
+
+        try:
+            client = genai.Client(api_key=self.api_key)
+            response = client.models.generate_content(
+                model=self._get_model("planner"),
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                    response_schema=refine_schema,
+                ),
+            )
+            tracker.update(response)
+            suggestions = json.loads(response.text)
+            if not isinstance(suggestions, list):
+                return chapters, 0
+        except Exception:
+            return chapters, 0
+
+        suggestion_map: dict[int, int] = {}
+        for item in suggestions:
+            idx = int(item.get("boundary_index", -1))
+            if idx < 0 or idx >= len(chapters) - 1:
+                continue
+
+            candidate = next((c for c in candidates if c["boundary_index"] == idx), None)
+            if not candidate:
+                continue
+
+            raw_end = int(item.get("new_end_id", candidate["current_end_id"]))
+            clamped_end = max(candidate["min_end_id"], min(raw_end, candidate["max_end_id"]))
+            suggestion_map[idx] = clamped_end
+
+        if not suggestion_map:
+            return chapters, 0
+
+        patched = [dict(chapter) for chapter in chapters]
+        applied = 0
+        for idx in sorted(suggestion_map.keys()):
+            new_end = suggestion_map[idx]
+            if new_end == int(patched[idx]["end_id"]):
+                continue
+
+            patched[idx]["end_id"] = new_end
+            patched[idx + 1]["start_id"] = new_end + 1
+            applied += 1
+
+        healed = self._normalize_chapter_ranges(patched, len(segments))
+        return healed, applied
 
     def _create_prompt(self, segments: list[dict]) -> str:
         """LLM에게 전달할 경량화된 스크립트 데이터를 생성합니다.
@@ -337,7 +670,8 @@ class VideoSummarizer:
         segments: list[dict], 
         video_filename: str, 
         custom_title: str = None, 
-        status_callback: callable = None
+        status_callback: callable = None,
+        content_type: str = "sermon",
     ) -> dict:
         """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다. (Retry 적용)
 
@@ -359,10 +693,32 @@ class VideoSummarizer:
         print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini (JSON Mode) ---")
         if status_callback: status_callback("Gemini가 내용을 정밀 분석 중 (JSON Mode)...")
 
+        profile = get_content_profile(content_type)
         tracker = UsageTracker()
-        
-        # 프롬프트 구성
-        lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
+
+        use_coarse = self.coarse_enabled and total_lines >= self.coarse_trigger_lines
+        analysis_segments: list[dict[str, Any]] = segments
+        coarse_segments: list[dict[str, Any]] = []
+        compression_meta = {
+            "mode": "direct",
+            "original_segments": total_lines,
+            "analysis_segments": total_lines,
+            "compression_ratio": 1.0,
+        }
+
+        if use_coarse:
+            coarse_segments = self._build_coarse_segments(segments)
+            if len(coarse_segments) >= 2:
+                analysis_segments = coarse_segments
+                compression_meta = {
+                    "mode": "coarse",
+                    "original_segments": total_lines,
+                    "analysis_segments": len(coarse_segments),
+                    "compression_ratio": round(total_lines / max(1, len(coarse_segments)), 3),
+                }
+
+        # 프롬프트 구성 (direct 또는 coarse)
+        lines = [f"{seg['id']} | {seg['text']}" for seg in analysis_segments]
         script_text = "\n".join(lines)
         
         # JSON 스키마 정의
@@ -374,7 +730,7 @@ class VideoSummarizer:
                     "title": {"type": "STRING", "description": "내용을 직관적으로 알 수 있는 챕터 제목 (예: '예화: 탕자의 비유')"},
                     "type": {
                         "type": "STRING", 
-                        "enum": ["Intro_Icebreak", "Scripture", "Preaching_Main", "Illustration", "Application", "Announcement", "Prayer"],
+                        "enum": profile.summary_type_enum,
                         "description": "편집 작업을 위한 구간 성격 분류"
                     },
                     "summary": {"type": "STRING", "description": "편집자가 내용을 파악할 수 있는 핵심 내용 요약"},
@@ -385,22 +741,7 @@ class VideoSummarizer:
             }
         }
 
-        system_instruction = (
-            "당신은 설교 영상 전문 미디어 팀장입니다. 제공된 대본을 분석하여 '1차 컷편집(Rough Cut)'을 위한 기획안을 JSON으로 출력하세요.\n"
-            "목표: 편집자가 불필요한 구간을 빠르게 제거하고, 핵심 구간(예화, 강조점)을 찾아낼 수 있도록 돕는 것.\n\n"
-            "**[분류 규칙]**\n"
-            "1. Intro_Icebreak: 설교 전 인사, 가벼운 대화, 날씨 이야기 등.\n"
-            "2. Scripture: 성경 본문 봉독 구간. (정확한 시작과 끝 지점 포착 필수)\n"
-            "3. Preaching_Main: 본문 해석, 교리 설명 등 설교의 메인 흐름.\n"
-            "4. Illustration: 시청자의 몰입을 돕는 예화, 에피소드, 유머 구간. (중요: 별도 챕터로 분리하여 하이라이트화)\n"
-            "5. Application: 성도들을 향한 삶의 권면, 핵심 메시지 선포, 결단.\n"
-            "6. Announcement: 교회 광고, 캠페인, 내빈 소개 등. (편집 시 삭제 1순위 후보)\n"
-            "7. Prayer: 마무리 기도, 축도.\n\n"
-            "**[작성 가이드라인]**\n"
-            "- 영상의 처음(ID:1)부터 끝까지 빈틈없이 나누세요.\n"
-            "- 'Announcement' 구간을 아주 정밀하게 분리하세요. 유튜브 업로드 시 이 구간을 잘라내는 것이 편집자의 주된 업무입니다.\n"
-            "- 모든 텍스트는 한국어로 작성하세요."
-        )
+        system_instruction = profile.summary_system_instruction
 
         try:
             client = genai.Client(api_key=self.api_key)
@@ -417,7 +758,19 @@ class VideoSummarizer:
             tracker.update(response)
             
             # JSON 파싱
-            final_chapters = json.loads(response.text)
+            parsed_chapters = json.loads(response.text)
+            final_chapters = self._normalize_chapter_ranges(parsed_chapters, len(analysis_segments))
+            if use_coarse and analysis_segments is coarse_segments:
+                final_chapters = self._map_coarse_chapters_to_original(final_chapters, coarse_segments, total_lines)
+
+            refined_count = 0
+            final_chapters, refined_count = self._run_boundary_refinement(
+                final_chapters,
+                segments,
+                profile,
+                tracker,
+                status_callback=status_callback,
+            )
             
             # ID -> Time 매핑 & 챕터 제목 정제
             mapped_result = []
@@ -448,6 +801,12 @@ class VideoSummarizer:
             result_data = {
                 "video_source": video_filename,
                 "video_title": display_title,
+                "content_type": profile.content_type,
+                "profile_version": profile.profile_version,
+                "analysis_meta": {
+                    **compression_meta,
+                    "boundary_refined_count": refined_count,
+                },
                 "total_chapters": len(mapped_result),
                 "token_usage": tracker.get_report(),
                 "chapters": mapped_result
