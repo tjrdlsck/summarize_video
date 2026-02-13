@@ -3,7 +3,12 @@ import re
 import yt_dlp
 import uuid
 import shutil
+import json
+import sys
+import subprocess
+from urllib.request import urlopen
 import anyio # [Add] 비동기 파일 I/O를 위해 추가
+from yt_dlp.utils import DownloadError
 
 class VideoDownloader:
     """
@@ -34,6 +39,67 @@ class VideoDownloader:
         # 2. 공백 -> 언더스코어
         clean_name = clean_name.strip().replace(" ", "_")
         return clean_name
+
+    def _is_update_required_error(self, error_message: str) -> bool:
+        """
+        yt-dlp 최신 버전 설치가 필요한 오류 메시지인지 판별합니다.
+        """
+        message = (error_message or "").lower()
+        update_hints = [
+            "you should update yt-dlp",
+            "this version of yt-dlp is outdated",
+            "please update yt-dlp",
+            "upgrade yt-dlp",
+            "update yt-dlp to the latest version",
+            "confirm you are on the latest version",
+            "using  yt-dlp -u",
+            "using yt-dlp -u",
+        ]
+        return any(hint in message for hint in update_hints)
+
+    def _get_latest_ytdlp_version(self):
+        """
+        PyPI에서 최신 yt-dlp 버전을 조회합니다.
+        네트워크 문제 시 None을 반환합니다.
+        """
+        try:
+            with urlopen("https://pypi.org/pypi/yt-dlp/json", timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                return data.get("info", {}).get("version")
+        except Exception:
+            return None
+
+    def _attempt_ytdlp_upgrade(self):
+        """
+        현재 파이썬 인터프리터 기준으로 yt-dlp를 업그레이드합니다.
+        """
+        current_version = getattr(yt_dlp.version, "__version__", "unknown")
+        latest_version = self._get_latest_ytdlp_version()
+
+        if latest_version and current_version == latest_version:
+            return {
+                "status": "up_to_date",
+                "current_version": current_version,
+                "latest_version": latest_version,
+                "message": "yt-dlp is already at latest version",
+            }
+
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"]
+        process = subprocess.run(cmd, capture_output=True, text=True)
+        if process.returncode != 0:
+            return {
+                "status": "failed",
+                "current_version": current_version,
+                "latest_version": latest_version,
+                "message": (process.stderr or process.stdout or "yt-dlp upgrade failed").strip(),
+            }
+
+        return {
+            "status": "updated",
+            "current_version": current_version,
+            "latest_version": latest_version,
+            "message": "yt-dlp upgraded successfully",
+        }
 
     async def save_uploaded_file(self, upload_file, original_filename, task_manager=None, task_id=None):
         """
@@ -159,6 +225,20 @@ class VideoDownloader:
                 if 'final_path' in locals() and final_path:
                     self._cleanup_partial_files(final_path)
                 return {"status": "error", "message": "User cancelled the download"}
+
+            if isinstance(e, DownloadError) and self._is_update_required_error(str(e)):
+                upgrade_result = self._attempt_ytdlp_upgrade()
+                if upgrade_result.get("status") == "updated":
+                    print(f"[Downloader] yt-dlp upgraded ({upgrade_result.get('current_version')} -> {upgrade_result.get('latest_version')}). Restart required.")
+                    if 'final_path' in locals() and final_path:
+                        self._cleanup_partial_files(final_path)
+                    return {
+                        "status": "restart_required",
+                        "message": "yt-dlp 업데이트가 완료되었습니다. 서버를 재시작한 뒤 다시 시도해주세요.",
+                        "reason": "yt-dlp_updated",
+                        "details": upgrade_result,
+                    }
+                print(f"[Downloader] yt-dlp auto-upgrade skipped/failed: {upgrade_result.get('message')}")
             
             print(f"[Error] Download failed: {e}")
             if 'final_path' in locals() and final_path:

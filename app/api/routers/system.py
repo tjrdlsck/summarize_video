@@ -21,3 +21,19 @@ async def update_system(background_tasks: BackgroundTasks):
         return {"status": "success", "message": "Update initiated. Server will restart shortly."}
     except Exception as error:
         raise HTTPException(status_code=500, detail=str(error))
+
+
+@router.get("/api/system/restart-status")
+async def restart_status():
+    """자동 재시작 예약 상태를 반환합니다."""
+    return SystemManager.get_restart_status()
+
+
+@router.post("/api/system/restart-now")
+async def restart_now(background_tasks: BackgroundTasks):
+    """예약된 재시작이 있으면 즉시 재시작을 수행합니다."""
+    try:
+        background_tasks.add_task(SystemManager.restart_now)
+        return {"status": "success", "message": "Restart requested. Server will restart shortly."}
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=str(error))

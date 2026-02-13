@@ -31,6 +31,8 @@ function App() {
     const [updateAvailable, setUpdateAvailable] = useState(false);
     const [updateInfo, setUpdateInfo] = useState(null);
     const [isUpdating, setIsUpdating] = useState(false);
+    const [restartStatus, setRestartStatus] = useState({ pending: false, remaining_seconds: null, reason: null });
+    const restartAlertShownRef = useRef(false);
 
     // [New] Settings State
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -209,9 +211,22 @@ function App() {
     useEffect(() => {
         fetchHistory();
         checkUpdate(); // [New] 앱 로드 시 업데이트 확인
+        fetchRestartStatus();
         const interval = setInterval(fetchActiveTasks, 2000);
         return () => clearInterval(interval);
     }, []);
+
+    const waitForServerBack = (startDelayMs = 3000) => {
+        const pollServer = async () => {
+            try {
+                await axios.get('/?t=' + Date.now(), { timeout: 1500 });
+                window.location.reload();
+            } catch (e) {
+                setTimeout(pollServer, 2000);
+            }
+        };
+        setTimeout(pollServer, startDelayMs);
+    };
 
     // [New] 업데이트 확인 핸들러
     const checkUpdate = async () => {
@@ -222,6 +237,23 @@ function App() {
                 setUpdateInfo(res.data);
             }
         } catch (err) { console.error("Update check failed", err); }
+    };
+
+    const fetchRestartStatus = async () => {
+        try {
+            const res = await axios.get(`/api/system/restart-status?t=${Date.now()}`);
+            const status = res.data || {};
+            setRestartStatus(status);
+
+            if (status.pending && !restartAlertShownRef.current) {
+                restartAlertShownRef.current = true;
+                alert(`yt-dlp 자동 복구가 완료되었습니다.\n약 ${status.remaining_seconds ?? 60}초 후 서버가 자동 재시작됩니다.\n원하면 상단 배너의 '지금 재시작' 버튼으로 즉시 재시작할 수 있습니다.`);
+            } else if (!status.pending) {
+                restartAlertShownRef.current = false;
+            }
+        } catch (err) {
+            console.error("Restart status check failed", err);
+        }
     };
 
     // [New] 시스템 업데이트 실행 핸들러
@@ -236,34 +268,28 @@ function App() {
         try {
             await axios.post('/api/system/update');
             
-            // [New Strategy] Smart Polling Restart
-            // 서버가 꺼지고 다시 켜질 때까지 기다린 후 새로고침합니다.
             alert("업데이트가 시작되었습니다. 서버 재시작 완료 시 자동으로 페이지를 불러옵니다.");
-            
-            const pollServer = async () => {
-                try {
-                    // 서버의 루트(/) 경로에 2초마다 핑을 보냅니다.
-                    await axios.get('/?t=' + Date.now(), { timeout: 1500 });
-                    // 성공하면(서버가 다시 뜸) 새로고침
-                    window.location.reload();
-                } catch (e) {
-                    // 에러가 나면(서버가 아직 죽어있음) 계속 시도
-                    setTimeout(pollServer, 2000);
-                }
-            };
-
-            // 5초 뒤부터 서버 체크 시작 (업데이트 작업 시간을 고려)
-            setTimeout(pollServer, 5000);
+            waitForServerBack(5000);
 
         } catch (err) {
             if (err.code === 'ECONNABORTED' || !err.response) {
-                // 이미 서버가 종료되어 연결이 끊긴 경우도 성공으로 간주하고 폴링 시작
                 alert("서버 재시작 대기 중... 자동으로 페이지를 불러옵니다.");
-                window.location.reload(); // 폴링 로직이 alert 후 바로 탈 수도 있으므로 안전하게 처리
+                waitForServerBack(2000);
             } else {
                 alert("업데이트 실패: " + err.message);
                 setIsUpdating(false);
             }
+        }
+    };
+
+    const handleRestartNow = async () => {
+        if (!confirm("지금 즉시 서버를 재시작할까요?")) return;
+        try {
+            await axios.post('/api/system/restart-now');
+            alert("서버를 재시작합니다. 잠시 후 자동으로 새로고침됩니다.");
+            waitForServerBack(2000);
+        } catch (err) {
+            alert("재시작 요청 실패: " + err.message);
         }
     };
 
@@ -340,6 +366,7 @@ function App() {
         try {
             const res = await axios.get(`/api/tasks?t=${Date.now()}`);
             setActiveTasks(res.data);
+            fetchRestartStatus();
         } catch (err) { console.error(err); }
     };
 
@@ -863,6 +890,23 @@ function App() {
                         {dashboardTab === 'analysis' ? (
                             <div className="w-full h-full overflow-y-auto custom-scrollbar">
                                 <div className="max-w-6xl mx-auto p-4 md:p-8 fade-in space-y-12">
+                                    {restartStatus.pending && (
+                                        <div className="bg-amber-500 rounded-2xl p-4 mb-4 text-white shadow-lg flex flex-col md:flex-row justify-between items-center gap-4">
+                                            <div>
+                                                <h4 className="font-bold text-sm">yt-dlp 자동 복구 완료: 서버 재시작 대기 중</h4>
+                                                <p className="text-xs text-amber-100">
+                                                    {restartStatus.remaining_seconds ?? 60}초 후 자동 재시작됩니다.
+                                                </p>
+                                            </div>
+                                            <button
+                                                onClick={handleRestartNow}
+                                                className="bg-white text-amber-700 px-6 py-2 rounded-xl font-bold text-sm hover:bg-amber-50 transition shadow-sm"
+                                            >
+                                                지금 재시작
+                                            </button>
+                                        </div>
+                                    )}
+
                                     {/* System Update Banner */} 
                                     {updateAvailable && (
                                         <div className="bg-indigo-600 rounded-2xl p-4 mb-8 text-white shadow-lg flex flex-col md:flex-row justify-between items-center gap-4 animate-bounce-subtle">

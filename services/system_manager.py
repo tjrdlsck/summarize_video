@@ -3,6 +3,7 @@ import sys
 import subprocess
 import time
 import json
+import threading
 
 class ConfigManager:
     """
@@ -54,6 +55,14 @@ class ConfigManager:
         return config.get("models", {}).get(task_type, cls.DEFAULT_CONFIG["models"].get(task_type))
 
 class SystemManager:
+    _state_lock = threading.Lock()
+    _restart_requested = False
+    _restart_timer = None
+    _restart_deadline = None
+    _restart_reason = None
+    _restart_delay_seconds = 60
+    _active_statuses = {"queued", "pending", "processing", "canceling"}
+
     @staticmethod
     def check_for_updates():
         """
@@ -90,6 +99,67 @@ class SystemManager:
         time.sleep(1)
         os._exit(5)
 
+    @classmethod
+    def request_restart_after_failures(cls, reason: str, delay_seconds: int = 60):
+        """yt-dlp 자동 복구 이후, 조건이 맞으면 지연 재시작하도록 예약 의도를 등록합니다."""
+        with cls._state_lock:
+            cls._restart_requested = True
+            cls._restart_reason = reason
+            cls._restart_delay_seconds = max(1, int(delay_seconds))
+
+    @classmethod
+    def maybe_schedule_restart(cls, task_manager, queue_size: int = 0):
+        """활성 작업이 없고 실패 작업만 남은 경우에만 지연 재시작을 실제 스케줄링합니다."""
+        with cls._state_lock:
+            if not cls._restart_requested:
+                return False
+            if cls._restart_timer is not None:
+                return True
+            if queue_size > 0:
+                return False
+
+            tasks = getattr(task_manager, "tasks", {})
+            statuses = [task.get("status") for task in tasks.values()]
+            if any(status in cls._active_statuses for status in statuses):
+                return False
+            if not any(status == "failed" for status in statuses):
+                return False
+
+            cls._restart_deadline = time.time() + cls._restart_delay_seconds
+            timer = threading.Timer(cls._restart_delay_seconds, cls.restart_server)
+            timer.daemon = True
+            timer.start()
+            cls._restart_timer = timer
+            return True
+
+    @classmethod
+    def get_restart_status(cls):
+        with cls._state_lock:
+            pending = cls._restart_timer is not None
+            remaining = None
+            deadline = None
+            if pending and cls._restart_deadline is not None:
+                remaining = max(0, int(cls._restart_deadline - time.time()))
+                deadline = int(cls._restart_deadline)
+            return {
+                "pending": pending,
+                "reason": cls._restart_reason,
+                "remaining_seconds": remaining,
+                "deadline_unix": deadline,
+            }
+
+    @classmethod
+    def restart_now(cls):
+        """예약된 재시작을 즉시 수행합니다."""
+        with cls._state_lock:
+            timer = cls._restart_timer
+            cls._restart_timer = None
+            cls._restart_deadline = None
+            cls._restart_requested = False
+        if timer is not None:
+            timer.cancel()
+        cls.restart_server()
+
     @staticmethod
     def restart_server():
         """
@@ -97,4 +167,4 @@ class SystemManager:
         """
         print("--- [System] Signaling Restart to Guardian in 1s... ---")
         time.sleep(1)
-        os._exit(5)
+        os._exit(6)

@@ -9,6 +9,7 @@ from app.schemas.requests import (
     SummaryRequest,
     TranscriptionRequest,
 )
+from services.system_manager import SystemManager
 
 
 class QueueWorker:
@@ -45,3 +46,7 @@ class QueueWorker:
                 print(f"[Worker Error] {error}")
             finally:
                 self.container.job_queue.task_done()
+                SystemManager.maybe_schedule_restart(
+                    task_manager=task_manager,
+                    queue_size=self.container.job_queue.qsize(),
+                )

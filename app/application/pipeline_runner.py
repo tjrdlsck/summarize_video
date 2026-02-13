@@ -10,6 +10,7 @@ from datetime import datetime
 from functools import partial
 
 from services.content_profiles import get_content_profile
+from services.system_manager import SystemManager
 from services.transcriber import TaskCancelledError
 
 from app.application.progress import TaskProgressWrapper
@@ -99,6 +100,15 @@ class PipelineRunner:
                     if result.get("filename"):
                         video_filename = result["filename"]
                     raise Exception(result["message"])
+                if result["status"] == "restart_required":
+                    fail_message = result.get("message", "yt-dlp 업데이트 후 재시작이 필요합니다.")
+                    task_manager.fail_task(task_id, fail_message)
+                    SystemManager.request_restart_after_failures(
+                        reason=fail_message,
+                        delay_seconds=60,
+                    )
+                    print(f"[{task_id}] {fail_message}")
+                    return
 
                 video_filename = result["filename"]
 
