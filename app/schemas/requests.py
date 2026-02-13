@@ -1,6 +1,6 @@
 """Request body schemas."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel
 
@@ -11,6 +11,7 @@ class TranscriptionRequest(BaseModel):
     url: Optional[str] = None
     filename: Optional[str] = None
     custom_title: Optional[str] = None
+    content_type: Literal["sermon", "streaming", "informational"] = "sermon"
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -24,6 +25,7 @@ class SummaryRequest(BaseModel):
 
     filename: str
     custom_title: Optional[str] = None
+    content_type: Literal["sermon", "streaming", "informational"] = "sermon"
 
 
 class BlogGenerationRequest(BaseModel):
@@ -52,6 +54,7 @@ class ShortsGenerateRequest(BaseModel):
 
     filename: str
     focus_topic: Optional[str] = None
+    content_type: Literal["sermon", "streaming", "informational"] = "sermon"
 
 
 class PremiereExportRequest(BaseModel):

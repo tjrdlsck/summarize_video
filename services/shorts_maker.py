@@ -4,6 +4,7 @@ import re
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
+from services.content_profiles import get_content_profile
 from services.system_manager import ConfigManager
 
 class ShortsMaker:
@@ -67,7 +68,7 @@ class ShortsMaker:
 
         return segment_start
 
-    def make_shorts_candidates(self, transcripts, video_title, chapters=None, focus_topic=None):
+    def make_shorts_candidates(self, transcripts, video_title, chapters=None, focus_topic=None, content_type="sermon"):
         """
         [Advanced] 챕터 메타데이터와 사용자 주제(Topic)를 활용하여 최적의 숏츠 후보를 생성합니다.
         
@@ -81,10 +82,12 @@ class ShortsMaker:
             print("[ShortsMaker] Error: API Key missing")
             return []
 
+        profile = get_content_profile(content_type)
+
         # 1. 챕터 기반 데이터 필터링 (Whitelist 방식)
         filtered_script = ""
         # 숏츠로 쓰기에 적합한 챕터 타입
-        TARGET_TYPES = ["Illustration", "Preaching_Main", "Application"]
+        TARGET_TYPES = profile.shorts_target_types
         
         if chapters:
             print(f"[ShortsMaker] Filtering chapters... (Target: {TARGET_TYPES})")
@@ -153,16 +156,7 @@ class ShortsMaker:
             }
         }
 
-        system_instruction = (
-            "당신은 수백만 조회수를 기록하는 **유튜브 쇼츠 전문 PD**입니다.\n"
-            "제공된 설교 대본(Script)에서 시청자의 이목을 사로잡을 수 있는 '알짜배기' 구간을 발굴하여 기획안을 작성하세요.\n\n"
-            "**[편집 원칙]**\n"
-            "1. **Viral Selection**: 지루한 서론은 버리고, **'Hook(도입)-Body(전개)-Climax(결말)'**가 확실한 구간을 선택하세요.\n"
-            "2. **Time Constraint**: 길이는 **최소 40초 ~ 최대 120초(2분)**로 제한합니다. 문맥이 끊기지 않고 완결성을 갖추는 것이 60초 제한보다 더 중요합니다.\n"
-            "3. **Contextual Integrity**: 문장이 중간에 잘리거나, 앞뒤 맥락 없이 대명사(그, 저기 등)로 시작하지 않도록 주의하세요.\n"
-            "4. **Priority**: '예화(Illustration)'나 '강렬한 메시지(Application)' 위주로 선정하세요. (광고나 성경 봉독은 절대 금지)\n"
-            f"{user_intent_guide}\n"
-        )
+        system_instruction = f"{profile.shorts_system_instruction}\n{user_intent_guide}\n"
 
         prompt = f"{system_instruction}\n\n[Selected Script Data]:\n{filtered_script}"
 

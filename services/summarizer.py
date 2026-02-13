@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential # [Add] 재시도 로직 추가
+from services.content_profiles import get_content_profile
 
 # --- [Helper Class] Resource Usage Tracker ---
 class UsageTracker:
@@ -337,7 +338,8 @@ class VideoSummarizer:
         segments: list[dict], 
         video_filename: str, 
         custom_title: str = None, 
-        status_callback: callable = None
+        status_callback: callable = None,
+        content_type: str = "sermon",
     ) -> dict:
         """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다. (Retry 적용)
 
@@ -359,6 +361,7 @@ class VideoSummarizer:
         print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini (JSON Mode) ---")
         if status_callback: status_callback("Gemini가 내용을 정밀 분석 중 (JSON Mode)...")
 
+        profile = get_content_profile(content_type)
         tracker = UsageTracker()
         
         # 프롬프트 구성
@@ -374,7 +377,7 @@ class VideoSummarizer:
                     "title": {"type": "STRING", "description": "내용을 직관적으로 알 수 있는 챕터 제목 (예: '예화: 탕자의 비유')"},
                     "type": {
                         "type": "STRING", 
-                        "enum": ["Intro_Icebreak", "Scripture", "Preaching_Main", "Illustration", "Application", "Announcement", "Prayer"],
+                        "enum": profile.summary_type_enum,
                         "description": "편집 작업을 위한 구간 성격 분류"
                     },
                     "summary": {"type": "STRING", "description": "편집자가 내용을 파악할 수 있는 핵심 내용 요약"},
@@ -385,22 +388,7 @@ class VideoSummarizer:
             }
         }
 
-        system_instruction = (
-            "당신은 설교 영상 전문 미디어 팀장입니다. 제공된 대본을 분석하여 '1차 컷편집(Rough Cut)'을 위한 기획안을 JSON으로 출력하세요.\n"
-            "목표: 편집자가 불필요한 구간을 빠르게 제거하고, 핵심 구간(예화, 강조점)을 찾아낼 수 있도록 돕는 것.\n\n"
-            "**[분류 규칙]**\n"
-            "1. Intro_Icebreak: 설교 전 인사, 가벼운 대화, 날씨 이야기 등.\n"
-            "2. Scripture: 성경 본문 봉독 구간. (정확한 시작과 끝 지점 포착 필수)\n"
-            "3. Preaching_Main: 본문 해석, 교리 설명 등 설교의 메인 흐름.\n"
-            "4. Illustration: 시청자의 몰입을 돕는 예화, 에피소드, 유머 구간. (중요: 별도 챕터로 분리하여 하이라이트화)\n"
-            "5. Application: 성도들을 향한 삶의 권면, 핵심 메시지 선포, 결단.\n"
-            "6. Announcement: 교회 광고, 캠페인, 내빈 소개 등. (편집 시 삭제 1순위 후보)\n"
-            "7. Prayer: 마무리 기도, 축도.\n\n"
-            "**[작성 가이드라인]**\n"
-            "- 영상의 처음(ID:1)부터 끝까지 빈틈없이 나누세요.\n"
-            "- 'Announcement' 구간을 아주 정밀하게 분리하세요. 유튜브 업로드 시 이 구간을 잘라내는 것이 편집자의 주된 업무입니다.\n"
-            "- 모든 텍스트는 한국어로 작성하세요."
-        )
+        system_instruction = profile.summary_system_instruction
 
         try:
             client = genai.Client(api_key=self.api_key)
@@ -448,6 +436,8 @@ class VideoSummarizer:
             result_data = {
                 "video_source": video_filename,
                 "video_title": display_title,
+                "content_type": profile.content_type,
+                "profile_version": profile.profile_version,
                 "total_chapters": len(mapped_result),
                 "token_usage": tracker.get_report(),
                 "chapters": mapped_result

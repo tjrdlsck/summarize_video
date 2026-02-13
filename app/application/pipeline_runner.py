@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 from functools import partial
 
+from services.content_profiles import get_content_profile
 from services.transcriber import TaskCancelledError
 
 from app.application.progress import TaskProgressWrapper
@@ -34,6 +35,7 @@ class PipelineRunner:
         task_manager = self.container.task_manager
         downloader = self.container.downloader
         transcriber = self.container.transcriber
+        profile = get_content_profile(req.content_type)
 
         video_filename = req.filename
         display_title = req.custom_title
@@ -129,6 +131,7 @@ class PipelineRunner:
                     progress_callback=transcriber_callback,
                     task_manager=progress_wrapper,
                     task_id=task_id,
+                    content_type=profile.content_type,
                 ),
             )
 
@@ -142,6 +145,8 @@ class PipelineRunner:
             initial_data = {
                 "video_source": video_filename,
                 "video_title": display_title,
+                "content_type": profile.content_type,
+                "profile_version": profile.profile_version,
                 "total_chapters": 0,
                 "chapters": [],
                 "status": "transcribed_only",
@@ -193,6 +198,7 @@ class PipelineRunner:
                     req.filename,
                     custom_title=req.custom_title,
                     status_callback=summarizer_callback,
+                    content_type=req.content_type,
                 ),
             )
 
@@ -457,11 +463,13 @@ class PipelineRunner:
 
             video_title = req.filename
             chapters = None
+            effective_content_type = req.content_type
             if os.path.exists(summary_path):
                 with open(summary_path, "r", encoding="utf-8") as file:
                     summary_data = json.load(file)
                     video_title = summary_data.get("video_title", req.filename)
                     chapters = summary_data.get("chapters")
+                    effective_content_type = summary_data.get("content_type", effective_content_type)
 
             if task_manager.is_cancelled(task_id):
                 raise Exception("Task cancelled")
@@ -476,6 +484,7 @@ class PipelineRunner:
                     video_title,
                     chapters=chapters,
                     focus_topic=req.focus_topic,
+                    content_type=effective_content_type,
                 ),
             )
 
