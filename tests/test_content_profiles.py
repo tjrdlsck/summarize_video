@@ -15,6 +15,8 @@ def test_get_content_profile_loads_streaming_profile():
     assert profile.content_type == "streaming"
     assert "Reaction_Highlight" in profile.summary_type_enum
     assert "Banter" in profile.shorts_target_types
+    assert "40초~90초" in profile.shorts_system_instruction
+    assert "50%" in profile.shorts_system_instruction
 
 
 def test_get_content_profile_preserves_sermon_defaults():
@@ -35,4 +37,11 @@ def test_get_content_profile_preserves_sermon_defaults():
 def test_request_models_use_sermon_as_default_content_type():
     assert TranscriptionRequest(filename="sample.mp4").content_type == "sermon"
     assert SummaryRequest(filename="sample.mp4").content_type == "sermon"
-    assert ShortsGenerateRequest(filename="sample.mp4").content_type == "sermon"
+    shorts_req = ShortsGenerateRequest(filename="sample.mp4")
+    assert shorts_req.content_type == "sermon"
+    assert shorts_req.style == "funny"
+    assert shorts_req.min_duration == 40.0
+    assert shorts_req.max_duration == 90.0
+    assert shorts_req.humor_weight == 50
+    assert shorts_req.keep_original_tone is True
+    assert shorts_req.speaker_mode == "pseudo"

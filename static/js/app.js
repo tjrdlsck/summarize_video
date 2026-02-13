@@ -10,6 +10,7 @@ function App() {
     // Data State
     const [urlInput, setUrlInput] = useState("");
     const [titleInput, setTitleInput] = useState("");
+    const [contentType, setContentType] = useState("streaming");
     const [historyList, setHistoryList] = useState([]);
     const [activeTasks, setActiveTasks] = useState([]);
     const [playerData, setPlayerData] = useState(null);
@@ -348,7 +349,8 @@ function App() {
         try {
             await axios.post('/api/transcribe', {
                 url: urlInput,
-                custom_title: titleInput
+                custom_title: titleInput,
+                content_type: contentType
             });
             setUrlInput("");
             setTitleInput("");
@@ -361,14 +363,15 @@ function App() {
         }
     };
 
-    const handleStartAnalysis = async (e, filename, title) => {
+    const handleStartAnalysis = async (e, filename, title, requestContentType = contentType) => {
         if (e) e.stopPropagation();
         if (!confirm(`'${normalizeLegacyTitle(title)}' 영상을 AI로 분석하시겠습니까?
 (챕터 구분 및 내용 요약이 진행됩니다)`)) return;
         try {
             await axios.post('/api/analyze', {
                 filename: filename,
-                custom_title: title
+                custom_title: title,
+                content_type: requestContentType
             });
             alert("2단계: AI 분석이 시작되었습니다!");
             fetchActiveTasks();
@@ -401,7 +404,8 @@ function App() {
             const upRes = await axios.post('/api/upload', formData);
             await axios.post('/api/transcribe', {
                 filename: upRes.data.filename,
-                custom_title: titleInput
+                custom_title: titleInput,
+                content_type: contentType
             });
             setTitleInput("");
             alert("파일 업로드 완료. 자막 생성이 시작됩니다.");
@@ -550,7 +554,14 @@ function App() {
         try {
             await axios.post('/api/shorts/auto-generate', {
                 filename: playerData.video_filename,
-                focus_topic: userTopic.trim()
+                focus_topic: userTopic.trim(),
+                content_type: playerData?.content_type || contentType,
+                style: "funny",
+                min_duration: 40,
+                max_duration: 90,
+                humor_weight: 50,
+                keep_original_tone: true,
+                speaker_mode: "pseudo"
             });
             alert(`AI 숏츠 기획이 시작되었습니다!
 (주제: ${userTopic.trim() || '자동 추천'})
@@ -704,7 +715,10 @@ function App() {
         if (!item.result_data.has_transcript_file) {
             if (confirm("이 영상의 자막 데이터가 없습니다. 지금 생성하시겠습니까?")) {
                 try {
-                    await axios.post('/api/transcribe', { filename: item.filename });
+                    await axios.post('/api/transcribe', {
+                        filename: item.filename,
+                        content_type: item.result_data?.content_type || contentType
+                    });
                     alert("자막 생성이 시작되었습니다. 잠시 후 완료되면 다시 선택해주세요.");
                     fetchActiveTasks();
                 } catch (e) { alert("요청 실패: " + e.message); }
@@ -879,6 +893,19 @@ function App() {
                                                 <input type="text" placeholder="YouTube URL을 입력하세요..." className="flex-1 p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} disabled={loading} />
                                             </div>
                                             <div>
+                                                <label className="block text-xs text-gray-500 mb-1 ml-1">콘텐츠 타입</label>
+                                                <select
+                                                    className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm bg-white"
+                                                    value={contentType}
+                                                    onChange={(e) => setContentType(e.target.value)}
+                                                    disabled={loading}
+                                                >
+                                                    <option value="streaming">스트리밍(티키타카)</option>
+                                                    <option value="sermon">설교</option>
+                                                    <option value="informational">정보형</option>
+                                                </select>
+                                            </div>
+                                            <div>
                                                 <input type="text" placeholder="영상 제목을 미리 설정할 수 있습니다 (선택사항)" className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm" value={titleInput} onChange={(e) => setTitleInput(e.target.value)} disabled={loading} />
                                                 <p className="text-xs text-gray-400 mt-1 ml-1">* 비워두면 유튜브 제목이나 파일명을 그대로 사용합니다.</p>
                                             </div>
@@ -920,7 +947,7 @@ function App() {
                                                                 {hasBlog && <span className="text-[9px] font-bold bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200 uppercase tracking-tighter">블로그 완료</span>}
                                                             </div>
                                                             <div className="mt-auto grid grid-cols-2 gap-2 pt-3 border-t border-gray-50">
-                                                                <button onClick={(e) => handleStartAnalysis(e, item.filename, item.title)} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}>{hasChapters ? '🔄 2. 재분석' : '✨ 2. AI 분석'}</button>
+                                                                <button onClick={(e) => handleStartAnalysis(e, item.filename, item.title, item.result_data?.content_type || contentType)} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}>{hasChapters ? '🔄 2. 재분석' : '✨ 2. AI 분석'}</button>
                                                                 <button onClick={(e) => hasChapters ? handleGenerateBlog(e, item.filename) : alert('먼저 AI 분석을 완료해주세요.')} disabled={!hasChapters} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-purple-50 text-purple-600 hover:bg-purple-100' : 'bg-gray-50 text-gray-300 cursor-not-allowed'}`}>{hasBlog ? '🔄 3. 재작성' : '📝 3. 블로그'}</button>
                                                             </div>
                                                         </div>
@@ -954,6 +981,15 @@ function App() {
                                                     value={urlInput}
                                                     onChange={(e) => setUrlInput(e.target.value)}
                                                 />
+                                                <select
+                                                    className="w-full p-2 text-sm border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
+                                                    value={contentType}
+                                                    onChange={(e) => setContentType(e.target.value)}
+                                                >
+                                                    <option value="streaming">스트리밍(티키타카)</option>
+                                                    <option value="sermon">설교</option>
+                                                    <option value="informational">정보형</option>
+                                                </select>
                                                 <div className="flex gap-2">
                                                     <button 
                                                         onClick={handleAnalyze}
@@ -1352,7 +1388,7 @@ function App() {
                                         ) : (
                                             <div className="text-center py-20 text-gray-400 bg-gray-50 rounded-xl border border-dashed border-gray-200 flex flex-col items-center gap-4">
                                                 <p>아직 AI 분석이 진행되지 않았습니다.</p>
-                                                <button onClick={(e) => handleStartAnalysis(e, playerData.video_filename, playerData.video_title)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition">🤖 AI 챕터 분석 시작하기</button>
+                                                <button onClick={(e) => handleStartAnalysis(e, playerData.video_filename, playerData.video_title, playerData.content_type || contentType)} className="px-4 py-2 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition">🤖 AI 챕터 분석 시작하기</button>
                                             </div>
                                         )}
                                     </div>

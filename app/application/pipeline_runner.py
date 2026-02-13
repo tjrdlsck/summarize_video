@@ -485,6 +485,12 @@ class PipelineRunner:
                     chapters=chapters,
                     focus_topic=req.focus_topic,
                     content_type=effective_content_type,
+                    style=req.style,
+                    min_duration=req.min_duration,
+                    max_duration=req.max_duration,
+                    humor_weight=req.humor_weight,
+                    keep_original_tone=req.keep_original_tone,
+                    speaker_mode=req.speaker_mode,
                 ),
             )
 

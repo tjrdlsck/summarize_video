@@ -55,6 +55,12 @@ class ShortsGenerateRequest(BaseModel):
     filename: str
     focus_topic: Optional[str] = None
     content_type: Literal["sermon", "streaming", "informational"] = "sermon"
+    style: Literal["funny", "balanced"] = "funny"
+    min_duration: float = 40.0
+    max_duration: float = 90.0
+    humor_weight: int = 50
+    keep_original_tone: bool = True
+    speaker_mode: Literal["none", "pseudo", "full"] = "pseudo"
 
 
 class PremiereExportRequest(BaseModel):

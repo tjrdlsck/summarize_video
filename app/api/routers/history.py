@@ -133,6 +133,7 @@ async def get_history():
                     "result_data": {
                         "video_filename": video_source,
                         "video_title": display_title,
+                        "content_type": data.get("content_type", "sermon"),
                         "total_chapters": data.get("total_chapters", 0),
                         "chapters": data.get("chapters"),
                         "transcripts": [],
