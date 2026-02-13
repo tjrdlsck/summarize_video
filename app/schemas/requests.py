@@ -1,0 +1,64 @@
+"""Request body schemas."""
+
+from typing import Optional
+
+from pydantic import BaseModel
+
+
+class TranscriptionRequest(BaseModel):
+    """1단계: 다운로드/자막 생성 요청."""
+
+    url: Optional[str] = None
+    filename: Optional[str] = None
+    custom_title: Optional[str] = None
+
+
+class SettingsUpdateRequest(BaseModel):
+    """설정 업데이트 요청."""
+
+    models: dict
+
+
+class SummaryRequest(BaseModel):
+    """2단계: 요약 분석 요청."""
+
+    filename: str
+    custom_title: Optional[str] = None
+
+
+class BlogGenerationRequest(BaseModel):
+    """3단계: 블로그 생성 요청."""
+
+    filename: str
+
+
+class UpdateTitleRequest(BaseModel):
+    """히스토리 제목 수정 요청."""
+
+    title: str
+
+
+class ClipRequest(BaseModel):
+    """클립 생성 요청."""
+
+    filename: str
+    start_time: float
+    end_time: float
+    title: Optional[str] = "Untitled Clip"
+
+
+class ShortsGenerateRequest(BaseModel):
+    """AI 숏츠 자동 생성 요청."""
+
+    filename: str
+    focus_topic: Optional[str] = None
+
+
+class PremiereExportRequest(BaseModel):
+    """프리미어 XML 내보내기 요청."""
+
+    video_filename: str
+    clip_id: str
+    custom_video_filename: Optional[str] = None
+    max_chars: Optional[int] = 10
+    max_lines: Optional[int] = 2

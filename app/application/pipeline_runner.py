@@ -1,0 +1,595 @@
+"""Background pipeline runner implementations."""
+
+import asyncio
+import json
+import os
+import re
+import shutil
+import uuid
+from datetime import datetime
+from functools import partial
+
+from services.transcriber import TaskCancelledError
+
+from app.application.progress import TaskProgressWrapper
+from app.core.container import AppContainer
+from app.core.paths import CLIPS_DIR, RESULTS_DIR, TEMP_DIR, VIDEOS_DIR
+from app.schemas.requests import (
+    BlogGenerationRequest,
+    ClipRequest,
+    ShortsGenerateRequest,
+    SummaryRequest,
+    TranscriptionRequest,
+)
+
+
+class PipelineRunner:
+    """Runs long-running processing jobs in background worker context."""
+
+    def __init__(self, container: AppContainer) -> None:
+        self.container = container
+
+    async def run_transcription_pipeline(self, task_id: str, req: TranscriptionRequest) -> None:
+        """영상 다운로드 및 자막 생성(STT) 파이프라인."""
+        task_manager = self.container.task_manager
+        downloader = self.container.downloader
+        transcriber = self.container.transcriber
+
+        video_filename = req.filename
+        display_title = req.custom_title
+
+        def cleanup_files(filename: str | None) -> None:
+            if not filename:
+                return
+            try:
+                base_name = os.path.splitext(filename)[0]
+
+                targets = [
+                    os.path.join(VIDEOS_DIR, filename),
+                    os.path.join(RESULTS_DIR, f"{base_name}.srt"),
+                    os.path.join(RESULTS_DIR, f"{base_name}.vtt"),
+                    os.path.join(RESULTS_DIR, f"{base_name}_transcript.json"),
+                    os.path.join(RESULTS_DIR, f"{base_name}_temp.wav"),
+                ]
+                for path in targets:
+                    if os.path.exists(path):
+                        os.remove(path)
+
+                if os.path.exists(VIDEOS_DIR):
+                    for filename_in_dir in os.listdir(VIDEOS_DIR):
+                        is_target = filename_in_dir == filename
+                        has_partial = ".part" in filename_in_dir or ".ytdl" in filename_in_dir or ".temp" in filename_in_dir
+                        if is_target or (base_name in filename_in_dir and has_partial):
+                            try:
+                                os.remove(os.path.join(VIDEOS_DIR, filename_in_dir))
+                                print(f"[Cleanup] Removed partial/temp file: {filename_in_dir}")
+                            except Exception:
+                                pass
+            except Exception as error:
+                print(f"[Cleanup Error] {error}")
+
+        try:
+            loop = asyncio.get_running_loop()
+
+            if task_manager.is_cancelled(task_id):
+                raise TaskCancelledError()
+            task_manager.update_progress(task_id, 0, "작업 시작...")
+
+            if req.url:
+                task_manager.update_progress(task_id, 1, "영상 다운로드 중...")
+
+                def dl_callback(percent: int, msg: str) -> None:
+                    scaled = 1 + int(percent * 0.19)
+                    loop.call_soon_threadsafe(task_manager.update_progress, task_id, scaled, msg)
+
+                result = await loop.run_in_executor(
+                    None,
+                    partial(
+                        downloader.download_from_url,
+                        req.url,
+                        progress_callback=dl_callback,
+                        task_manager=task_manager,
+                        task_id=task_id,
+                    ),
+                )
+
+                if result["status"] == "error":
+                    if result.get("filename"):
+                        video_filename = result["filename"]
+                    raise Exception(result["message"])
+
+                video_filename = result["filename"]
+
+                if not display_title and result.get("meta") and result["meta"].get("title"):
+                    display_title = result["meta"]["title"]
+
+            if task_manager.is_cancelled(task_id):
+                raise TaskCancelledError()
+
+            video_path = os.path.join(VIDEOS_DIR, str(video_filename))
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"File not found: {video_filename}")
+
+            if not display_title:
+                clean_name = re.sub(r"^[0-9a-fA-F]{8}_", "", str(video_filename))
+                display_title = os.path.splitext(clean_name)[0].replace("_", " ").strip()
+
+            task_manager.update_progress(task_id, 20, "오디오 변환 및 자막 생성 중...")
+
+            progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=20, scale_factor=0.8)
+
+            def transcriber_callback(local_percent: int, msg: str) -> None:
+                loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
+
+            transcribe_result = await loop.run_in_executor(
+                None,
+                partial(
+                    transcriber.transcribe,
+                    video_path,
+                    progress_callback=transcriber_callback,
+                    task_manager=progress_wrapper,
+                    task_id=task_id,
+                ),
+            )
+
+            if task_manager.is_cancelled(task_id):
+                raise TaskCancelledError()
+            if transcribe_result.get("status") == "error":
+                raise Exception("Transcription failed")
+
+            base_name = os.path.splitext(str(video_filename))[0]
+            summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
+            initial_data = {
+                "video_source": video_filename,
+                "video_title": display_title,
+                "total_chapters": 0,
+                "chapters": [],
+                "status": "transcribed_only",
+            }
+            with open(summary_path, "w", encoding="utf-8") as file:
+                json.dump(initial_data, file, ensure_ascii=False, indent=2)
+
+            task_manager.complete_task(task_id, {"status": "success", "message": "자막 생성 완료", "video_title": display_title})
+            print(f"[{task_id}] Transcription Completed: {video_filename}")
+
+        except TaskCancelledError:
+            print(f"[{task_id}] Task Cancelled by User.")
+            cleanup_files(str(video_filename) if video_filename else None)
+            task_manager.fail_task(task_id, "취소됨")
+
+        except Exception as error:
+            print(f"[{task_id}] Transcription Failed: {error}")
+            cleanup_files(str(video_filename) if video_filename else None)
+            task_manager.fail_task(task_id, str(error))
+
+    async def run_summary_pipeline(self, task_id: str, req: SummaryRequest) -> None:
+        """AI 챕터 분석 및 요약 파이프라인."""
+        task_manager = self.container.task_manager
+        summarizer = self.container.summarizer
+
+        base_name = os.path.splitext(req.filename)[0]
+        transcript_path = os.path.join(RESULTS_DIR, f"{base_name}_transcript.json")
+
+        try:
+            task_manager.update_progress(task_id, 0, "AI 분석 시작...")
+
+            if not os.path.exists(transcript_path):
+                raise FileNotFoundError("자막 데이터가 없습니다. 먼저 자막 생성을 진행해주세요.")
+
+            with open(transcript_path, "r", encoding="utf-8") as file:
+                segments = json.load(file)
+
+            loop = asyncio.get_running_loop()
+            task_manager.update_progress(task_id, 10, "Gemini가 내용을 분석하고 있습니다...")
+
+            def summarizer_callback(msg: str) -> None:
+                loop.call_soon_threadsafe(task_manager.update_progress, task_id, 50, msg)
+
+            summary_result = await loop.run_in_executor(
+                None,
+                partial(
+                    summarizer.summarize,
+                    segments,
+                    req.filename,
+                    custom_title=req.custom_title,
+                    status_callback=summarizer_callback,
+                ),
+            )
+
+            if summary_result.get("error"):
+                raise Exception(summary_result["error"])
+            if task_manager.is_cancelled(task_id):
+                raise TaskCancelledError()
+
+            task_manager.complete_task(task_id, summary_result)
+            print(f"[{task_id}] Summary Completed: {req.filename}")
+
+        except TaskCancelledError:
+            print(f"[{task_id}] Summary Task Cancelled.")
+            task_manager.fail_task(task_id, "취소됨")
+        except Exception as error:
+            print(f"[{task_id}] Summary Failed: {error}")
+            task_manager.fail_task(task_id, str(error))
+
+    async def run_blog_pipeline(self, task_id: str, req: BlogGenerationRequest) -> None:
+        """블로그 포스트 생성 파이프라인."""
+        task_manager = self.container.task_manager
+        summarizer = self.container.summarizer
+        refiner = self.container.refiner
+
+        base_name = os.path.splitext(req.filename)[0]
+        transcript_path = os.path.join(RESULTS_DIR, f"{base_name}_transcript.json")
+        output_path = os.path.join(RESULTS_DIR, f"{base_name}_blog_view.json")
+
+        try:
+            task_manager.update_progress(task_id, 0, "블로그 구조 설계 중 (Gemini 2.5 Flash-Lite)...")
+
+            if not os.path.exists(transcript_path):
+                raise FileNotFoundError("자막 데이터가 없습니다.")
+
+            with open(transcript_path, "r", encoding="utf-8") as file:
+                segments = json.load(file)
+
+            loop = asyncio.get_running_loop()
+
+            blog_plan = await loop.run_in_executor(
+                None,
+                partial(
+                    summarizer.plan_blog_structure,
+                    segments,
+                    req.filename,
+                    status_callback=lambda msg: loop.call_soon_threadsafe(task_manager.update_progress, task_id, 10, msg),
+                ),
+            )
+
+            if "error" in blog_plan:
+                raise Exception(blog_plan["error"])
+
+            blog_title = blog_plan.get("blog_title", "Untitled Blog Post")
+            temp_chapters = blog_plan.get("chapters", [])
+            total_chaps = len(temp_chapters)
+
+            if not temp_chapters:
+                raise ValueError("생성된 블로그 구조가 없습니다.")
+
+            sorted_segments = sorted(segments, key=lambda item: item["start"])
+            final_chapters = []
+
+            for index, chapter in enumerate(temp_chapters):
+                if task_manager.is_cancelled(task_id):
+                    raise TaskCancelledError()
+
+                progress = 20 + int((index / total_chaps) * 80)
+                task_manager.update_progress(task_id, progress, f"섹션 작성 중... ({index + 1}/{total_chaps})")
+
+                start_id = chapter["start_id"]
+                end_id = chapter["end_id"]
+                chapter_segments = [segment for segment in sorted_segments if start_id <= segment["id"] <= end_id]
+
+                if not chapter_segments:
+                    continue
+
+                refined_md = await loop.run_in_executor(
+                    None,
+                    partial(
+                        refiner.refine_chapter,
+                        raw_text="",
+                        chapter_title=chapter["title"],
+                        segments=chapter_segments,
+                    ),
+                )
+
+                start_time = chapter_segments[0]["start"]
+                end_time = chapter_segments[-1]["end"]
+
+                final_chapters.append(
+                    {
+                        "title": chapter["title"],
+                        "content": refined_md,
+                        "focus_point": chapter.get("focus_point", ""),
+                        "time": {
+                            "start": start_time,
+                            "end": end_time,
+                            "start_formatted": summarizer._format_time(start_time),
+                            "end_formatted": summarizer._format_time(end_time),
+                        },
+                    }
+                )
+
+            result_data = {
+                "video_source": req.filename,
+                "blog_title": blog_title,
+                "chapters": final_chapters,
+                "generated_at": datetime.now().isoformat(),
+            }
+
+            with open(output_path, "w", encoding="utf-8") as file:
+                json.dump(result_data, file, ensure_ascii=False, indent=2)
+
+            task_manager.complete_task(task_id, result_data)
+            print(f"[{task_id}] Blog View Generation Completed: {req.filename}")
+
+        except TaskCancelledError:
+            print(f"[{task_id}] Blog Task Cancelled.")
+            task_manager.fail_task(task_id, "취소됨")
+        except Exception as error:
+            print(f"[{task_id}] Blog Generation Failed: {error}")
+            task_manager.fail_task(task_id, str(error))
+
+    async def run_clip_pipeline(self, task_id: str, req: ClipRequest) -> None:
+        """영상 클립 생성 파이프라인."""
+        task_manager = self.container.task_manager
+        clipper = self.container.clipper
+
+        temp_files = []
+
+        try:
+            task_manager.update_progress(task_id, 0, "클립 생성 준비...")
+
+            video_path = os.path.join(VIDEOS_DIR, req.filename)
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"Video file not found: {req.filename}")
+
+            if req.end_time <= req.start_time:
+                raise ValueError(f"잘못된 구간 설정: 종료 시간({req.end_time})이 시작 시간({req.start_time})보다 빠르거나 같습니다.")
+
+            if (req.end_time - req.start_time) < 0.5:
+                raise ValueError("클립 길이는 최소 0.5초 이상이어야 합니다.")
+
+            base_name = os.path.splitext(req.filename)[0]
+
+            task_manager.update_progress(task_id, 10, "영상 자르는 중...")
+            cut_video_path = await clipper.cut_video(
+                video_path,
+                req.start_time,
+                req.end_time,
+                output_filename=f"clip_{base_name}_{task_id[:8]}.mp4",
+                task_manager=task_manager,
+                task_id=task_id,
+            )
+            temp_files.append(cut_video_path)
+
+            if task_manager.is_cancelled(task_id):
+                raise Exception("Task cancelled")
+            task_manager.update_progress(task_id, 60, "자막 동기화 중...")
+
+            srt_path = os.path.join(RESULTS_DIR, f"{base_name}.srt")
+            vtt_path = os.path.join(RESULTS_DIR, f"{base_name}.vtt")
+
+            sub_source_path = srt_path if os.path.exists(srt_path) else (vtt_path if os.path.exists(vtt_path) else None)
+            sub_ext = ".srt" if sub_source_path == srt_path else ".vtt"
+
+            if sub_source_path:
+                loop = asyncio.get_running_loop()
+                cut_sub_path = await loop.run_in_executor(
+                    None,
+                    partial(
+                        clipper.cut_subtitle,
+                        sub_source_path,
+                        req.start_time,
+                        req.end_time,
+                        output_filename=f"clip_{base_name}_{task_id[:8]}{sub_ext}",
+                    ),
+                )
+                if cut_sub_path:
+                    temp_files.append(cut_sub_path)
+
+            if task_manager.is_cancelled(task_id):
+                raise Exception("Task cancelled")
+            task_manager.update_progress(task_id, 80, "클립 패키징 중...")
+
+            loop = asyncio.get_running_loop()
+            clip_uuid = str(uuid.uuid4())
+            safe_zip_name = f"clip_{base_name}_{clip_uuid[:8]}.zip"
+
+            zip_path = await loop.run_in_executor(
+                None,
+                partial(
+                    clipper.create_zip,
+                    temp_files,
+                    zip_filename=safe_zip_name,
+                    destination_dir=CLIPS_DIR,
+                ),
+            )
+
+            meta_filename = f"{base_name}_clips.json"
+            meta_path = os.path.join(RESULTS_DIR, meta_filename)
+
+            final_title = req.title if req.title and req.title.strip() else f"Clip {req.start_time}-{req.end_time}"
+            new_clip_info = {
+                "clip_id": clip_uuid,
+                "title": final_title,
+                "filename": safe_zip_name,
+                "start_time": req.start_time,
+                "end_time": req.end_time,
+                "created_at": str(asyncio.get_running_loop().time()),
+                "download_url": f"/static/clips/{safe_zip_name}",
+            }
+
+            clips_data = []
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as file:
+                        clips_data = json.load(file)
+                except Exception:
+                    pass
+
+            clips_data.insert(0, new_clip_info)
+            with open(meta_path, "w", encoding="utf-8") as file:
+                json.dump(clips_data, file, ensure_ascii=False, indent=2)
+
+            task_manager.complete_task(task_id, {"message": "Saved to library", "download_url": new_clip_info["download_url"]})
+            print(f"[{task_id}] Clip Saved: {zip_path}")
+
+        except Exception as error:
+            print(f"[{task_id}] Clip Pipeline Failed: {error}")
+            task_manager.fail_task(task_id, str(error))
+
+        finally:
+            for temp_file in temp_files:
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except Exception:
+                        pass
+
+    async def run_shorts_pipeline(self, task_id: str, req: ShortsGenerateRequest) -> None:
+        """AI 숏츠 생성 파이프라인."""
+        task_manager = self.container.task_manager
+        shorts_maker = self.container.shorts_maker
+        clipper = self.container.clipper
+
+        temp_files = []
+        base_name = os.path.splitext(req.filename)[0]
+
+        try:
+            task_manager.update_progress(task_id, 0, "AI 숏츠 기획 시작...")
+
+            transcript_path = os.path.join(RESULTS_DIR, f"{base_name}_transcript.json")
+            srt_path = os.path.join(RESULTS_DIR, f"{base_name}.srt")
+            summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
+
+            if not os.path.exists(transcript_path):
+                raise FileNotFoundError("분석 데이터가 없습니다.")
+
+            with open(transcript_path, "r", encoding="utf-8") as file:
+                transcripts = json.load(file)
+
+            video_title = req.filename
+            chapters = None
+            if os.path.exists(summary_path):
+                with open(summary_path, "r", encoding="utf-8") as file:
+                    summary_data = json.load(file)
+                    video_title = summary_data.get("video_title", req.filename)
+                    chapters = summary_data.get("chapters")
+
+            if task_manager.is_cancelled(task_id):
+                raise Exception("Task cancelled")
+            task_manager.update_progress(task_id, 10, f"AI가 '{req.focus_topic or '자동'}' 주제로 기획 중...")
+
+            loop = asyncio.get_running_loop()
+            candidates = await loop.run_in_executor(
+                None,
+                partial(
+                    shorts_maker.make_shorts_candidates,
+                    transcripts,
+                    video_title,
+                    chapters=chapters,
+                    focus_topic=req.focus_topic,
+                ),
+            )
+
+            if not candidates:
+                raise Exception("AI가 숏츠 구간을 찾지 못했습니다.")
+            task_manager.update_progress(task_id, 30, f"{len(candidates)}개의 숏츠 기획안 생성 완료.")
+
+            phase_start, phase_end = 30, 90
+            slot_weight = (phase_end - phase_start) / len(candidates)
+            results = []
+            video_path = os.path.join(VIDEOS_DIR, req.filename)
+
+            for index, candidate in enumerate(candidates):
+                if task_manager.is_cancelled(task_id):
+                    raise Exception("Task cancelled")
+
+                current_base_progress = phase_start + (index * slot_weight)
+
+                def ffmpeg_callback(local_percent: int) -> None:
+                    global_progress = int(current_base_progress + (local_percent / 100.0) * slot_weight)
+                    task_manager.update_progress(task_id, global_progress, f"숏츠 {index + 1}/{len(candidates)} 제작 중... ({local_percent}%)")
+
+                safe_title = re.sub(r"[\\/*?:\"<>|]", "", candidate["title"]).replace(" ", "_")
+                video_filename = f"AI_Shorts_{index + 1}_{safe_title}.mp4"
+
+                merge_result = await clipper.merge_segments(
+                    video_path,
+                    candidate["segments"],
+                    output_filename=video_filename,
+                    sub_input_path=srt_path,
+                    progress_callback=ffmpeg_callback,
+                    task_manager=task_manager,
+                    task_id=task_id,
+                )
+
+                generated_video = merge_result["video"]
+                generated_sub = merge_result["subtitle"]
+                generated_vtt = merge_result["subtitle_vtt"]
+
+                if generated_video and os.path.exists(generated_video):
+                    final_video_path = os.path.join(CLIPS_DIR, video_filename)
+                    shutil.move(generated_video, final_video_path)
+
+                    final_sub_path = None
+                    if generated_sub and os.path.exists(generated_sub):
+                        sub_filename = video_filename.replace(".mp4", ".srt")
+                        final_sub_path = os.path.join(CLIPS_DIR, sub_filename)
+                        shutil.move(generated_sub, final_sub_path)
+
+                    final_vtt_filename = None
+                    if generated_vtt and os.path.exists(generated_vtt):
+                        vtt_filename = video_filename.replace(".mp4", ".vtt")
+                        final_vtt_path = os.path.join(CLIPS_DIR, vtt_filename)
+                        shutil.move(generated_vtt, final_vtt_path)
+                        final_vtt_filename = vtt_filename
+
+                    zip_filename = video_filename.replace(".mp4", ".zip")
+                    files_to_zip = [final_video_path]
+                    if final_sub_path:
+                        files_to_zip.append(final_sub_path)
+
+                    await loop.run_in_executor(
+                        None,
+                        partial(clipper.create_zip, files_to_zip, zip_filename, CLIPS_DIR),
+                    )
+
+                    results.append(
+                        {
+                            "clip_id": str(uuid.uuid4()),
+                            "title": candidate["title"],
+                            "reason": candidate["reason"],
+                            "filename_video": video_filename,
+                            "filename_zip": zip_filename,
+                            "filename_vtt": final_vtt_filename,
+                            "duration": candidate["total_duration"],
+                            "segments": candidate["segments"],
+                            "created_at": datetime.now().isoformat(),
+                            "download_url": f"/static/clips/{zip_filename}",
+                            "preview_url": f"/static/clips/{video_filename}",
+                        }
+                    )
+                else:
+                    print(f"[Warning] Failed to render shorts candidate {index + 1}")
+
+            task_manager.update_progress(task_id, 90, "메타데이터 저장 중...")
+            if not results:
+                raise Exception("숏츠 생성 실패")
+
+            meta_path = os.path.join(RESULTS_DIR, f"{base_name}_clips.json")
+            existing_data = []
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as file:
+                        existing_data = json.load(file)
+                except Exception:
+                    pass
+
+            for result in reversed(results):
+                result["is_ai_generated"] = True
+                existing_data.insert(0, result)
+
+            with open(meta_path, "w", encoding="utf-8") as file:
+                json.dump(existing_data, file, ensure_ascii=False, indent=2)
+
+            task_manager.complete_task(task_id, {"count": len(results), "message": "완료"})
+            print(f"[{task_id}] AI Shorts Completed: {len(results)}")
+
+        except Exception as error:
+            print(f"[{task_id}] Shorts Pipeline Failed: {error}")
+            task_manager.fail_task(task_id, str(error))
+        finally:
+            for temp_file in temp_files:
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except Exception:
+                        pass
