@@ -65,11 +65,16 @@ class WhisperProgressHook:
     def flush(self):
         self.terminal.flush()
 
-def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt):
+def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt, parent_sys_path=None):
     """
     [Worker Process] 별도 프로세스에서 실행되는 Whisper 추론 함수입니다.
     stdout을 캡처하여 진행률을 실시간으로 보고합니다.
     """
+    if parent_sys_path:
+        import sys
+        for p in parent_sys_path:
+            if p not in sys.path:
+                sys.path.append(p)
     try:
         print(f"[Whisper Worker] PID {os.getpid()} started processing with model: {model_path}...")
         
@@ -459,7 +464,7 @@ class VideoTranscriber:
             # [New] total_duration을 인자로 전달
             worker_process = multiprocessing.Process(
                 target=run_whisper_worker,
-                args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt),
+                args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt, sys.path),
             )
             worker_process.start()
             
