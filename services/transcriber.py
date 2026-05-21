@@ -336,12 +336,18 @@ class VideoTranscriber:
     # [Add] 이 메서드를 클래스 내부에 새로 추가하세요. (_filter_hallucinations 밑 추천)
     def _sanitize_segments(self, segments):
         """
-        [Sanitizer v2] 강력한 중복 제거 및 타임스탬프 교정
+        [Sanitizer v3] 강력한 중복 제거 및 타임스탬프 교정
         - 긴 영상에서 발생하는 슬라이딩 윈도우 중복(Sliding Window Duplication)을 제거합니다.
-        - 텍스트 유사도를 검사하여 겹치는 구간을 병합하거나 삭제합니다.
+        - 띄어쓰기 오차를 제거한 텍스트 유사도 검사를 통해 겹치는 구간을 병합하거나 삭제합니다.
+        - stable_whisper 빌드 시 발생할 수 있는 타임스탬프 순서 역행(Timestamps not in ascending order)을
+          방지하기 위해 세그먼트 간 및 단어 단위 타임스탬프에 단조성(Monotonicity)을 강제합니다.
         """
         if not segments:
             return []
+
+        import copy
+        # deep copy를 수행하여 원본 데이터 조작 방지
+        segments = copy.deepcopy(segments)
 
         # 1. 무조건 시작 시간순 정렬 (ID 순서 무시)
         segments.sort(key=lambda x: x['start'])
@@ -363,31 +369,95 @@ class VideoTranscriber:
             # 2. 중첩(Overlap) 감지
             # 허용 오차(tolerance) 0.1초: 미세한 겹침은 무시하되, 큰 겹침은 처리
             if prev['end'] > current['start'] + 0.1:
-                overlap_duration = prev['end'] - current['start']
+                # 띄어쓰기 차이로 인한 매칭 실패를 막기 위해 공백 제거 정규화 적용
+                prev_text_norm = re.sub(r'\s+', '', prev['text'])
+                curr_text_norm = re.sub(r'\s+', '', current['text'])
                 
                 # (A) 텍스트 중복 검사 (핵심)
-                # 앞 문장의 뒷부분과 뒷 문장의 앞부분이 겹치는지 확인
-                prev_text = prev['text'].strip()
-                curr_text = current['text'].strip()
-                
-                # 텍스트가 완전히 포함되거나 매우 유사하면 -> 현재 세그먼트 삭제 (Duplicate)
-                if curr_text in prev_text or prev_text in curr_text:
+                if curr_text_norm in prev_text_norm or prev_text_norm in curr_text_norm:
                     # 더 긴 쪽을 유지 (정보량이 많은 쪽)
-                    if len(curr_text) > len(prev_text):
+                    if len(curr_text_norm) > len(prev_text_norm):
                         sanitized.pop()
                         sanitized.append(current)
-                    continue # 현재 루프 건너뜀 (삭제 효과)
+                    continue # 현재 루프 건너뜀 (현재 세그먼트 삭제 효과)
 
                 # (B) 시간 조정 (Trimming)
                 # 텍스트는 다르지만 시간이 겹침 -> 이전 세그먼트를 잘라서 겹침 해소
-                # 단, 이전 세그먼트가 너무 짧아지면(0.2초 미만) 삭제
                 prev['end'] = current['start']
                 if prev['end'] - prev['start'] < 0.2:
                     sanitized.pop()
             
             sanitized.append(current)
 
-        return sanitized
+        # 3. 단조성 강제 및 단어 타임스탬프 동기화 (Timestamp Enforcer)
+        final_sanitized = []
+        for seg in sanitized:
+            # 세그먼트 자체의 최소 길이 보장 (10ms 미만 제거)
+            if seg['end'] - seg['start'] < 0.01:
+                continue
+
+            if final_sanitized:
+                prev_seg = final_sanitized[-1]
+                if prev_seg['end'] > seg['start']:
+                    # 겹치는 경계를 정렬
+                    prev_seg['end'] = seg['start']
+                    # 이전 세그먼트의 변경된 경계에 맞춰 내부 단어들 재정렬
+                    self._align_words_with_segment_bounds(prev_seg)
+                    
+                    # 만약 이전 세그먼트가 너무 짧아졌다면 폐기
+                    if prev_seg['end'] - prev_seg['start'] < 0.01:
+                        final_sanitized.pop()
+
+            self._align_words_with_segment_bounds(seg)
+            final_sanitized.append(seg)
+
+        return final_sanitized
+
+    def _align_words_with_segment_bounds(self, seg):
+        """
+        세그먼트 내 단어들의 타임스탬프를 세그먼트의 start/end 경계 내로 조율하고,
+        단어 간의 타임스탬프 단조성(Monotonicity)을 강제합니다.
+        """
+        if 'words' not in seg or not seg['words']:
+            return
+
+        valid_words = []
+        seg_start = seg['start']
+        seg_end = seg['end']
+
+        for w in seg['words']:
+            w_start = w['start']
+            w_end = w['end']
+
+            # 세그먼트 시간 범위를 완전히 벗어난 단어 필터링
+            if w_start >= seg_end or w_end <= seg_start:
+                continue
+
+            # 경계 내로 클램핑 (Clamping)
+            w_start = max(w_start, seg_start)
+            w_end = min(w_end, seg_end)
+
+            if w_end > w_start:
+                w['start'] = w_start
+                w['end'] = w_end
+                valid_words.append(w)
+
+        # 시작 시간 기준으로 재정렬
+        valid_words.sort(key=lambda x: x['start'])
+
+        # 단어들 간의 역행 방지 및 단조성 보장
+        aligned_words = []
+        for w in valid_words:
+            if aligned_words:
+                prev_w = aligned_words[-1]
+                if prev_w['end'] > w['start']:
+                    w['start'] = prev_w['end']
+                
+                if w['end'] <= w['start']:
+                    continue
+            aligned_words.append(w)
+
+        seg['words'] = aligned_words
 
     def _remove_punctuation_from_subtitle_file(self, file_path):
         """
