@@ -3,7 +3,11 @@ import subprocess
 import re
 import json
 import torch
-import mlx_whisper
+try:
+    import mlx_whisper
+except ImportError:
+    mlx_whisper = None
+
 import soundfile as sf
 import numpy as np
 import stable_whisper
@@ -74,18 +78,54 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
         hook = WhisperProgressHook(result_queue, total_duration)
         sys.stdout = hook
         
-        # MLX Whisper 추론 실행
-        output = mlx_whisper.transcribe(
-            wav_path,
-            path_or_hf_repo=model_path,
-            language="ko",
-            verbose=True,  # [중요] True여야 타임스탬프 로그가 출력되어 Hook이 작동함
-            word_timestamps=True,
-            condition_on_previous_text=False,
-            temperature=(0.0, 0.2, 0.4),
-            initial_prompt=initial_prompt,
-        )
-        
+        output = None
+
+        if sys.platform == "darwin" and mlx_whisper is not None:
+            # --- [Mac] MLX Whisper Engine ---
+            print("[Whisper Worker] Using MLX Engine (Apple Silicon Optimized)")
+            # MLX Whisper 추론 실행
+            output = mlx_whisper.transcribe(
+                wav_path,
+                path_or_hf_repo=model_path,
+                language="ko",
+                verbose=True,  # [중요] True여야 타임스탬프 로그가 출력되어 Hook이 작동함
+                word_timestamps=True,
+                condition_on_previous_text=False,
+                temperature=(0.0, 0.2, 0.4),
+                initial_prompt=initial_prompt
+            )
+        else:
+            # --- [Windows/Linux] Faster-Whisper + Stable-Whisper Engine ---
+            # NVIDIA GPU(CUDA) 가속 사용
+            print("[Whisper Worker] Using Faster-Whisper Engine (CUDA/CPU)")
+            
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            compute_type = "float16" if torch.cuda.is_available() else "int8"
+            
+            print(f"[Whisper Worker] Device: {device}, Compute Type: {compute_type}")
+            
+            # Faster-Whisper 모델 로드 (backend='faster-whisper')
+            # stable-ts 2.x에서는 load_faster_whisper 함수 사용
+            model = stable_whisper.load_faster_whisper(
+                model_path, 
+                device=device, 
+                compute_type=compute_type
+            )
+            
+            # 추론 실행
+            # verbose=True로 설정해야 Hook이 진행률을 잡을 수 있음
+            result = model.transcribe_stable(
+                wav_path,
+                language="ko",
+                vad=True, # Faster-Whisper 내장 VAD 사용
+                verbose=True,
+                initial_prompt=initial_prompt,
+                temperature=(0.0, 0.2, 0.4)
+            )
+            
+            # MLX 결과 포맷과 호환되도록 딕셔너리로 변환
+            output = result.to_dict()
+
         # stdout 복구
         sys.stdout = hook.terminal
         

@@ -52,7 +52,19 @@ class ConfigManager:
     def get_model(cls, task_type):
         """특정 작업에 설정된 모델명을 가져옵니다."""
         config = cls.load_config()
-        return config.get("models", {}).get(task_type, cls.DEFAULT_CONFIG["models"].get(task_type))
+        model_name = config.get("models", {}).get(task_type, cls.DEFAULT_CONFIG["models"].get(task_type))
+        
+        # [OS 분기] Whisper 모델의 경우, OS에 따라 다른 기본 모델을 반환해야 함
+        if task_type == "whisper":
+            # 사용자가 config.json에 명시적으로 모델을 바꿨다면 그 값을 존중하되,
+            # 기본값인 경우 OS에 맞춰 스위칭
+            default_mlx = cls.DEFAULT_CONFIG["models"]["whisper"]
+            
+            # Mac이 아닌 경우(Windows/Linux)이고, 모델명이 MLX 전용이라면 -> Faster-Whisper용 표준 모델명으로 변경
+            if sys.platform != "darwin" and "mlx-community" in model_name:
+                return "large-v3" # Faster-Whisper 표준 모델명
+                
+        return model_name
 
 class SystemManager:
     _state_lock = threading.Lock()

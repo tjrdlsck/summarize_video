@@ -5,6 +5,7 @@ import json
 import math
 import re
 import urllib.parse
+import pathlib # [Add] 경로 처리를 위해 추가
 
 class PremiereExporter:
     """
@@ -112,11 +113,22 @@ class PremiereExporter:
             file_node = f'<file id="{file_id}"/>'
         else:
             # 최초 파일 정의 (Full Definition)
-            encoded_filename = urllib.parse.quote(relative_filename)
+            # [Modified] OS 호환 경로 처리 (pathlib 사용)
+            try:
+                abs_path = os.path.abspath(relative_filename)
+                file_uri = pathlib.Path(abs_path).as_uri() # file:///C:/Users/... or file:///Users/...
+                
+                # Premiere Pro는 localhost가 포함된 것을 선호하는 경향이 있음 (Mac/Win 공통)
+                # file:/// -> file://localhost/ 로 치환 시도
+                file_uri = file_uri.replace("file:///", "file://localhost/")
+            except Exception as e:
+                print(f"[Exporter Warning] Path conversion failed: {e}")
+                file_uri = f"file://localhost/{urllib.parse.quote(relative_filename)}"
+
             file_node = f"""
             <file id="{file_id}">
               <name>{video_name}</name>
-              <pathurl>file://localhost/{encoded_filename}</pathurl>
+              <pathurl>{file_uri}</pathurl>
               <rate>
                 <timebase>{meta['timebase']}</timebase>
                 <ntsc>{meta['ntsc']}</ntsc>
