@@ -285,8 +285,9 @@ class VideoTranscriber:
             wav = torch.from_numpy(audio_data).float()
             
             # 차원 및 샘플링 레이트 보정
-            if wav.ndim > 1: wav = wav.mean(dim=0, keepdim=True) # Stereo -> Mono
-            if wav.ndim == 1: wav = wav.unsqueeze(0)
+            if wav.ndim > 1: 
+                wav = wav.mean(dim=1) # Stereo -> Mono (samples, channels) 이므로 dim=1 기준 평균
+            wav = wav.unsqueeze(0) # (1, samples) 형태로 변환하여 Silero VAD에 전달
             
             speech_timestamps = get_speech_timestamps(wav, model, threshold=0.5)
             
@@ -298,7 +299,7 @@ class VideoTranscriber:
             return segments
         except Exception as e:
             print(f"[Warning] VAD execution failed: {e}")
-            return []
+            return None # 에러 발생 시 None 반환하여 필터 무력화 방지
         finally:
             # [Add] VAD 모델 메모리 해제 시도
             if 'model' in locals():
@@ -307,7 +308,10 @@ class VideoTranscriber:
 
     def _filter_hallucinations(self, whisper_segments, vad_segments):
         """Whisper 세그먼트가 VAD 구간과 겹치지 않으면(환각이면) 제거"""
-        if not vad_segments: return whisper_segments
+        if vad_segments is None: 
+            return whisper_segments # VAD 실행 오류 시 안전장치로 필터 통과
+        if not vad_segments: 
+            return [] # VAD가 정상 구동되었으나 음성이 감지되지 않은 경우 환각 차단
         
         valid_segments = []
         for seg in whisper_segments:

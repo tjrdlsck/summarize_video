@@ -25,4 +25,10 @@
   - [x] [tasks.py](file:///home/radi/cli/summarize_video/app/api/routers/tasks.py)에 `/api/tasks/{task_id}/log` 엔드포인트 구현
   - [x] [test_logger.py](file:///home/radi/cli/summarize_video/tests/test_logger.py)에 `fail_task` 로깅 자동화 관련 단위 테스트 추가
   - [x] pytest 전체 테스트 재실행 및 검증
+- [x] VAD 텐서 차원 붕괴 버그 수정 (`transcriber.py`)
+- [x] `_filter_hallucinations` 환각 필터링 로직 강화 (`transcriber.py`)
+- [x] 신규 VAD 및 환각 방지 단위 테스트 작성 (`test_transcriber.py`)
+- [x] `자폭드론...mp4` 비디오에 대한 실무 기능 테스트 수행 및 무비 오동작 해결 검증
+
+
 
