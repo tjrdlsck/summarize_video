@@ -28,7 +28,12 @@
 - [x] VAD 텐서 차원 붕괴 버그 수정 (`transcriber.py`)
 - [x] `_filter_hallucinations` 환각 필터링 로직 강화 (`transcriber.py`)
 - [x] 신규 VAD 및 환각 방지 단위 테스트 작성 (`test_transcriber.py`)
-- [x] `자폭드론...mp4` 비디오에 대한 실무 기능 테스트 수행 및 무비 오동작 해결 검증
+- [x] 타임스탬프 순서 역행 오류(Timestamps not in ascending order) 해결 (`transcriber.py`)
+  - [x] `_sanitize_segments` 에 공백을 제거한 텍스트 유사도 검사(Normalization) 적용
+  - [x] 세그먼트 경계 Trimming 및 Monotonicity 강제 시 `_align_words_with_segment_bounds`를 통한 내부 단어(words) 목록 타임스탬프 클램핑 및 동기화 구현
+- [x] 타임스탬프 순서 단조성 강제 단위 테스트 추가 (`test_transcriber.py`)
+  - [x] `test_transcriber_sanitize_segments_robustness` 추가 및 pytest 검증
+
 
 
 

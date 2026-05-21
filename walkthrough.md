@@ -51,6 +51,14 @@
 - **[test_transcriber.py](file:///home/radi/cli/summarize_video/tests/test_transcriber.py)** 수정:
   - `test_transcriber_vad_correction` 단위 테스트를 추가하여 가상의 2채널 오디오 데이터에 대한 텐서 변환 무결성 및 `_filter_hallucinations` 분기 필터링 동작을 자동 검증할 수 있도록 하였습니다.
 
+### 6. 타임스탬프 순서 단조성 강제 및 중복 제거 개선 (Sanitizer v3)
+- **[transcriber.py](file:///home/radi/cli/summarize_video/services/transcriber.py)** 수정:
+  - `_sanitize_segments` 에서 텍스트 중복 판정 시, 띄어쓰기 차이로 인해 필터링이 누락되는 현상을 제거하기 위해 공백을 모두 제거하는 정규화(Normalization) 기법을 도입하였습니다.
+  - 세그먼트 트리밍(Trimming) 및 겹침 해소 과정에서 세그먼트 레벨뿐 아니라 내부 단어(words) 목록의 시작/종료 시간도 경계값에 맞춰 클램핑(Clamping)하는 `_align_words_with_segment_bounds` 헬퍼 메서드를 추가하였습니다.
+  - 이를 통해 `stable-ts` 객체(`WhisperResult`) 빌드 시 단어 및 세그먼트 시간의 역행으로 유발되는 `Timestamps are not in ascending order` 치명적 크래시 에러를 원천적으로 방지하고 전체 파이프라인의 견고함을 극대화했습니다.
+- **[test_transcriber.py](file:///home/radi/cli/summarize_video/tests/test_transcriber.py)** 수정:
+  - `test_transcriber_sanitize_segments_robustness` 단위 테스트를 신규 작성하여 공백 차이가 있는 중복 세그먼트가 제대로 병합되는지 확인하고, 트리밍 후 세그먼트와 단어 목록이 단조성(Monotonicity)을 완벽히 만족하여 `WhisperResult` 빌드가 성공적으로 완수되는지 검증하였습니다.
+
 ---
 
 ## 검증 내용 (What Was Tested)
@@ -70,13 +78,14 @@
 - 그 결과, VAD가 정상 작동하여 음성 구간을 0개(`Detected 0 speech segments.`)로 감지하고, 이에 반응한 환각 필터가 Whisper가 무음 구간에서 무작위로 뱉은 환각 자막("다음 영상에서 만나요", "기독교 용어 포함...")을 완벽하게 걸러내어, 자막 리스트 크기가 0개(`Segments Count: 0`)인 깨끗한 빈 자막 파일로 생성 완료함을 확인하였습니다.
 
 ### 5. 전체 테스트 스위트 검증
-- `pytest` 명령을 이용해 프로젝트 전체 테스트 28개를 일괄 구동하여 사이드 이펙트 없이 안정적으로 빌드 및 기동됨을 확인하였습니다.
+- `pytest` 명령을 이용해 프로젝트 전체 테스트 29개를 일괄 구동하여 사이드 이펙트 없이 안정적으로 빌드 및 기동됨을 확인하였습니다.
 
 ## 검증 결과 (Validation Results)
-- 단위 테스트 및 전체 테스트 실행 결과: **전원 통과 (28 Passed)**
+- 단위 테스트 및 전체 테스트 실행 결과: **전원 통과 (29 Passed)**
   - `compute_type`이 `int8_float16`로 정상 로드됨을 실시간으로 확인하였습니다.
   - 신규 로깅 시스템과 그에 대한 검증 테스트 4종이 모두 정상적으로 패스하였습니다.
   - VAD 텐서 축 오류 수정 및 환각 억제 테스트가 성공하였습니다.
+  - 타임스탬프 순서 단조성 강제 및 중복 제거 개선(Sanitizer v3) 테스트가 성공하였습니다.
 
 ---
 ## 참고 문헌 (Official Docs)
