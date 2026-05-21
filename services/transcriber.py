@@ -119,7 +119,7 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
             
             # 추론 실행
             # verbose=True로 설정해야 Hook이 진행률을 잡을 수 있음
-            result = model.transcribe_stable(
+            result = model.transcribe(
                 wav_path,
                 language="ko",
                 vad=True, # Faster-Whisper 내장 VAD 사용
