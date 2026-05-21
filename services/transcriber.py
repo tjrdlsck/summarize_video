@@ -129,7 +129,7 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
                 condition_on_previous_text=False,
                 compression_ratio_threshold=2.4,
                 no_speech_threshold=0.6,
-                logprob_threshold=-1.0
+                log_prob_threshold=-1.0
             )
             
             # MLX 결과 포맷과 호환되도록 딕셔너리로 변환
