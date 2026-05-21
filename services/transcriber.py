@@ -578,10 +578,11 @@ class VideoTranscriber:
                 logger.info(f" -> Spawning Whisper Worker Process for {video_path}")
             else:
                 print(" -> Spawning Whisper Worker Process...")
-            queue = multiprocessing.Queue()
+            ctx = multiprocessing.get_context('spawn')
+            queue = ctx.Queue()
             
             # [New] total_duration을 인자로 전달
-            worker_process = multiprocessing.Process(
+            worker_process = ctx.Process(
                 target=run_whisper_worker,
                 args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt, sys.path),
             )
