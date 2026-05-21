@@ -43,26 +43,50 @@
 
 ### 서비스 레이어 (Service Layer)
 
+#### [NEW] [logger.py](file:///home/radi/cli/summarize_video/services/logger.py)
+- 공통 파이썬 `logging` 설정을 구축하여 콘솔(`StreamHandler`)과 일별 로그 파일(`FileHandler`) 출력을 지원합니다.
+- `log_task_error`를 통해 개별 태스크(Task) ID 단위로 격리된 예외 보고서(`task_<task_id>.log`)를 상세 기록하는 기능을 구현합니다.
+
+#### [MODIFY] [task_manager.py](file:///home/radi/cli/summarize_video/services/task_manager.py)
+- `fail_task` 메서드에 `exception` 매개변수를 추가하고, `sys.exc_info()` 또는 직접 넘겨진 `exception` 객체를 감지하여 자동으로 `log_task_error`를 통해 상세 트레이스백(Traceback) 에러 보고서를 파일로 생성하도록 결합합니다.
+- 태스크 데이터 구조에 `log_file` 필드를 추가하여, 실패 시 저장된 디버그 로그 파일명을 `tasks.json`에 기록해 프론트엔드가 접근하기 쉽도록 설계합니다.
+
 #### [MODIFY] [transcriber.py](file:///home/radi/cli/summarize_video/services/transcriber.py)
 - `run_whisper_worker` 내부의 Faster-Whisper 디바이스 및 컴파일 파라미터를 2060 Super에 최적화합니다.
   - `compute_type` 결정을 `int8_float16`로 기본 설정.
   - deprecated된 `transcribe_stable` 메서드를 최신 권장 API인 `transcribe`로 변경하여 경고 메시지 제거.
   - `transcribe` 호출 시 `condition_on_previous_text=False`, `temperature=0.0`, `no_speech_threshold=0.6`, `log_prob_threshold=-1.0` 추가.
+- 예외 발생 시 호출 스택(Traceback) 상세 분석 및 로깅 기능을 추가합니다.
+  - Whisper Worker 자식 프로세스 crash 시 예외 객체 및 Traceback 정보를 로그 디렉토리(`static/logs/`)에 기록합니다.
+  - 부모 프로세스 파이프라인 상의 에러 및 취소 여부를 감지해 상세 Task 로그를 기록합니다.
+
+#### [MODIFY] [pipeline_runner.py](file:///home/radi/cli/summarize_video/app/application/pipeline_runner.py)
+- 각 파이프라인의 `except Exception as error` 블록에서 `fail_task` 호출 시 `exception=error`를 넘겨주도록 변경하여, 보다 명확하고 디버깅하기 쉬운 예외 포착(Exception trapping)이 일어나도록 합니다.
+
+#### [MODIFY] [worker.py](file:///home/radi/cli/summarize_video/app/application/worker.py)
+- `QueueWorker.run` 루프 외부 및 예기치 못한 태스크 예외 블록에서 로깅 시스템(`log_error_with_traceback`) 및 `fail_task`를 활용해 트레이스백이 완전 소실되지 않도록 보강합니다.
+
+#### [MODIFY] [tasks.py](file:///home/radi/cli/summarize_video/app/api/routers/tasks.py)
+- `/api/tasks/{task_id}/log` GET 엔드포인트를 추가하여 특정 태스크 실패 시 축적된 `task_<task_id>.log` 디버그 로그 파일의 텍스트 내용을 직접 반환합니다. 이를 통해 버그 발생 시 신속히 복기할 수 있게 지원합니다.
 
 ### 테스트 스크립트 (Test Suite)
 
 #### [MODIFY] [test_cross_platform.py](file:///home/radi/cli/summarize_video/tests/test_cross_platform.py)
 - `test_whisper_model_selection_non_darwin` 테스트의 단언(Assertion) 값을 `large-v3-turbo`에 맞도록 변경합니다.
 
+#### [NEW] [test_logger.py](file:///home/radi/cli/summarize_video/tests/test_logger.py)
+- 공통 로깅 객체 생성 확인 및 태스크별 에러 보고서 파일 생성/내용 일치성 검증 단위 테스트를 작성합니다.
+- `task_manager.fail_task` 와의 결합 및 로그 파일 생성 무결성 검증 케이스를 추가합니다.
+
 ---
 
 ## 검증 계획
 
 ### 자동화 테스트 (Automated Tests)
-- `tests/test_transcriber.py` 테스트 코드를 재실행하여 바뀐 파라미터 및 모델 옵션이 에러 없이 정상적으로 파싱되고 로드되는지 확인합니다.
+- `tests/test_transcriber.py` 및 `tests/test_logger.py` 테스트 코드를 재실행하여 바뀐 파라미터, 자동 로깅, 예외 캡처 API가 에러 없이 작동하는지 확인합니다.
 
 ### 수동 검증 (Manual Verification)
-- 실제 짧은 한국어 영상을 자막 변환하여 이전 대비 환각 현상(문장 반복, 무음 구간 낙서)이 개선되었는지 테스트합니다.
+- 고의로 비정상적인 입력값(예: 존재하지 않는 비디오)을 입력하여 태스크를 실패시키고, `/api/tasks/{task_id}/log` 엔드포인트를 통해 에러 로그가 깔끔하게 노출되는지 실시간 확인합니다.
 
 ---
 ## 참고 문헌 (Official Docs)

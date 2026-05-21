@@ -13,3 +13,16 @@
 - [x] 검증 및 테스트 수정
   - [x] [test_cross_platform.py](file:///home/radi/cli/summarize_video/tests/test_cross_platform.py) 테스트 코드 assertion 수정 (`large-v3-turbo` 대응)
   - [x] `transcribe` 변경 후 pytest 실행 및 모든 테스트 통과 확인
+- [x] 에러 로깅 시스템 고도화 및 견고성 확보
+  - [x] [logger.py](file:///home/radi/cli/summarize_video/services/logger.py) 설계 및 구현 (공통 콘솔/파일 로깅 및 태스크 ID 단위 보고서 작성 기능 지원)
+  - [x] [transcriber.py](file:///home/radi/cli/summarize_video/services/transcriber.py) 내 로그 트레이서(Traceback) 및 예외 처리 연동
+  - [x] [test_logger.py](file:///home/radi/cli/summarize_video/tests/test_logger.py) 작성 및 로컬 단위 테스트 검증
+  - [x] pytest 실행 및 모든 테스트(25개) 통과 확인
+- [x] 에러 로깅 시스템 추가 고도화 및 조회 API 연동
+  - [x] [task_manager.py](file:///home/radi/cli/summarize_video/services/task_manager.py)의 `fail_task`에 자동 예외 캡처(sys.exc_info() 및 exception 전달) 결합
+  - [x] [pipeline_runner.py](file:///home/radi/cli/summarize_video/app/application/pipeline_runner.py) 각 단계 실패 시 `exception=error` 인자 전달
+  - [x] [worker.py](file:///home/radi/cli/summarize_video/app/application/worker.py) 예외 블록 로깅 보강
+  - [x] [tasks.py](file:///home/radi/cli/summarize_video/app/api/routers/tasks.py)에 `/api/tasks/{task_id}/log` 엔드포인트 구현
+  - [x] [test_logger.py](file:///home/radi/cli/summarize_video/tests/test_logger.py)에 `fail_task` 로깅 자동화 관련 단위 테스트 추가
+  - [x] pytest 전체 테스트 재실행 및 검증
+

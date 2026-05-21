@@ -24,6 +24,25 @@
 - **[test_cross_platform.py](file:///home/radi/cli/summarize_video/tests/test_cross_platform.py)** 수정:
   - 기본 Whisper 모델이 `large-v3-turbo`로 전환됨에 따라 이에 맞추어 단위 테스트의 assert 기준을 최신화하였습니다.
 
+### 4. 에러 로깅 시스템 고도화 및 견고성 확보
+- **[logger.py](file:///home/radi/cli/summarize_video/services/logger.py)** 신규 구현:
+  - 공통 로깅 프레임워크를 설계하여 콘솔 출력과 일별 통합 로그 파일 기록을 동시에 제공합니다.
+  - `log_task_error` 메서드를 설계하여, 특정 태스크 수행 실패 시 독립된 로그 파일(`task_<task_id>.log`)에 전체 예외 호출 스택(Traceback)을 세부 기록하도록 보장합니다.
+- **[task_manager.py](file:///home/radi/cli/summarize_video/services/task_manager.py)** 수정:
+  - `fail_task` 호출 시 예외 객체가 전달되거나 현재 try-except 예외 처리부 내에 있다면 `sys.exc_info()`를 이용해 자동으로 traceback 정보를 수집하여 `log_task_error`를 통해 개별 태스크 로그 파일에 기록하도록 고도화하였습니다.
+  - 태스크 모델에 `log_file` 필드를 추가하여 갱신함으로써, 실패한 작업의 디버그 로그 파일 위치 정보를 `tasks.json`에 영구 보존합니다.
+- **[transcriber.py](file:///home/radi/cli/summarize_video/services/transcriber.py)** 수정:
+  - Whisper Worker 자식 프로세스 내에서 충돌이나 라이브러리 에러 발생 시 `traceback.format_exc()`를 활용하여 상세 정보를 즉각 기록하고 예외를 전달하도록 에러 처리 로직을 격리 강화하였습니다.
+  - `VideoTranscriber.transcribe` 주 파이프라인의 각 진입 단계(오디오 추출, VAD, 프로세스 생성, 완수)마다 이정표를 로깅하고, 런타임 예외 발생 시 상세 로그 및 태스크 레포트를 남기도록 고도화하였습니다.
+- **[pipeline_runner.py](file:///home/radi/cli/summarize_video/app/application/pipeline_runner.py) 및 [worker.py](file:///home/radi/cli/summarize_video/app/application/worker.py)** 수정:
+  - 각 백그라운드 파이프라인과 대기열 워커의 `except Exception as error` 블록에서 `fail_task`를 호출할 때 예외 객체를 `exception=error` 형태로 명시적으로 위임하여 호출 스택 유실을 완벽히 방지하였습니다.
+- **[tasks.py](file:///home/radi/cli/summarize_video/app/api/routers/tasks.py)** 수정:
+  - `/api/tasks/{task_id}/log` HTTP GET 엔드포인트를 신규 개설하여 실패한 태스크의 디버그 로그(`task_<task_id>.log`) 내용을 평문 텍스트(`PlainTextResponse`)로 조회할 수 있게 지원합니다. 이를 통해 버그 발생 시 즉각 복기하여 수정할 수 있습니다.
+- **[test_logger.py](file:///home/radi/cli/summarize_video/tests/test_logger.py)** 신규 작성 및 확장:
+  - 로거 생성, 콘솔/파일 핸들러 부착 여부, 그리고 예외 발생 시 독립된 태스크 로그가 올바른 포맷으로 작성되는지 검증하는 테스트 코드를 추가하였습니다.
+  - 태스크 매니저 `fail_task` 호출 시 자동으로 상세 에러 로그 파일이 기록되는지 검증하는 결합 단위 테스트를 추가하였습니다.
+  - FastAPI `TestClient`를 이용해 실제 `/api/tasks/{task_id}/log` 조회 시 올바른 에러 텍스트와 HTTP 상태 코드(200/404)를 반환하는지 통합 검증하는 테스트를 추가하였습니다.
+
 ---
 
 ## 검증 내용 (What Was Tested)
@@ -31,15 +50,23 @@
 ### 1. 자식 프로세스 내 모듈 검색 경로 유효성 검증
 - [test_transcriber.py](file:///home/radi/cli/summarize_video/tests/test_transcriber.py) 단위 테스트를 작성 및 실행하여, Whisper Worker를 독립된 프로세스로 띄웠을 때 `faster_whisper` 모듈을 정상적으로 로드하는지 확인하였습니다.
 
-### 2. 전체 테스트 스위트 검증
-- `pytest` 명령을 이용해 프로젝트 전체 테스트 23개를 일괄 구동하여 사이드 이펙트 없이 안정적으로 빌드 및 기동됨을 확인하였습니다.
+### 2. 에러 로깅 시스템 및 API 유효성 검증
+- [test_logger.py](file:///home/radi/cli/summarize_video/tests/test_logger.py)를 도입하여 로거 객체 핸들러 정상 주입 여부와 예외 발생 상황 시 태스크 전용 에러 로그 파일(`task_<task_id>.log`) 생성 및 로그 포맷 파싱 무결성을 점검하였습니다.
+- 태스크 매니저 연동 및 `/api/tasks/{task_id}/log` REST API의 호출 무결성(상태 코드 및 반환된 에러 본문 일치 여부)을 통합 검증하였습니다.
+
+### 3. 전체 테스트 스위트 검증
+- `pytest` 명령을 이용해 프로젝트 전체 테스트 27개를 일괄 구동하여 사이드 이펙트 없이 안정적으로 빌드 및 기동됨을 확인하였습니다.
 
 ## 검증 결과 (Validation Results)
-- 단위 테스트 및 전체 테스트 실행 결과: **전원 통과 (23 Passed)**
+- 단위 테스트 및 전체 테스트 실행 결과: **전원 통과 (27 Passed)**
   - `compute_type`이 `int8_float16`로 정상 로드됨을 실시간으로 확인하였습니다.
-  - 전체 실행 로그는 [test_transcriber_output.log](file:///home/radi/cli/summarize_video/test_results/test_transcriber_output.log)에서 확인하실 수 있습니다.
+  - 신규 로깅 시스템과 그에 대한 검증 테스트 4종이 모두 정상적으로 패스하였습니다.
 
 ---
 ## 참고 문헌 (Official Docs)
 - [Faster-Whisper Model list & Quantization](https://github.com/SYSTRAN/faster-whisper)
 - [Stable-ts generation parameters](https://github.com/jianfch/stable-ts)
+- [FastAPI TestClient Guide](https://fastapi.tiangolo.com/tutorial/testing/)
+- [Python logging - Logging facility for Python](https://docs.python.org/3/library/logging.html)
+- [Python traceback - Print or retrieve a stack traceback](https://docs.python.org/3/library/traceback.html)
+

@@ -147,6 +147,23 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
         sys.stdout = sys.__stdout__ # 혹시 모르니 표준출력 복구
         print(f"[Whisper Worker] Error: {e}")
         result_queue.put({"status": "error", "message": str(e)})
+        
+        # [Add] 에러 로그 파일 기록 및 Traceback 보존
+        try:
+            from services.logger import get_logger, log_error_with_traceback
+            logger = get_logger()
+            log_error_with_traceback(logger, f"[Whisper Worker] Inference crashed in worker process {os.getpid()}", e)
+        except Exception:
+            # 임포트 문제 등으로 로깅 모듈이 실패할 경우를 대비한 로컬 백업 로깅
+            try:
+                import traceback
+                log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "logs")
+                os.makedirs(log_dir, exist_ok=True)
+                backup_log = os.path.join(log_dir, f"worker_crash_{os.getpid()}.log")
+                with open(backup_log, "w", encoding="utf-8") as f:
+                    f.write(f"Worker Exception: {str(e)}\n\nTraceback:\n{traceback.format_exc()}")
+            except Exception:
+                pass
     finally:
         # [Add] 워커 프로세스 종료 전 메모리 정리
         gc.collect()
@@ -434,7 +451,15 @@ class VideoTranscriber:
         """
         [Main Pipeline] 프로세스 격리 + 정밀 진행률 추적이 적용된 Transcribe 메서드
         """
-        print(f"--- [Transcriber] Start processing: {video_path} ---")
+        # [Add] 로거 로딩 및 시작 로그 기록
+        try:
+            from services.logger import get_logger
+            logger = get_logger()
+            logger.info(f"--- [Transcriber] Start processing: {video_path} (Task ID: {task_id}) ---")
+        except Exception:
+            logger = None
+            print(f"--- [Transcriber] Start processing: {video_path} ---")
+            
         profile = get_content_profile(content_type)
         
         self._check_cancel(task_manager, task_id)
@@ -442,7 +467,14 @@ class VideoTranscriber:
         # 1. 오디오 변환 (FFmpeg 내부에서 0~20% 진행률 자동 업데이트)
         # progress_callback은 여기서 쓰지 않고 FFmpeg 내부 로직이 task_manager를 직접 호출함
         wav_path = self._convert_to_16k_wav(video_path, task_manager, task_id)
-        if not wav_path: raise Exception("Audio conversion failed")
+        if not wav_path:
+            exc = Exception("Audio conversion failed (FFmpeg returned None or failed)")
+            if logger:
+                logger.error(f"[Transcriber] FFmpeg conversion failed for {video_path}")
+                if task_id:
+                    from services.logger import log_task_error
+                    log_task_error(task_id, "audio_conversion", exc)
+            raise exc
 
         try:
             self._check_cancel(task_manager, task_id)
@@ -451,18 +483,27 @@ class VideoTranscriber:
             try:
                 audio_info = sf.info(wav_path)
                 total_duration = audio_info.duration
-            except Exception:
+                if logger:
+                    logger.info(f"[Transcriber] Audio duration: {total_duration:.2f} seconds")
+            except Exception as e:
                 total_duration = 100 # Fallback
+                if logger:
+                    logger.warning(f"[Transcriber] Failed to calculate audio duration: {e}. Fallback to 100s.")
 
             # 2. VAD 실행
             if progress_callback: progress_callback(20, "음성 구간 탐지(VAD) 실행 중...")
             vad_segments = self._get_vad_timestamps(wav_path)
+            if logger:
+                logger.info(f"[Transcriber] VAD completed. Detected {len(vad_segments)} speech segments.")
             
             self._check_cancel(task_manager, task_id)
             if progress_callback: progress_callback(25, "AI 자막 생성 준비 중...")
             
             # 3. Whisper 실행
-            print(" -> Spawning Whisper Worker Process...")
+            if logger:
+                logger.info(f" -> Spawning Whisper Worker Process for {video_path}")
+            else:
+                print(" -> Spawning Whisper Worker Process...")
             queue = multiprocessing.Queue()
             
             # [New] total_duration을 인자로 전달
@@ -515,7 +556,13 @@ class VideoTranscriber:
                     elif msg["status"] == "error": raise Exception(f"Worker Error: {msg.get('message')}")
             
             if not output:
-                 raise Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
+                 exc = Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
+                 if logger:
+                     logger.error(f"[Transcriber] Whisper Worker process crashed. exitcode={worker_process.exitcode}")
+                 raise exc
+            
+            if logger:
+                logger.info(f"[Transcriber] Whisper Worker process completed successfully.")
             
             # 4. 후처리 (85% ~ 100%)
             if progress_callback: progress_callback(85, "데이터 정제 및 저장 중...")
@@ -575,7 +622,10 @@ class VideoTranscriber:
             self._remove_punctuation_from_subtitle_file(srt_path)
             self._remove_punctuation_from_subtitle_file(vtt_path)
 
-            print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
+            if logger:
+                logger.info(f"--- [Transcriber] Done. Saved results to {self.output_dir} ---")
+            else:
+                print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
             return {
                 "status": "success",
                 "srt_path": srt_path,
@@ -584,9 +634,25 @@ class VideoTranscriber:
                 "segments": final_data 
             }
 
-        except TaskCancelledError:
+        except TaskCancelledError as e:
+            try:
+                if logger:
+                    logger.info(f"[Transcriber] Task {task_id} was cancelled by user.")
+            except Exception:
+                pass
             print(f"[Transcriber] Cleanup initiated for task {task_id}")
-            raise 
+            raise e
+
+        except Exception as e:
+            try:
+                from services.logger import log_error_with_traceback, log_task_error
+                if logger:
+                    log_error_with_traceback(logger, f"Transcription pipeline failed for: {video_path}", e)
+                if task_id:
+                    log_task_error(task_id, "transcribe", e)
+            except Exception as log_err:
+                print(f"[Backup Warning] Failed to write pipeline error log: {log_err}")
+            raise e
 
         finally:
             # [Add] 최종 메모리 정리
@@ -596,7 +662,7 @@ class VideoTranscriber:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            if os.path.exists(wav_path):
+            if 'wav_path' in locals() and os.path.exists(wav_path):
                 os.remove(wav_path)
 
 # --- [Module Test] ---
