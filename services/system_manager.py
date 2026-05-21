@@ -62,7 +62,7 @@ class ConfigManager:
             
             # Mac이 아닌 경우(Windows/Linux)이고, 모델명이 MLX 전용이라면 -> Faster-Whisper용 표준 모델명으로 변경
             if sys.platform != "darwin" and "mlx-community" in model_name:
-                return "large-v3" # Faster-Whisper 표준 모델명
+                return "large-v3-turbo" # Faster-Whisper 표준 모델명 (VRAM 8GB 최적화용 Turbo 모델)
                 
         return model_name
 

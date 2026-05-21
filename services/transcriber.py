@@ -105,7 +105,7 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
             print("[Whisper Worker] Using Faster-Whisper Engine (CUDA/CPU)")
             
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            compute_type = "float16" if torch.cuda.is_available() else "int8"
+            compute_type = "int8_float16" if device == "cuda" else "int8"
             
             print(f"[Whisper Worker] Device: {device}, Compute Type: {compute_type}")
             
@@ -125,7 +125,11 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
                 vad=True, # Faster-Whisper 내장 VAD 사용
                 verbose=True,
                 initial_prompt=initial_prompt,
-                temperature=(0.0, 0.2, 0.4)
+                temperature=0.0,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
+                no_speech_threshold=0.6,
+                logprob_threshold=-1.0
             )
             
             # MLX 결과 포맷과 호환되도록 딕셔너리로 변환
@@ -192,7 +196,7 @@ class VideoTranscriber:
             "-vn", 
             "-ac", "1", 
             "-ar", "16000",
-            "-af", "highpass=f=200,lowpass=f=8000,afftdn=nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-c:a", "pcm_s16le", 
             output_wav, "-y", "-hide_banner", "-loglevel", "info"
         ]

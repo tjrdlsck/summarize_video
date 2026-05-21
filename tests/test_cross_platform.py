@@ -13,9 +13,9 @@ def test_whisper_model_selection_non_darwin(monkeypatch):
     # 모델명 가져오기
     model_name = ConfigManager.get_model("whisper")
     
-    # 기본 구성상 MLX 모델명이 지정되어 있다면 'large-v3'가 반환되어야 함
+    # 기본 구성상 MLX 모델명이 지정되어 있다면 'large-v3-turbo'가 반환되어야 함
     default_whisper_model = ConfigManager.DEFAULT_CONFIG["models"]["whisper"]
     if "mlx-community" in default_whisper_model:
-        assert model_name == "large-v3"
+        assert model_name == "large-v3-turbo"
     else:
         assert model_name == default_whisper_model
