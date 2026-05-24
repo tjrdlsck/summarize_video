@@ -173,7 +173,9 @@ class TaskManager:
         active_list = []
         with self._lock:
             for tid, info in self.tasks.items():
-                if info["status"] in ["queued", "pending", "processing", "canceling"]:
+                if info["status"] in ["queued", "pending", "processing", "canceling", "failed", "canceled"]:
+                    active_list.append(info)
+                elif info["status"] == "completed" and info.get("type") == "clip_export":
                     active_list.append(info)
         
         return sorted(active_list, key=lambda x: x['progress'], reverse=True)

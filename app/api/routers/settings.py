@@ -19,6 +19,7 @@ async def get_settings():
     
     return {
         "models": config.get("models", {}),
+        "whisper_gpu_tier": config.get("whisper_gpu_tier", "low"),
         "platform": sys.platform,
         "whisper_models": whisper_models,
         "gemini_models": gemini_models

@@ -24,6 +24,10 @@ async def cancel_task(task_id: str, container: AppContainer = Depends(get_contai
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    if task["status"] in ["completed", "failed", "canceled"]:
+        container.task_manager.delete_task(task_id)
+        return {"status": "success", "message": "Task dismissed"}
+
     container.task_manager.request_cancel(task_id)
     return {"status": "success", "message": "Cancel requested"}
 

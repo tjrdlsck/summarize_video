@@ -14,9 +14,9 @@ class ConfigManager:
     DEFAULT_CONFIG = {
         "models": {
             "summarizer": "gemini-2.5-flash",
-            "planner": "gemini-2.5-flash-lite",
+            "planner": "gemini-3.1-flash-lite",
             "refiner": "gemma-4-26b-a4b-it",
-            "shorts": "gemini-2.5-flash-lite",
+            "shorts": "gemini-3.1-flash-lite",
             "whisper": "mlx-community/whisper-large-v3-turbo-q4"
         }
     }

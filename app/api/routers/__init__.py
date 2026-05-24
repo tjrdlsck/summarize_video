@@ -12,10 +12,11 @@ from app.api.routers.settings import router as settings_router
 from app.api.routers.system import router as system_router
 from app.api.routers.tasks import router as tasks_router
 from app.api.routers.transcription import router as transcription_router
+from app.api.routers.folder import router as folder_router
 
 
 def include_routers(app: FastAPI) -> None:
-    """Registers all route groups on the app instance."""
+    """Register all API routers."""
     app.include_router(root_router)
     app.include_router(settings_router)
     app.include_router(transcription_router)
@@ -26,3 +27,4 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(media_router)
     app.include_router(export_router)
     app.include_router(system_router)
+    app.include_router(folder_router)
