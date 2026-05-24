@@ -126,68 +126,72 @@ class PipelineRunner:
                 clean_name = re.sub(r"^[0-9a-fA-F]{8}_", "", str(video_filename))
                 display_title = os.path.splitext(clean_name)[0].replace("_", " ").strip()
 
-            task_manager.update_progress(task_id, 20, "오디오 변환 및 자막 생성 중...")
-
+            run_transcription = getattr(req, "run_transcription", True)
             run_summary = getattr(req, "run_summary", False)
             run_blog = getattr(req, "run_blog", False)
             if run_blog:
                 run_summary = True
 
             trans_scale = 1.0
-            if run_blog:
-                trans_scale = 0.6
-            elif run_summary:
-                trans_scale = 0.7
+            if run_transcription:
+                if run_blog:
+                    trans_scale = 0.6
+                elif run_summary:
+                    trans_scale = 0.7
+            else:
+                trans_scale = 0.1 # Very fast if no transcription
 
-            progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=20, scale_factor=0.8 * trans_scale)
+            if run_transcription:
+                task_manager.update_progress(task_id, 20, "오디오 변환 및 자막 생성 중...")
+                progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=20, scale_factor=0.8 * trans_scale)
 
-            def transcriber_callback(local_percent: int, msg: str) -> None:
-                loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
+                def transcriber_callback(local_percent: int, msg: str) -> None:
+                    loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
 
-            transcribe_result = await loop.run_in_executor(
-                None,
-                partial(
-                    transcriber.transcribe,
-                    video_path,
-                    progress_callback=transcriber_callback,
-                    task_manager=progress_wrapper,
-                    task_id=task_id,
-                    content_type=profile.content_type,
-                    whisper_kwargs={
-                        "language": getattr(req, "whisper_lang", "ko"),
-                        "initial_prompt": getattr(req, "whisper_prompt", None),
-                        "condition_on_previous_text": getattr(req, "whisper_condition", False),
-                        "temperature": getattr(req, "whisper_temp", 0.0),
-                        "vad": getattr(req, "whisper_vad", True),
-                        "gpu_tier": ConfigManager.load_config().get("whisper_gpu_tier", "low")
-                    }
-                ),
-            )
+                transcribe_result = await loop.run_in_executor(
+                    None,
+                    partial(
+                        transcriber.transcribe,
+                        video_path,
+                        progress_callback=transcriber_callback,
+                        task_manager=progress_wrapper,
+                        task_id=task_id,
+                        content_type=profile.content_type,
+                        whisper_kwargs={
+                            "language": getattr(req, "whisper_lang", "ko"),
+                            "initial_prompt": getattr(req, "whisper_prompt", None),
+                            "condition_on_previous_text": getattr(req, "whisper_condition", False),
+                            "temperature": getattr(req, "whisper_temp", 0.0),
+                            "vad": getattr(req, "whisper_vad", True),
+                            "gpu_tier": ConfigManager.load_config().get("whisper_gpu_tier", "low")
+                        }
+                    ),
+                )
 
-            if task_manager.is_cancelled(task_id):
-                raise TaskCancelledError()
-            if transcribe_result.get("status") == "error":
-                raise Exception("Transcription failed")
+                if task_manager.is_cancelled(task_id):
+                    raise TaskCancelledError()
+                if transcribe_result.get("status") == "error":
+                    raise Exception("Transcription failed")
 
-            base_name = os.path.splitext(str(video_filename))[0]
-            summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
-            initial_data = {
-                "video_source": video_filename,
-                "video_title": display_title,
-                "content_type": profile.content_type,
-                "profile_version": profile.profile_version,
-                "total_chapters": 0,
-                "chapters": [],
-                "status": "transcribed_only",
-            }
-            with open(summary_path, "w", encoding="utf-8") as file:
-                json.dump(initial_data, file, ensure_ascii=False, indent=2)
+                base_name = os.path.splitext(str(video_filename))[0]
+                summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
+                initial_data = {
+                    "video_source": video_filename,
+                    "video_title": display_title,
+                    "content_type": profile.content_type,
+                    "profile_version": profile.profile_version,
+                    "total_chapters": 0,
+                    "chapters": [],
+                    "status": "transcribed_only",
+                }
+                if not os.path.exists(summary_path):
+                    with open(summary_path, "w", encoding="utf-8") as file:
+                        json.dump(initial_data, file, ensure_ascii=False, indent=2)
+            else:
+                task_manager.update_progress(task_id, 20, "기존 자막 데이터 연동 완료")
+
 
             # === 체이닝 실행 ===
-            run_summary = getattr(req, "run_summary", False)
-            run_blog = getattr(req, "run_blog", False)
-            if run_blog:
-                run_summary = True
 
             if run_summary:
                 task_manager.update_progress(task_id, int(100 * trans_scale), "1단계 완료. 2단계 AI 요약 분석으로 이동...")

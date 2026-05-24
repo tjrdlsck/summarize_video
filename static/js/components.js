@@ -673,14 +673,28 @@ window.VideoUploadModal = function({ isOpen, onClose, onSubmit, uploadProgress, 
 // [New Component] Regenerate Modal
 window.RegenerateModal = function({ isOpen, onClose, onSubmit, initialContentType, hasChapters }) {
     const [contentType, setContentType] = useState(initialContentType || "streaming");
+    const [runTranscription, setRunTranscription] = useState(false);
     const [runSummary, setRunSummary] = useState(true);
     const [runBlog, setRunBlog] = useState(false);
+
+    // Whisper Advanced Settings
+    const [whisperLang, setWhisperLang] = useState("ko");
+    const [whisperPrompt, setWhisperPrompt] = useState("");
+    const [whisperCondition, setWhisperCondition] = useState(false);
+    const [whisperTemp, setWhisperTemp] = useState(0.0);
+    const [whisperVad, setWhisperVad] = useState(true);
 
     useEffect(() => {
         if (isOpen) {
             setContentType(initialContentType || "streaming");
+            setRunTranscription(false);
             setRunSummary(true);
             setRunBlog(false);
+            setWhisperLang("ko");
+            setWhisperPrompt("");
+            setWhisperCondition(false);
+            setWhisperTemp(0.0);
+            setWhisperVad(true);
         }
     }, [isOpen, initialContentType]);
 
@@ -690,23 +704,34 @@ window.RegenerateModal = function({ isOpen, onClose, onSubmit, initialContentTyp
         }
     }, [runBlog]);
 
-    // 블로그 옵션 비활성화 여부:
-    // 요약 노트(runSummary)를 끌 경우 혹은 기존에 챕터(요약) 데이터가 없고 이번에도 요약(runSummary)을 돌리지 않을 경우
     const isBlogDisabled = !runSummary;
+    const isSummaryDisabled = runBlog; // 블로그 작성 시 요약 필수
 
     if (!isOpen) return null;
 
     const handleSubmit = () => {
         onSubmit({
             contentType,
+            runTranscription,
             runSummary,
-            runBlog
+            runBlog,
+            whisperLang,
+            whisperPrompt,
+            whisperCondition,
+            whisperTemp,
+            whisperVad
         });
     };
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-scale-in border border-white/20 flex flex-col">
+        <div 
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in"
+            onClick={onClose}
+        >
+            <div 
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-scale-in border border-white/20 flex flex-col"
+                onClick={(e) => e.stopPropagation()}
+            >
                 <div className="bg-indigo-600 p-5 text-white flex justify-between items-center shrink-0">
                     <h2 className="text-lg font-bold">🔄 AI 콘텐츠 재생성</h2>
                     <button onClick={onClose} className="text-white/60 hover:text-white transition">
@@ -729,10 +754,60 @@ window.RegenerateModal = function({ isOpen, onClose, onSubmit, initialContentTyp
                     </div>
 
                     <div className="space-y-3">
-                        <label className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${runSummary ? 'border-indigo-400 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'}`}>
-                            <input type="checkbox" checked={runSummary} onChange={(e) => setRunSummary(e.target.checked)} disabled={runBlog} className="w-5 h-5 text-indigo-600 rounded" />
+                        <label className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${runTranscription ? 'border-indigo-400 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                            <input type="checkbox" checked={runTranscription} onChange={(e) => setRunTranscription(e.target.checked)} className="w-5 h-5 text-indigo-600 rounded" />
                             <div>
-                                <div className="font-bold text-sm">🤖 AI 챕터 요약 다시하기</div>
+                                <div className="font-bold text-sm">🎙️ 자막 AI 재추출 (Whisper)</div>
+                            </div>
+                        </label>
+
+                        {runTranscription && (
+                            <div className="p-4 bg-gray-50 rounded-xl space-y-4 border border-indigo-100 text-left animate-fade-in mt-2 mb-4">
+                                <div className="flex justify-between items-center mb-2 border-b pb-2 border-gray-200">
+                                    <span className="text-xs font-bold text-indigo-600 uppercase tracking-wide flex items-center gap-1">
+                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 110-4m0 4v2m0-6V4"></path></svg>
+                                        Whisper 사용자 정의 설정
+                                    </span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-500 mb-1">언어 강제 지정</label>
+                                        <select className="w-full p-2 border border-gray-300 rounded outline-none bg-white" value={whisperLang} onChange={(e) => setWhisperLang(e.target.value)}>
+                                            <option value="auto">자동 감지 (Auto)</option>
+                                            <option value="ko">한국어 (Korean)</option>
+                                            <option value="en">영어 (English)</option>
+                                            <option value="ja">일본어 (Japanese)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-500 mb-1">창의성 (Temperature)</label>
+                                        <div className="flex items-center gap-2">
+                                            <input type="range" min="0" max="1" step="0.1" value={whisperTemp} onChange={(e) => setWhisperTemp(parseFloat(e.target.value))} className="w-full accent-indigo-600" />
+                                            <span className="text-xs font-mono w-6">{whisperTemp}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 mb-1">고유명사 프롬프트 (Initial Prompt)</label>
+                                    <input type="text" placeholder="예: 썸머라이즈비디오, 애플리케이션, AI..." className="w-full p-2 border border-gray-300 rounded outline-none text-xs bg-white" value={whisperPrompt} onChange={(e) => setWhisperPrompt(e.target.value)} />
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" className="w-4 h-4 text-indigo-600 rounded" checked={whisperCondition} onChange={(e) => setWhisperCondition(e.target.checked)} />
+                                        <span className="text-xs font-bold text-gray-700">이전 문맥 참조</span>
+                                    </label>
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" className="w-4 h-4 text-indigo-600 rounded" checked={whisperVad} onChange={(e) => setWhisperVad(e.target.checked)} />
+                                        <span className="text-xs font-bold text-gray-700">묵음 필터링 (VAD)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        )}
+
+                        <label className={`flex items-center gap-3 p-3 rounded-xl border transition ${runSummary ? 'border-indigo-400 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'} ${isSummaryDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
+                            <input type="checkbox" checked={runSummary} onChange={(e) => setRunSummary(e.target.checked)} disabled={isSummaryDisabled} className="w-5 h-5 text-indigo-600 rounded" />
+                            <div>
+                                <div className="font-bold text-sm">🤖 AI 챕터 요약 재작성</div>
                             </div>
                         </label>
                         

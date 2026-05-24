@@ -12,6 +12,7 @@ class TranscriptionRequest(BaseModel):
     filename: Optional[str] = None
     custom_title: Optional[str] = None
     content_type: Literal["sermon", "streaming", "informational"] = "sermon"
+    run_transcription: bool = True
     run_summary: bool = False
     run_blog: bool = False
 

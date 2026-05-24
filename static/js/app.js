@@ -252,8 +252,14 @@ function App() {
                 filename: regenerateTarget.filename,
                 custom_title: regenerateTarget.title,
                 content_type: data.contentType,
+                run_transcription: data.runTranscription,
                 run_summary: data.runSummary,
-                run_blog: data.runBlog
+                run_blog: data.runBlog,
+                whisper_lang: data.whisperLang,
+                whisper_prompt: data.whisperPrompt,
+                whisper_condition: data.whisperCondition,
+                whisper_temp: data.whisperTemp,
+                whisper_vad: data.whisperVad
             });
             setIsRegenerateModalOpen(false);
             alert("콘텐츠 재생성 작업이 큐에 등록되었습니다.");
