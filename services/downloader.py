@@ -162,9 +162,15 @@ class VideoDownloader:
             return {"status": "error", "message": "임시 파일을 찾을 수 없습니다."}
 
         safe_name = self._sanitize_filename(original_filename)
-        # 보안 및 중복 방지용 (identifier 자체를 접두어로 사용)
-        final_filename = f"{identifier}_{safe_name}"
+        base_name, ext = os.path.splitext(safe_name)
+        
+        final_filename = safe_name
         final_path = os.path.join(self.download_dir, final_filename)
+        
+        counter = 1
+        while os.path.exists(final_path):
+            final_filename = f"{base_name}({counter}){ext}"
+            final_path = os.path.join(self.download_dir, final_filename)
 
         os.rename(temp_path, final_path)
         print(f"--- [Upload Complete] File finalized at: {final_path} ---")

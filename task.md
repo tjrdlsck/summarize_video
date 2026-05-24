@@ -1,10 +1,19 @@
-# 동영상 구간 자르기 오디오 유실 버그 수정 작업 목록 (Task List)
+# 대시보드 UI/UX 개편 및 폴더 기능 구현 작업 목록
 
-- [x] `services/clipper.py` 내의 `cut_video` 메서드 수정 (FFmpeg 옵션 순서 및 시간 표현식 변경)
-- [x] `tests/test_clipper_audio_leak.py` 테스트 코드를 완성하여 처음 및 중간 자르기 시 오디오 보존 및 볼륨 검증
-- [x] 유닛 테스트 실행 및 검증
-  - [x] `tests/test_clipper.py` (기존 인코더 모킹 테스트)
-  - [x] `tests/test_clipper_audio_leak.py` (신규 볼륨 검증 테스트)
-- [x] `walkthrough.md` 수정 내용 반영 및 디버깅 결과 문서화
-- [x] Git 커밋 및 원격 저장소 푸시
-- [x] GitHub PR 생성 (`develop` 브랜치 기준)
+## 백엔드 (Backend)
+- [x] `app/schemas/requests.py`: 폴더 및 재생성 API용 Pydantic 스키마 추가
+- [x] `services/downloader.py`: 파일 업로드명 중복 방지 로직 `(1), (2)` 형태로 개선
+- [x] `app/api/routers/folder.py`: 폴더 관리 및 이동 API 구현 (신규 라우터)
+- [x] `app/api/routers/__init__.py`: `folder_router` 라우터 등록
+- [x] `app/api/routers/history.py`: 히스토리에 폴더 정보 연동되게 수정
+
+## 프론트엔드 (Frontend)
+- [x] `static/js/components.js`: `RegenerateModal` 컴포넌트 구현
+- [x] `static/js/app.js`: 작업 카드 디자인 배지 형태로 변경 및 하단 불필요 버튼 제거
+- [x] `static/js/app.js`: 폴더 목록 UI 및 상태 관리 구현
+- [x] `static/js/app.js`: 카드 체크박스 및 플로팅 바 (다중 이동) 로직 구현
+- [x] `static/js/app.js`: HTML5 Drag & Drop 이벤트 구현으로 폴더 이동 지원
+- [x] `static/js/app.js`: 상세 화면(Player View) 상단에 AI 콘텐츠 재생성 버튼 연동
+
+## 테스트 및 마무리
+- [x] 로컬 환경 통합 구현 완료 (테스트 대기 중)

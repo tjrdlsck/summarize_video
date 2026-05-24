@@ -25,8 +25,18 @@ function App() {
         removePunctuation: true
     });
     const [studioSearch, setStudioSearch] = useState("");
-    const [isUploadPanelOpen, setIsUploadPanelOpen] = useState(false);
+    const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
 
+    // [New] Folder & Selection State
+    const [folders, setFolders] = useState([]);
+    const [currentFolder, setCurrentFolder] = useState(null); // null = All videos, 'root' = Uncategorized, or folder ID
+    const [selectedCards, setSelectedCards] = useState([]);
+    const [dragOverFolder, setDragOverFolder] = useState(null);
+    const [lastSelectedIdx, setLastSelectedIdx] = useState(null);
+    const [isSelectionMode, setIsSelectionMode] = useState(false);
+    // [New] Regenerate Modal State
+    const [isRegenerateModalOpen, setIsRegenerateModalOpen] = useState(false);
+    const [regenerateTarget, setRegenerateTarget] = useState(null);
     // [New] System Update State
     const [updateAvailable, setUpdateAvailable] = useState(false);
     const [updateInfo, setUpdateInfo] = useState(null);
@@ -208,8 +218,54 @@ function App() {
 
     const videoRef = useRef(null);
 
+    // [New] Folder API Methods
+    const fetchFolders = async () => {
+        try {
+            const res = await axios.get(`/api/folders?t=${Date.now()}`);
+            setFolders(res.data);
+        } catch (err) { console.error(err); }
+    };
+
+    const handleCreateFolder = async () => {
+        const name = prompt("새 폴더 이름을 입력하세요:");
+        if (!name || !name.trim()) return;
+        try {
+            await axios.post('/api/folders', { name: name.trim() });
+            fetchFolders();
+        } catch (err) { alert("폴더 생성 실패: " + err.message); }
+    };
+
+    const handleMoveToFolder = async (filenames, folderId) => {
+        try {
+            for (const filename of filenames) {
+                await axios.post('/api/folders/move', { filename, folder_id: folderId });
+            }
+            setSelectedCards([]);
+            fetchHistory(); // 내역 새로고침
+        } catch (err) { alert("폴더 이동 실패: " + err.message); }
+    };
+
+    const handleRegenerateSubmit = async (data) => {
+        if (!regenerateTarget) return;
+        try {
+            await axios.post('/api/transcribe', {
+                filename: regenerateTarget.filename,
+                custom_title: regenerateTarget.title,
+                content_type: data.contentType,
+                run_summary: data.runSummary,
+                run_blog: data.runBlog
+            });
+            setIsRegenerateModalOpen(false);
+            alert("콘텐츠 재생성 작업이 큐에 등록되었습니다.");
+            fetchActiveTasks();
+            // 대시보드로 돌아가기
+            setViewMode('dashboard');
+        } catch (err) { alert("요청 실패: " + err.message); }
+    };
+
     // --- [Lifecycle & Polling] ---
     useEffect(() => {
+        fetchFolders();
         fetchHistory();
         checkUpdate(); // [New] 앱 로드 시 업데이트 확인
         fetchRestartStatus();
@@ -371,23 +427,36 @@ function App() {
         } catch (err) { console.error(err); }
     };
 
-    const handleAnalyze = async () => {
-        if (!urlInput) return alert("URL을 입력해주세요.");
-        setLoading(true);
-        try {
-            await axios.post('/api/transcribe', {
-                url: urlInput,
-                custom_title: titleInput,
-                content_type: contentType
-            });
-            setUrlInput("");
-            setTitleInput("");
-            alert("자막 생성 작업이 시작되었습니다.");
-            fetchActiveTasks();
-        } catch (err) {
-            alert("요청 실패: " + err.message);
-        } finally {
-            setLoading(false);
+    const handleModalSubmit = async (data) => {
+        if (data.sourceType === 'url') {
+            setLoading(true);
+            try {
+                await axios.post('/api/transcribe', {
+                    url: data.url,
+                    custom_title: data.title,
+                    content_type: data.contentType,
+                    run_summary: data.runSummary,
+                    run_blog: data.runBlog,
+                    whisper_lang: data.whisperLang,
+                    whisper_prompt: data.whisperPrompt,
+                    whisper_condition: data.whisperCondition,
+                    whisper_temp: data.whisperTemp,
+                    whisper_vad: data.whisperVad
+                });
+                setIsUploadModalOpen(false);
+                alert("영상 등록 및 일괄 분석이 시작되었습니다.");
+                fetchActiveTasks();
+            } catch (err) {
+                alert("요청 실패: " + err.message);
+            } finally {
+                setLoading(false);
+            }
+        } else if (data.sourceType === 'file') {
+            await handleFileUpload(
+                data.file, data.title, data.contentType, data.runSummary, data.runBlog,
+                data.whisperLang, data.whisperPrompt, data.whisperCondition, 
+                data.whisperTemp, data.whisperVad
+            );
         }
     };
 
@@ -423,7 +492,7 @@ function App() {
         }
     };
 
-    const handleFileUpload = async (file) => {
+    const handleFileUpload = async (file, customTitle, ctType, runSummary, runBlog, wLang, wPrompt, wCond, wTemp, wVad) => {
         if (!file) return;
         setLoading(true);
         setUploadProgress(0);
@@ -471,15 +540,22 @@ function App() {
                 filename: file.name
             });
 
-            // 4. 자막 큐 등록
+            // 4. 자막 큐 등록 (모달 설정 반영)
             await axios.post('/api/transcribe', {
                 filename: completeRes.data.filename,
-                custom_title: titleInput,
-                content_type: contentType
+                custom_title: customTitle,
+                content_type: ctType,
+                run_summary: runSummary,
+                run_blog: runBlog,
+                whisper_lang: wLang,
+                whisper_prompt: wPrompt,
+                whisper_condition: wCond,
+                whisper_temp: wTemp,
+                whisper_vad: wVad
             });
 
-            setTitleInput("");
-            alert("파일 업로드 완료. 자막 생성이 시작됩니다.");
+            setIsUploadModalOpen(false);
+            alert("파일 업로드 완료. 일괄 분석이 시작됩니다.");
             fetchActiveTasks();
         } catch (err) {
             alert("오류 발생: " + (err.response?.data?.detail || err.message));
@@ -504,14 +580,15 @@ function App() {
         }
     };
 
-    const handleCancelTask = async (taskId) => {
-        if (!confirm(`현재 작업을 취소하시겠습니까?
-(진행 중인 내용은 저장되지 않습니다)`)) return;
+    const handleCancelTask = async (taskId, skipConfirm = false) => {
+        if (!skipConfirm) {
+            if (!confirm(`현재 작업을 취소하시겠습니까?\n(진행 중인 내용은 저장되지 않습니다)`)) return;
+        }
         try {
             await axios.delete(`/api/tasks/${taskId}`);
             fetchActiveTasks();
         } catch (err) {
-            alert("취소 요청 실패: " + err.message);
+            alert("요청 실패: " + err.message);
         }
     };
 
@@ -929,6 +1006,22 @@ function App() {
 
             <main className="flex-1 flex overflow-hidden bg-gray-50">
                 {/* --- View 1: Dashboard --- */} 
+                <VideoUploadModal 
+                    isOpen={isUploadModalOpen} 
+                    onClose={() => setIsUploadModalOpen(false)} 
+                    onSubmit={handleModalSubmit}
+                    uploadProgress={uploadProgress}
+                    isUploading={loading}
+                />
+
+                <RegenerateModal
+                    isOpen={isRegenerateModalOpen}
+                    onClose={() => setIsRegenerateModalOpen(false)}
+                    onSubmit={handleRegenerateSubmit}
+                    initialContentType={playerData?.content_type}
+                    hasChapters={playerData?.total_chapters > 0}
+                />
+
                 {viewMode === 'dashboard' && (
                     <div className="w-full h-full flex flex-col overflow-hidden">
                         {/* Tab Content Switching */} 
@@ -974,77 +1067,208 @@ function App() {
                                         </div>
                                     )}
 
-                                    {/* Input Section */} 
-                                    <section className="bg-white p-8 rounded-2xl shadow-sm border border-gray-200">
-                                        <h2 className="text-xl font-bold text-gray-800 mb-6 text-center">새 영상 분석하기</h2>
-                                        <div className="max-w-2xl mx-auto space-y-6">
-                                            <div className="flex gap-3">
-                                                <input type="text" placeholder="YouTube URL을 입력하세요..." className="flex-1 p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} disabled={loading} />
+                                    {/* --- Dashboard Content with Folders --- */}
+                                    <div className="flex flex-1 overflow-hidden">
+                                        {/* Left Folder Sidebar */}
+                                        <aside className="w-64 bg-white border-r border-gray-200 flex flex-col overflow-y-auto">
+                                            <div className="p-4 border-b">
+                                                <button onClick={handleCreateFolder} className="w-full bg-gray-50 text-gray-700 py-2 rounded-lg text-sm font-bold border border-gray-200 hover:bg-gray-100 transition flex items-center justify-center gap-2">
+                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                                                    새 폴더 만들기
+                                                </button>
                                             </div>
-                                            <div>
-                                                <label className="block text-xs text-gray-500 mb-1 ml-1">콘텐츠 타입</label>
-                                                <select
-                                                    className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm bg-white"
-                                                    value={contentType}
-                                                    onChange={(e) => setContentType(e.target.value)}
-                                                    disabled={loading}
+                                            <ul className="p-3 space-y-1">
+                                                <li 
+                                                    onClick={() => setCurrentFolder(null)}
+                                                    className={`px-3 py-2.5 rounded-lg cursor-pointer text-sm font-medium flex items-center gap-3 transition ${currentFolder === null ? 'bg-indigo-50 text-indigo-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}
                                                 >
-                                                    <option value="streaming">스트리밍(티키타카)</option>
-                                                    <option value="sermon">설교</option>
-                                                    <option value="informational">정보형</option>
-                                                </select>
-                                            </div>
-                                            <div>
-                                                <input type="text" placeholder="영상 제목을 미리 설정할 수 있습니다 (선택사항)" className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition text-sm" value={titleInput} onChange={(e) => setTitleInput(e.target.value)} disabled={loading} />
-                                                <p className="text-xs text-gray-400 mt-1 ml-1">* 비워두면 유튜브 제목이나 파일명을 그대로 사용합니다.</p>
-                                            </div>
-                                            <div className="flex gap-4">
-                                                <button onClick={handleAnalyze} disabled={loading} className="flex-1 bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 disabled:bg-gray-400 transition shadow-md">{loading ? "분석 요청 중..." : "🚀 URL 분석 시작"}</button>
-                                            </div>
-                                            <div className="relative flex py-2 items-center">
-                                                <div className="flex-grow border-t border-gray-200"></div>
-                                                <span className="flex-shrink-0 mx-4 text-gray-400 text-xs">OR</span>
-                                                <div className="flex-grow border-t border-gray-200"></div>
-                                            </div>
-                                            <label className="block w-full cursor-pointer bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl p-4 text-center hover:bg-indigo-50 transition group">
-                                                <span className="text-gray-500 group-hover:text-indigo-600 font-medium">📁 로컬 MP4 파일 업로드 (제목 입력 후 선택)</span>
-                                                <input type="file" accept="video/mp4" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} />
-                                            </label>
-                                        </div>
-                                    </section>
+                                                    <svg className="w-5 h-5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                                                    모든 영상
+                                                </li>
+                                                <li 
+                                                    onClick={() => setCurrentFolder('root')}
+                                                    onDragOver={(e) => { e.preventDefault(); setDragOverFolder('root'); }}
+                                                    onDragLeave={() => setDragOverFolder(null)}
+                                                    onDrop={(e) => {
+                                                        e.preventDefault();
+                                                        setDragOverFolder(null);
+                                                        const filename = e.dataTransfer.getData("filename");
+                                                        if (filename) handleMoveToFolder([filename], null);
+                                                    }}
+                                                    className={`px-3 py-2.5 rounded-lg cursor-pointer text-sm font-medium flex items-center gap-3 transition ${dragOverFolder === 'root' ? 'bg-indigo-100 ring-2 ring-indigo-400 transform scale-[1.02]' : currentFolder === 'root' ? 'bg-indigo-50 text-indigo-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}
+                                                >
+                                                    <svg className="w-5 h-5 opacity-70" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"></path></svg>
+                                                    미분류
+                                                </li>
+                                                {folders.map(folder => (
+                                                    <li 
+                                                        key={folder.id}
+                                                        onClick={() => setCurrentFolder(folder.id)}
+                                                        onDragOver={(e) => { e.preventDefault(); setDragOverFolder(folder.id); }}
+                                                        onDragLeave={() => setDragOverFolder(null)}
+                                                        onDrop={(e) => {
+                                                            e.preventDefault();
+                                                            setDragOverFolder(null);
+                                                            const filename = e.dataTransfer.getData("filename");
+                                                            if (filename) handleMoveToFolder([filename], folder.id);
+                                                        }}
+                                                        className={`px-3 py-2.5 rounded-lg cursor-pointer text-sm font-medium flex items-center justify-between group transition ${dragOverFolder === folder.id ? 'bg-indigo-100 ring-2 ring-indigo-400 transform scale-[1.02]' : currentFolder === folder.id ? 'bg-indigo-50 text-indigo-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}
+                                                    >
+                                                        <div className="flex items-center gap-3 truncate">
+                                                            <svg className="w-5 h-5 text-indigo-400" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"></path></svg>
+                                                            <span className="truncate">{folder.name}</span>
+                                                        </div>
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </aside>
 
-                                    <section>
-                                        <h3 className="text-lg font-bold text-gray-700 mb-4 flex items-center gap-2">📚 내 작업 목록 <span className="bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded-full">{historyList.length}</span></h3>
-                                        {historyList.length === 0 ? (
-                                            <div className="text-center py-12 text-gray-400 bg-white rounded-xl border border-dashed">아직 작업된 영상이 없습니다.</div>
-                                        ) : (
-                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 pb-10">
-                                                {historyList.map((item, idx) => {
-                                                    const hasChapters = item.total_chapters > 0;
-                                                    const hasBlog = hasChapters && item.result_data.chapters.some(c => c.blog_content);
+                                        {/* Right Main Content */}
+                                        <section className="flex-1 overflow-y-auto p-6 md:p-8 bg-gray-50 relative">
+                                            <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
+                                                <h3 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+                                                    📚 {currentFolder === null ? '모든 영상' : currentFolder === 'root' ? '미분류' : folders.find(f => f.id === currentFolder)?.name} 
+                                                    <span className="bg-gray-200 text-gray-600 text-xs px-2 py-0.5 rounded-full">
+                                                        {historyList.filter(item => currentFolder === null || (currentFolder === 'root' && !item.folder_id) || item.folder_id === currentFolder).length}
+                                                    </span>
+                                                </h3>
+                                                <div className="flex items-center gap-2">
+                                                    <button
+                                                        onClick={() => {
+                                                            setIsSelectionMode(!isSelectionMode);
+                                                            if (isSelectionMode) {
+                                                                setSelectedCards([]); // 취소 시 선택된 카드 초기화
+                                                                setLastSelectedIdx(null);
+                                                            }
+                                                        }}
+                                                        className={`px-4 py-2.5 rounded-xl font-bold text-sm transition border ${isSelectionMode ? 'bg-gray-100 text-gray-700 border-gray-300' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-50'}`}
+                                                    >
+                                                        {isSelectionMode ? '취소' : '선택'}
+                                                    </button>
+                                                    <button 
+                                                        onClick={() => setIsUploadModalOpen(true)}
+                                                        className="bg-indigo-600 text-white px-6 py-2.5 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 transition shadow-md hover:shadow-lg hover:-translate-y-0.5"
+                                                    >
+                                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                                                        새 영상 등록 및 분석
+                                                    </button>
+                                                </div>
+                                            </div>
+
+                                            {(() => {
+                                                const filteredHistory = historyList.filter(item => currentFolder === null || (currentFolder === 'root' && !item.folder_id) || item.folder_id === currentFolder);
+                                                if (filteredHistory.length === 0) {
                                                     return (
-                                                        <div key={idx} onClick={() => loadPlayer(item)} className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 cursor-pointer hover:shadow-md hover:border-indigo-300 transition group relative overflow-hidden flex flex-col">
-                                                            <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition"></div>
-                                                            <button onClick={(e) => handleDelete(e, item.filename)} className="absolute top-4 right-4 text-gray-300 hover:text-red-500 transition p-1 z-10"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
-                                                            <div className="flex flex-col mb-4">
-                                                                <h4 className="font-bold text-gray-800 line-clamp-2 mb-1 group-hover:text-indigo-600 transition">{normalizeLegacyTitle(item.title)}</h4>
-                                                                <p className="text-[10px] text-gray-400">{new Date(item.timestamp * 1000).toLocaleString()}</p>
-                                                            </div>
-                                                            <div className="flex flex-wrap gap-1.5 mb-4">
-                                                                <span className="text-[9px] font-bold bg-green-100 text-green-700 px-1.5 py-0.5 rounded border border-green-200 uppercase tracking-tighter">자막 완료</span>
-                                                                {hasChapters ? <span className="text-[9px] font-bold bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 uppercase tracking-tighter">분석 완료</span> : <span className="text-[9px] font-bold bg-gray-100 text-gray-400 px-1.5 py-0.5 rounded border border-gray-200 uppercase tracking-tighter">분석 대기</span>}
-                                                                {hasBlog && <span className="text-[9px] font-bold bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200 uppercase tracking-tighter">블로그 완료</span>}
-                                                            </div>
-                                                            <div className="mt-auto grid grid-cols-2 gap-2 pt-3 border-t border-gray-50">
-                                                                <button onClick={(e) => handleStartAnalysis(e, item.filename, item.title, item.result_data?.content_type || contentType)} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}>{hasChapters ? '🔄 2. 재분석' : '✨ 2. AI 분석'}</button>
-                                                                <button onClick={(e) => hasChapters ? handleGenerateBlog(e, item.filename) : alert('먼저 AI 분석을 완료해주세요.')} disabled={!hasChapters} className={`text-[11px] font-bold py-2 rounded transition flex items-center justify-center gap-1 shadow-sm ${hasChapters ? 'bg-purple-50 text-purple-600 hover:bg-purple-100' : 'bg-gray-50 text-gray-300 cursor-not-allowed'}`}>{hasBlog ? '🔄 3. 재작성' : '📝 3. 블로그'}</button>
-                                                            </div>
+                                                        <div className="text-center py-16 text-gray-400 bg-white rounded-2xl border border-dashed border-gray-300">
+                                                            <svg className="w-12 h-12 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z"></path></svg>
+                                                            이 폴더에 작업된 영상이 없습니다.
                                                         </div>
                                                     );
-                                                })}
-                                            </div>
-                                        )}
-                                    </section>
+                                                }
+                                                return (
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 pb-24">
+                                                        {filteredHistory.map((item, idx) => {
+                                                            const hasChapters = item.total_chapters > 0;
+                                                            const hasBlog = hasChapters && item.result_data.chapters.some(c => c.blog_content);
+                                                            const isChecked = selectedCards.includes(item.filename);
+
+                                                            return (
+                                                                <div 
+                                                                    key={idx} 
+                                                                    draggable
+                                                                    onDragStart={(e) => e.dataTransfer.setData("filename", item.filename)}
+                                                                    onClick={(e) => {
+                                                                        if (isSelectionMode) {
+                                                                            e.preventDefault();
+                                                                            const shiftPressed = e.shiftKey;
+                                                                            
+                                                                            // 현재 선택된(체크된) 카드 중 가장 마지막 카드의 인덱스를 찾아 다중 선택 기준점으로 삼음
+                                                                            let anchorIdx = null;
+                                                                            if (selectedCards.length > 0) {
+                                                                                const lastSelectedFilename = selectedCards[selectedCards.length - 1];
+                                                                                anchorIdx = filteredHistory.findIndex(i => i.filename === lastSelectedFilename);
+                                                                                if (anchorIdx === -1) anchorIdx = null;
+                                                                            }
+
+                                                                            if (shiftPressed && anchorIdx !== null) {
+                                                                                const start = Math.min(anchorIdx, idx);
+                                                                                const end = Math.max(anchorIdx, idx);
+                                                                                const rangeFilenames = filteredHistory.slice(start, end + 1).map(i => i.filename);
+                                                                                if (!isChecked) {
+                                                                                    setSelectedCards(prev => Array.from(new Set([...prev, ...rangeFilenames])));
+                                                                                } else {
+                                                                                    setSelectedCards(prev => prev.filter(fn => !rangeFilenames.includes(fn)));
+                                                                                }
+                                                                            } else {
+                                                                                if (!isChecked) setSelectedCards(prev => [...prev, item.filename]);
+                                                                                else setSelectedCards(prev => prev.filter(fn => fn !== item.filename));
+                                                                            }
+                                                                        } else {
+                                                                            loadPlayer(item);
+                                                                        }
+                                                                    }}
+                                                                    className={`bg-white rounded-2xl shadow-sm border p-4 cursor-pointer hover:shadow-md transition group relative overflow-hidden flex flex-col ${isChecked && isSelectionMode ? 'border-indigo-500 ring-1 ring-indigo-500' : 'border-gray-200 hover:border-indigo-300'}`}
+                                                                >
+                                                                    {/* Checkbox overlay */}
+                                                                    {isSelectionMode && (
+                                                                        <div className="absolute top-3 left-3 z-10">
+                                                                            <input 
+                                                                                type="checkbox" 
+                                                                                checked={isChecked}
+                                                                                readOnly
+                                                                                className="w-4 h-4 text-indigo-600 rounded cursor-pointer border-gray-300 focus:ring-indigo-500 pointer-events-none"
+                                                                            />
+                                                                        </div>
+                                                                    )}
+
+                                                                <div className="absolute top-0 left-0 w-1 h-full bg-indigo-500 opacity-0 group-hover:opacity-100 transition"></div>
+                                                                <button onClick={(e) => { e.stopPropagation(); handleDelete(e, item.filename); }} className="absolute top-3 right-3 text-gray-300 hover:text-red-500 transition p-1 z-10">
+                                                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                                                </button>
+                                                                
+                                                                {/* Content Area */}
+                                                                <div className="pt-6 pb-2 pl-2">
+                                                                    <div className="flex flex-col mb-3">
+                                                                        <h4 className="font-bold text-gray-800 line-clamp-2 mb-1 group-hover:text-indigo-600 transition leading-snug">{normalizeLegacyTitle(item.title)}</h4>
+                                                                        <p className="text-[11px] text-gray-400">{new Date(item.timestamp * 1000).toLocaleString()}</p>
+                                                                    </div>
+                                                                    <div className="flex flex-wrap gap-1.5 mt-auto">
+                                                                        <span className="text-[10px] font-bold bg-green-100 text-green-700 px-2 py-0.5 rounded-full border border-green-200 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-green-500"></span>자막</span>
+                                                                        {hasChapters && <span className="text-[10px] font-bold bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full border border-blue-200 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-blue-500"></span>요약</span>}
+                                                                        {hasBlog && <span className="text-[10px] font-bold bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full border border-purple-200 flex items-center gap-1"><span className="w-1.5 h-1.5 rounded-full bg-purple-500"></span>블로그</span>}
+                                                                    </div>
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                                );
+                                            })()}
+
+                                            {/* Floating Action Bar for Multi-select */}
+                                            {selectedCards.length > 0 && (
+                                                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-gray-900 text-white px-6 py-3 rounded-full shadow-2xl flex items-center gap-6 animate-slide-up border border-gray-700 z-50">
+                                                    <span className="text-sm font-bold bg-gray-800 px-3 py-1 rounded-full">{selectedCards.length}개 선택됨</span>
+                                                    <div className="flex items-center gap-3 border-l border-gray-700 pl-6">
+                                                        <select 
+                                                            onChange={(e) => {
+                                                                if(e.target.value !== "") {
+                                                                    handleMoveToFolder(selectedCards, e.target.value === "root" ? null : e.target.value);
+                                                                    e.target.value = "";
+                                                                }
+                                                            }}
+                                                            className="bg-gray-800 border border-gray-600 text-sm rounded-lg focus:ring-indigo-500 focus:border-indigo-500 block w-40 p-2 outline-none"
+                                                        >
+                                                            <option value="">폴더로 이동...</option>
+                                                            <option value="root">📁 미분류</option>
+                                                            {folders.map(f => <option key={f.id} value={f.id}>📁 {f.name}</option>)}
+                                                        </select>
+                                                        <button onClick={() => setSelectedCards([])} className="text-sm text-gray-400 hover:text-white transition">취소</button>
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </section>
+                                    </div>
                                 </div>
                             </div>
                         ) : (
@@ -1054,48 +1278,12 @@ function App() {
                                 <aside className="w-1/3 border-r bg-white flex flex-col overflow-hidden">
                                     <div className="p-4 border-b space-y-4">
                                         <button 
-                                            onClick={() => setIsUploadPanelOpen(!isUploadPanelOpen)}
+                                            onClick={() => setIsUploadModalOpen(true)}
                                             className="w-full bg-indigo-600 text-white py-2 rounded-xl font-bold flex items-center justify-center gap-2 hover:bg-indigo-700 transition shadow-sm"
                                         >
                                             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
                                             새 작업 추가
                                         </button>
-
-                                        {isUploadPanelOpen && (
-                                            <div className="bg-gray-50 p-4 rounded-xl border border-indigo-100 space-y-3 animate-fade-in">
-                                                <input 
-                                                    type="text" 
-                                                    placeholder="YouTube URL..."
-                                                    className="w-full p-2 text-sm border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-                                                    value={urlInput}
-                                                    onChange={(e) => setUrlInput(e.target.value)}
-                                                />
-                                                <select
-                                                    className="w-full p-2 text-sm border rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-white"
-                                                    value={contentType}
-                                                    onChange={(e) => setContentType(e.target.value)}
-                                                >
-                                                    <option value="streaming">스트리밍(티키타카)</option>
-                                                    <option value="sermon">설교</option>
-                                                    <option value="informational">정보형</option>
-                                                </select>
-                                                <div className="flex gap-2">
-                                                    <button 
-                                                        onClick={handleAnalyze}
-                                                        className="flex-1 bg-indigo-100 text-indigo-700 py-1.5 rounded-lg text-xs font-bold hover:bg-indigo-200 transition"
-                                                    >
-                                                        URL 추가
-                                                    </button>
-                                                    <label className="flex-1 bg-white border border-gray-300 py-1.5 rounded-lg text-xs font-bold text-gray-600 text-center cursor-pointer hover:bg-gray-50 transition relative overflow-hidden">
-                                                        <span className="relative z-10">{uploadProgress > 0 && uploadProgress < 100 ? `업로드 중 (${uploadProgress}%)` : '파일 업로드'}</span>
-                                                        {uploadProgress > 0 && uploadProgress < 100 && (
-                                                            <div className="absolute top-0 left-0 h-full bg-blue-100 z-0" style={{ width: `${uploadProgress}%`, opacity: 0.5 }}></div>
-                                                        )}
-                                                        <input type="file" accept="video/mp4" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} disabled={uploadProgress > 0 && uploadProgress < 100} />
-                                                    </label>
-                                                </div>
-                                            </div>
-                                        )}
 
                                         <div className="relative">
                                             <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
@@ -1284,7 +1472,18 @@ function App() {
                                             )}
                                             {!isEditingTitle && <button onClick={() => setIsEditingTitle(true)} className="text-gray-400 hover:text-indigo-600 p-1" title="제목 수정"><svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg></button>}
                                         </div>
-                                        <p className="text-sm text-gray-500">AI 분석 완료 • {playerData.total_chapters}개의 챕터</p>
+                                        <div className="flex items-center justify-between">
+                                            <p className="text-sm text-gray-500">AI 분석 완료 • {playerData.total_chapters}개의 챕터</p>
+                                            <button 
+                                                onClick={() => {
+                                                    setRegenerateTarget({ filename: playerData.video_filename, title: playerData.video_title });
+                                                    setIsRegenerateModalOpen(true);
+                                                }}
+                                                className="text-[11px] bg-white border border-indigo-200 text-indigo-600 px-3 py-1.5 rounded-lg font-bold hover:bg-indigo-50 transition shadow-sm flex items-center gap-1"
+                                            >
+                                                🔄 AI 재생성
+                                            </button>
+                                        </div>
                                     </div>
                                     <div>
                                         {!isClipMode ? (

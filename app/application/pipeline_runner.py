@@ -10,7 +10,7 @@ from datetime import datetime
 from functools import partial
 
 from services.content_profiles import get_content_profile
-from services.system_manager import SystemManager
+from services.system_manager import ConfigManager, SystemManager
 from services.transcriber import TaskCancelledError
 
 from app.application.progress import TaskProgressWrapper
@@ -128,7 +128,18 @@ class PipelineRunner:
 
             task_manager.update_progress(task_id, 20, "오디오 변환 및 자막 생성 중...")
 
-            progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=20, scale_factor=0.8)
+            run_summary = getattr(req, "run_summary", False)
+            run_blog = getattr(req, "run_blog", False)
+            if run_blog:
+                run_summary = True
+
+            trans_scale = 1.0
+            if run_blog:
+                trans_scale = 0.6
+            elif run_summary:
+                trans_scale = 0.7
+
+            progress_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=20, scale_factor=0.8 * trans_scale)
 
             def transcriber_callback(local_percent: int, msg: str) -> None:
                 loop.call_soon_threadsafe(progress_wrapper.update_progress, task_id, local_percent, msg)
@@ -142,6 +153,14 @@ class PipelineRunner:
                     task_manager=progress_wrapper,
                     task_id=task_id,
                     content_type=profile.content_type,
+                    whisper_kwargs={
+                        "language": getattr(req, "whisper_lang", "ko"),
+                        "initial_prompt": getattr(req, "whisper_prompt", None),
+                        "condition_on_previous_text": getattr(req, "whisper_condition", False),
+                        "temperature": getattr(req, "whisper_temp", 0.0),
+                        "vad": getattr(req, "whisper_vad", True),
+                        "gpu_tier": ConfigManager.load_config().get("whisper_gpu_tier", "low")
+                    }
                 ),
             )
 
@@ -164,8 +183,32 @@ class PipelineRunner:
             with open(summary_path, "w", encoding="utf-8") as file:
                 json.dump(initial_data, file, ensure_ascii=False, indent=2)
 
-            task_manager.complete_task(task_id, {"status": "success", "message": "자막 생성 완료", "video_title": display_title})
-            print(f"[{task_id}] Transcription Completed: {video_filename}")
+            # === 체이닝 실행 ===
+            run_summary = getattr(req, "run_summary", False)
+            run_blog = getattr(req, "run_blog", False)
+            if run_blog:
+                run_summary = True
+
+            if run_summary:
+                task_manager.update_progress(task_id, int(100 * trans_scale), "1단계 완료. 2단계 AI 요약 분석으로 이동...")
+                summary_req = SummaryRequest(
+                    filename=str(video_filename),
+                    custom_title=display_title,
+                    content_type=req.content_type
+                )
+                summary_scale = 0.2 if run_blog else 0.3
+                summary_offset = 60 if run_blog else 70
+                summary_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=summary_offset, scale_factor=summary_scale)
+                await self.run_summary_pipeline(task_id, summary_req, task_manager=summary_wrapper)
+
+            if run_blog:
+                task_manager.update_progress(task_id, 80, "2단계 완료. 3단계 블로그 초안 작성으로 이동...")
+                blog_req = BlogGenerationRequest(filename=str(video_filename))
+                blog_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=80, scale_factor=0.2)
+                await self.run_blog_pipeline(task_id, blog_req, task_manager=blog_wrapper)
+
+            task_manager.complete_task(task_id, {"status": "success", "message": "일괄 분석 완료" if run_summary else "자막 생성 완료", "video_title": display_title})
+            print(f"[{task_id}] Transcription/Chaining Completed: {video_filename}")
 
         except TaskCancelledError:
             print(f"[{task_id}] Task Cancelled by User.")
@@ -177,9 +220,10 @@ class PipelineRunner:
             cleanup_files(str(video_filename) if video_filename else None)
             task_manager.fail_task(task_id, str(error), exception=error)
 
-    async def run_summary_pipeline(self, task_id: str, req: SummaryRequest) -> None:
+    async def run_summary_pipeline(self, task_id: str, req: SummaryRequest, task_manager=None) -> None:
         """AI 챕터 분석 및 요약 파이프라인."""
-        task_manager = self.container.task_manager
+        if task_manager is None:
+            task_manager = self.container.task_manager
         summarizer = self.container.summarizer
 
         base_name = os.path.splitext(req.filename)[0]
@@ -227,9 +271,10 @@ class PipelineRunner:
             print(f"[{task_id}] Summary Failed: {error}")
             task_manager.fail_task(task_id, str(error), exception=error)
 
-    async def run_blog_pipeline(self, task_id: str, req: BlogGenerationRequest) -> None:
+    async def run_blog_pipeline(self, task_id: str, req: BlogGenerationRequest, task_manager=None) -> None:
         """블로그 포스트 생성 파이프라인."""
-        task_manager = self.container.task_manager
+        if task_manager is None:
+            task_manager = self.container.task_manager
         summarizer = self.container.summarizer
         refiner = self.container.refiner
 

@@ -51,6 +51,13 @@ window.normalizeLegacyTitle = (title) => {
 window.TaskMonitor = function({ tasks, onCancel }) {
     if (!tasks || tasks.length === 0) return null;
 
+    const dismissibleTasks = tasks.filter(t => t.status === 'failed' || t.status === 'completed' || t.status === 'canceled');
+
+    const handleCloseAll = () => {
+        if (!confirm("모든 완료/취소된 내역을 지우시겠습니까?")) return;
+        dismissibleTasks.forEach(t => onCancel(t.task_id, true));
+    };
+
     return (
         <div className="fixed bottom-6 right-6 w-96 bg-white rounded-xl shadow-2xl border border-indigo-100 overflow-hidden z-50 fade-in flex flex-col max-h-[80vh]">
             <div className="bg-indigo-600 px-4 py-3 flex justify-between items-center shrink-0">
@@ -58,7 +65,14 @@ window.TaskMonitor = function({ tasks, onCancel }) {
                     <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
                     작업 대기열 ({tasks.length})
                 </h3>
-                <span className="text-xs text-indigo-200">자동 갱신 중</span>
+                {dismissibleTasks.length > 0 && (
+                    <button 
+                        onClick={handleCloseAll} 
+                        className="text-[10px] font-bold bg-white/20 hover:bg-white/30 text-white px-2 py-1 rounded transition"
+                    >
+                        모두 닫기
+                    </button>
+                )}
             </div>
 
             <div className="overflow-y-auto p-4 space-y-4 custom-scrollbar">
@@ -77,11 +91,11 @@ window.TaskMonitor = function({ tasks, onCancel }) {
                     } else if (task.status === 'failed') {
                         statusColor = "bg-red-500";
                         statusText = "오류/취소";
-                        isCancelable = false;
+                        isCancelable = true;
                     } else if (task.status === 'completed') {
                         statusColor = "bg-green-500";
                         statusText = "완료";
-                        isCancelable = false;
+                        isCancelable = true;
                     }
 
                     return (
@@ -101,10 +115,13 @@ window.TaskMonitor = function({ tasks, onCancel }) {
                                 </div>
                                 {isCancelable && (
                                     <button
-                                        onClick={() => onCancel(task.task_id)}
-                                        className="text-xs bg-white border border-red-200 text-red-500 px-2 py-0.5 rounded hover:bg-red-50 transition"
+                                        onClick={() => {
+                                            const isDismissible = task.status === 'failed' || task.status === 'completed' || task.status === 'canceled';
+                                            onCancel(task.task_id, isDismissible);
+                                        }}
+                                        className={`text-xs bg-white border px-2 py-0.5 rounded transition ${(task.status === 'failed' || task.status === 'completed' || task.status === 'canceled') ? 'border-gray-200 text-gray-500 hover:bg-gray-50' : 'border-red-200 text-red-500 hover:bg-red-50'}`}
                                     >
-                                        중단
+                                        {(task.status === 'failed' || task.status === 'completed' || task.status === 'canceled') ? '닫기' : '중단'}
                                     </button>
                                 )}
                             </div>
@@ -255,7 +272,10 @@ window.SettingsModal = function({ isOpen, onClose }) {
     const fetchSettings = async () => {
         try {
             const res = await axios.get('/api/settings');
-            setSettings({ models: res.data.models || {} });
+            setSettings({ 
+                models: res.data.models || {},
+                whisper_gpu_tier: res.data.whisper_gpu_tier || "low"
+            });
             setPlatform(res.data.platform || "linux");
             setWhisperModels(res.data.whisper_models || []);
             setGeminiModels(res.data.gemini_models || []);
@@ -267,7 +287,10 @@ window.SettingsModal = function({ isOpen, onClose }) {
     const handleSave = async () => {
         setIsSaving(true);
         try {
-            await axios.post('/api/settings', { models: settings.models });
+            await axios.post('/api/settings', { 
+                models: settings.models,
+                whisper_gpu_tier: settings.whisper_gpu_tier
+            });
             alert("설정이 저장되었습니다. 즉시 적용됩니다.");
             onClose();
         } catch (err) {
@@ -321,6 +344,35 @@ window.SettingsModal = function({ isOpen, onClose }) {
                         onChange={(val) => updateModel('whisper', val)}
                         suggestions={whisperModels}
                     />
+
+                    <div className="space-y-2">
+                        <div className="flex justify-between items-center">
+                            <label className="text-sm font-bold text-gray-700">🚀 GPU 가속 수준 (Whisper Batch Size)</label>
+                            <span className="text-[10px] text-indigo-500 font-mono font-bold bg-indigo-50 px-1.5 py-0.5 rounded uppercase tracking-wider">gpu_tier</span>
+                        </div>
+                        <div className="relative">
+                            <select 
+                                className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition text-gray-700 appearance-none cursor-pointer disabled:bg-gray-100 disabled:text-gray-400" 
+                                value={settings.whisper_gpu_tier || "low"} 
+                                onChange={(e) => setSettings(prev => ({ ...prev, whisper_gpu_tier: e.target.value }))}
+                                disabled={platform === 'darwin'}
+                            >
+                                <option value="mac">Apple Silicon (MacBook) - 💡 자동 최적화 적용</option>
+                                <option value="low">일반 PC (VRAM 8GB 이하) - 💡 안정성 위주 (기본값)</option>
+                                <option value="mid">고성능 PC (VRAM 12GB~16GB) - 💡 빠른 속도</option>
+                                <option value="high">워크스테이션 (VRAM 24GB 이상) - 💡 최고 속도 (OOM 주의)</option>
+                            </select>
+                            <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-500">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                            </div>
+                        </div>
+                        <p className="text-[11px] text-gray-400 leading-relaxed pl-1">
+                            {platform === 'darwin' 
+                                ? "맥 환경(MLX)에서는 구조상 통합 메모리를 스스로 제어하므로 별도 선택이 불필요합니다." 
+                                : "GPU VRAM 용량에 맞춰 Whisper 추론 속도를 극대화합니다. OOM 발생 시 단계를 낮추세요."}
+                        </p>
+                    </div>
+
                     <TaskRow 
                         label="📝 메인 요약 & 챕터 분석" 
                         task="summarizer" 
@@ -379,6 +431,326 @@ window.SettingsModal = function({ isOpen, onClose }) {
                         {isSaving ? (
                             <span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></span>
                         ) : '💾 설정 저장 및 즉시 적용'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// [New Component] Video Upload & Batch Analysis Modal
+window.VideoUploadModal = function({ isOpen, onClose, onSubmit, uploadProgress, isUploading }) {
+    const [tab, setTab] = useState('url'); // 'url' or 'file'
+    const [urlInput, setUrlInput] = useState("");
+    const [fileInput, setFileInput] = useState(null);
+    const [titleInput, setTitleInput] = useState("");
+    const [contentType, setContentType] = useState("streaming");
+    
+    // 분석 옵션
+    const [runSummary, setRunSummary] = useState(true);
+    const [runBlog, setRunBlog] = useState(false);
+
+    useEffect(() => {
+        if (runBlog) {
+            setRunSummary(true); // 블로그 체크 시 요약도 강제 체크
+        }
+    }, [runBlog]);
+
+    // 사용자 정의 설정 (Advanced Settings)
+    const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+    const [whisperLang, setWhisperLang] = useState("ko");
+    const [whisperPrompt, setWhisperPrompt] = useState("");
+    const [whisperCondition, setWhisperCondition] = useState(false);
+    const [whisperTemp, setWhisperTemp] = useState(0.0);
+    const [whisperVad, setWhisperVad] = useState(true);
+
+    if (!isOpen) return null;
+
+    const handleSubmit = () => {
+        if (tab === 'url' && !urlInput.trim()) return alert("URL을 입력해주세요.");
+        if (tab === 'file' && !fileInput) return alert("업로드할 파일을 선택해주세요.");
+        
+        onSubmit({
+            sourceType: tab,
+            url: urlInput,
+            file: fileInput,
+            title: titleInput,
+            contentType,
+            runSummary,
+            runBlog,
+            whisperLang,
+            whisperPrompt,
+            whisperCondition,
+            whisperTemp,
+            whisperVad
+        });
+    };
+
+    return (
+        <div 
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in"
+        >
+            <div 
+                className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden animate-scale-in border border-white/20 flex flex-col max-h-[90vh]"
+            >
+                {/* Header */}
+                <div className="bg-indigo-600 p-6 text-white relative shrink-0">
+                    <div className="flex items-center gap-3">
+                        <div className="bg-white/20 p-2 rounded-2xl">
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"></path></svg>
+                        </div>
+                        <div>
+                            <h2 className="text-xl font-bold">새 영상 등록 및 AI 분석 설정</h2>
+                            <p className="text-indigo-100 text-xs font-medium">영상을 추가하고 일괄 분석 작업을 구성하세요.</p>
+                        </div>
+                    </div>
+                    {!isUploading && (
+                        <button onClick={onClose} className="absolute top-6 right-6 text-white/60 hover:text-white transition">
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    )}
+                </div>
+
+                {/* Content */}
+                <div className="p-6 overflow-y-auto custom-scrollbar bg-white space-y-6">
+                    {/* Tab Selection */}
+                    <div className="flex bg-gray-100 p-1 rounded-xl w-full relative">
+                        <div 
+                            className="absolute top-1 bottom-1 bg-white rounded-lg shadow-sm transition-all duration-300 ease-out z-0"
+                            style={{ 
+                                width: 'calc(50% - 4px)',
+                                left: tab === 'url' ? '4px' : 'calc(50%)'
+                            }}
+                        ></div>
+                        <button onClick={() => !isUploading && setTab('url')} className={`flex-1 py-2 text-sm font-bold z-10 transition ${tab === 'url' ? 'text-indigo-600' : 'text-gray-400'}`}>YouTube URL</button>
+                        <button onClick={() => !isUploading && setTab('file')} className={`flex-1 py-2 text-sm font-bold z-10 transition ${tab === 'file' ? 'text-indigo-600' : 'text-gray-400'}`}>로컬 파일 업로드</button>
+                    </div>
+
+                    {/* Source Input */}
+                    <div className="space-y-4">
+                        {tab === 'url' ? (
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">YouTube URL</label>
+                                <input type="text" placeholder="https://youtube.com/..." className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} disabled={isUploading} />
+                            </div>
+                        ) : (
+                            <div>
+                                <label className="block text-sm font-bold text-gray-700 mb-1">로컬 MP4 파일</label>
+                                <label className="block w-full cursor-pointer bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl p-4 text-center hover:bg-indigo-50 transition relative overflow-hidden">
+                                    <span className="relative z-10 font-medium text-gray-500">
+                                        {fileInput ? fileInput.name : "📁 여기를 클릭하여 파일 선택"}
+                                    </span>
+                                    {isUploading && uploadProgress > 0 && uploadProgress < 100 && (
+                                        <div className="absolute top-0 left-0 h-full bg-blue-100 z-0 transition-all duration-300" style={{ width: `${uploadProgress}%`, opacity: 0.5 }}></div>
+                                    )}
+                                    <input type="file" accept="video/mp4" className="hidden" onChange={(e) => setFileInput(e.target.files[0])} disabled={isUploading} />
+                                </label>
+                                {isUploading && uploadProgress > 0 && <p className="text-xs text-indigo-600 text-center mt-2 font-bold animate-pulse">업로드 진행 중... {uploadProgress}%</p>}
+                            </div>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 mb-1">콘텐츠 타입</label>
+                                <select className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm bg-white" value={contentType} onChange={(e) => setContentType(e.target.value)} disabled={isUploading}>
+                                    <option value="streaming">스트리밍(티키타카)</option>
+                                    <option value="sermon">설교</option>
+                                    <option value="informational">정보형</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 mb-1">영상 제목 (선택)</label>
+                                <input type="text" placeholder="자동 생성" className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm" value={titleInput} onChange={(e) => setTitleInput(e.target.value)} disabled={isUploading} />
+                            </div>
+                        </div>
+                    </div>
+
+                    <hr className="border-gray-100" />
+
+                    {/* Options */}
+                    <div className="space-y-3">
+                        <h3 className="text-sm font-bold text-gray-700">분석 옵션 선택</h3>
+                        
+                        <label className="flex items-center gap-3 p-3 rounded-xl border border-gray-200 bg-gray-50 opacity-80 cursor-not-allowed">
+                            <input type="checkbox" checked readOnly className="w-5 h-5 text-indigo-600 rounded" />
+                            <div>
+                                <div className="font-bold text-sm">🎙️ 위스퍼 자막 추출 (STT)</div>
+                                <div className="text-xs text-gray-500">기본 필수 작업 (음성을 텍스트로 변환합니다)</div>
+                            </div>
+                        </label>
+                        
+                        <label className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${runSummary ? 'border-indigo-400 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                            <input type="checkbox" checked={runSummary} onChange={(e) => setRunSummary(e.target.checked)} disabled={runBlog || isUploading} className="w-5 h-5 text-indigo-600 rounded" />
+                            <div>
+                                <div className="font-bold text-sm">🤖 AI 챕터 요약 분석</div>
+                                <div className="text-xs text-gray-500">전체 맥락을 파악하고 논리적 챕터로 구분합니다</div>
+                            </div>
+                        </label>
+                        
+                        <label className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${runBlog ? 'border-purple-400 bg-purple-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                            <input type="checkbox" checked={runBlog} onChange={(e) => setRunBlog(e.target.checked)} disabled={isUploading} className="w-5 h-5 text-purple-600 rounded" />
+                            <div>
+                                <div className="font-bold text-sm">📝 AI 블로그 포스트 초안 작성</div>
+                                <div className="text-xs text-gray-500">요약 결과를 바탕으로 세부 블로그 글을 작성합니다</div>
+                            </div>
+                        </label>
+                    </div>
+
+                    <hr className="border-gray-100" />
+
+                    {/* Advanced Settings Toggle */}
+                    <div>
+                        <button 
+                            onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+                            className="flex items-center gap-2 text-sm font-bold text-gray-700 hover:text-indigo-600 transition"
+                        >
+                            ⚙️ 사용자 정의 (Advanced Settings)
+                            <svg className={`w-4 h-4 transition-transform duration-300 ${showAdvancedSettings ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                        </button>
+                        
+                        {showAdvancedSettings && (
+                            <div className="mt-4 space-y-4 p-4 bg-gray-50 border border-gray-200 rounded-xl animate-fade-in text-sm">
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 mb-1">오디오 언어 (Language)</label>
+                                    <select className="w-full p-2 border border-gray-300 rounded outline-none bg-white" value={whisperLang} onChange={(e) => setWhisperLang(e.target.value)}>
+                                        <option value="ko">한국어 (Korean)</option>
+                                        <option value="auto">자동 감지 (Auto)</option>
+                                        <option value="en">영어 (English)</option>
+                                        <option value="ja">일본어 (Japanese)</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 mb-1">고유명사/전문용어 사전 (Initial Prompt)</label>
+                                    <input type="text" placeholder="예: MLX, Faster-Whisper, FastAPI" className="w-full p-2 border border-gray-300 rounded outline-none" value={whisperPrompt} onChange={(e) => setWhisperPrompt(e.target.value)} />
+                                    <p className="text-[10px] text-gray-400 mt-1">비워두면 콘텐츠 타입에 따른 기본값이 적용됩니다.</p>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 mb-1">창의성 / 정확도 조절 (Temperature: {whisperTemp.toFixed(1)})</label>
+                                    <input type="range" min="0" max="1" step="0.1" className="w-full" value={whisperTemp} onChange={(e) => setWhisperTemp(parseFloat(e.target.value))} />
+                                    <div className="flex justify-between text-[10px] text-gray-400 mt-1">
+                                        <span>0.0 (정확도 우선)</span>
+                                        <span>1.0 (유연함 우선)</span>
+                                    </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" className="w-4 h-4 text-indigo-600 rounded" checked={whisperCondition} onChange={(e) => setWhisperCondition(e.target.checked)} />
+                                        <span className="text-xs font-bold text-gray-700">이전 문맥 참조</span>
+                                    </label>
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input type="checkbox" className="w-4 h-4 text-indigo-600 rounded" checked={whisperVad} onChange={(e) => setWhisperVad(e.target.checked)} />
+                                        <span className="text-xs font-bold text-gray-700">묵음 필터링 (VAD)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Footer */}
+                <div className="p-6 bg-gray-50 border-t shrink-0 flex gap-3">
+                    <button 
+                        onClick={onClose}
+                        className="flex-1 py-3 text-sm font-bold text-gray-500 bg-white border border-gray-200 rounded-2xl hover:bg-gray-100 transition shadow-sm"
+                    >
+                        취소
+                    </button>
+                    <button 
+                        onClick={handleSubmit}
+                        disabled={isUploading || (tab === 'file' && !fileInput)}
+                        className="flex-[2] py-3 text-sm font-bold text-white bg-indigo-600 rounded-2xl hover:bg-indigo-700 transition shadow-lg shadow-indigo-200 disabled:opacity-50 flex items-center justify-center gap-2"
+                    >
+                        {isUploading ? (
+                            <><span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></span> 등록 중...</>
+                        ) : '🚀 분석 시작'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// [New Component] Regenerate Modal
+window.RegenerateModal = function({ isOpen, onClose, onSubmit, initialContentType, hasChapters }) {
+    const [contentType, setContentType] = useState(initialContentType || "streaming");
+    const [runSummary, setRunSummary] = useState(true);
+    const [runBlog, setRunBlog] = useState(false);
+
+    useEffect(() => {
+        if (isOpen) {
+            setContentType(initialContentType || "streaming");
+            setRunSummary(true);
+            setRunBlog(false);
+        }
+    }, [isOpen, initialContentType]);
+
+    useEffect(() => {
+        if (runBlog) {
+            setRunSummary(true);
+        }
+    }, [runBlog]);
+
+    // 블로그 옵션 비활성화 여부:
+    // 요약 노트(runSummary)를 끌 경우 혹은 기존에 챕터(요약) 데이터가 없고 이번에도 요약(runSummary)을 돌리지 않을 경우
+    const isBlogDisabled = !runSummary;
+
+    if (!isOpen) return null;
+
+    const handleSubmit = () => {
+        onSubmit({
+            contentType,
+            runSummary,
+            runBlog
+        });
+    };
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+            <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-scale-in border border-white/20 flex flex-col">
+                <div className="bg-indigo-600 p-5 text-white flex justify-between items-center shrink-0">
+                    <h2 className="text-lg font-bold">🔄 AI 콘텐츠 재생성</h2>
+                    <button onClick={onClose} className="text-white/60 hover:text-white transition">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                    </button>
+                </div>
+
+                <div className="p-6 space-y-5 bg-white">
+                    <div>
+                        <label className="block text-xs font-bold text-gray-500 mb-2">콘텐츠 타입 재설정</label>
+                        <select 
+                            className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm bg-white" 
+                            value={contentType} 
+                            onChange={(e) => setContentType(e.target.value)}
+                        >
+                            <option value="streaming">스트리밍(티키타카)</option>
+                            <option value="sermon">설교</option>
+                            <option value="informational">정보형</option>
+                        </select>
+                    </div>
+
+                    <div className="space-y-3">
+                        <label className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition ${runSummary ? 'border-indigo-400 bg-indigo-50' : 'border-gray-200 hover:bg-gray-50'}`}>
+                            <input type="checkbox" checked={runSummary} onChange={(e) => setRunSummary(e.target.checked)} disabled={runBlog} className="w-5 h-5 text-indigo-600 rounded" />
+                            <div>
+                                <div className="font-bold text-sm">🤖 AI 챕터 요약 다시하기</div>
+                            </div>
+                        </label>
+                        
+                        <label className={`flex items-center gap-3 p-3 rounded-xl border transition ${runBlog ? 'border-purple-400 bg-purple-50' : 'border-gray-200 hover:bg-gray-50'} ${isBlogDisabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
+                            <input type="checkbox" checked={runBlog} onChange={(e) => setRunBlog(e.target.checked)} disabled={isBlogDisabled} className="w-5 h-5 text-purple-600 rounded" />
+                            <div>
+                                <div className="font-bold text-sm">📝 블로그 포스트 재작성</div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <div className="p-5 bg-gray-50 border-t shrink-0 flex gap-3">
+                    <button onClick={onClose} className="flex-1 py-2.5 text-sm font-bold text-gray-500 bg-white border border-gray-200 rounded-xl hover:bg-gray-100 transition shadow-sm">
+                        취소
+                    </button>
+                    <button onClick={handleSubmit} className="flex-[2] py-2.5 text-sm font-bold text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 transition shadow-md flex items-center justify-center gap-2">
+                        ✨ 재생성 시작
                     </button>
                 </div>
             </div>
