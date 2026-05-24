@@ -589,7 +589,8 @@ class VideoSummarizer:
         video_filename: str, 
         status_callback: callable = None
     ) -> dict:
-        """Gemini 2.5 Flash-Lite를 사용하여 영상 전체의 블로그 구조를 설계합니다. (Retry 적용)
+        """설정된 Planner 모델을 사용하여 영상 전체의 블로그 구조를 설계합니다. (Retry 적용)
+        기본적으로 `self._get_model("planner")`에 지정된 모델을 동적으로 사용합니다.
 
         Args:
             segments: 분석된 자막 세그먼트 리스트.
@@ -605,8 +606,9 @@ class VideoSummarizer:
         total_lines = len(segments)
         if total_lines == 0: return {"error": "Empty segments"}
 
-        print(f"--- [Summarizer] Planning Blog Structure with Gemini 2.5 Flash-Lite ---")
-        if status_callback: status_callback("Gemini 2.5 Flash-Lite가 블로그 구조를 설계 중입니다...")
+        planner_model = self._get_model("planner")
+        print(f"--- [Summarizer] Planning Blog Structure with {planner_model} ---")
+        if status_callback: status_callback(f"{planner_model}가 블로그 구조를 설계 중입니다...")
 
         # 프롬프트 구성: 전체 스크립트를 전달 (Long Context 활용)
         lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
@@ -642,7 +644,7 @@ class VideoSummarizer:
 
         try:
             client = genai.Client(api_key=self.api_key)
-            # Gemini 2.5 Flash-Lite 모델 사용
+            # 동적으로 가져온 모델명 사용
             response = client.models.generate_content(
                 model=self._get_model("planner"),
                 contents=f"{system_instruction}\n\n[Full Script]:\n{script_text}",
