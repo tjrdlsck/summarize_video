@@ -6,5 +6,5 @@
   - [x] `tests/test_clipper.py` (기존 인코더 모킹 테스트)
   - [x] `tests/test_clipper_audio_leak.py` (신규 볼륨 검증 테스트)
 - [x] `walkthrough.md` 수정 내용 반영 및 디버깅 결과 문서화
-- [/] Git 커밋 및 원격 저장소 푸시
-- [ ] GitHub PR 생성 (`develop` 브랜치 기준)
+- [x] Git 커밋 및 원격 저장소 푸시
+- [x] GitHub PR 생성 (`develop` 브랜치 기준)
