@@ -70,15 +70,26 @@ class ConfigManager:
         config = cls.load_config()
         model_name = config.get("models", {}).get(task_type, cls.DEFAULT_CONFIG["models"].get(task_type))
         
-        # [OS 분기] Whisper 모델의 경우, OS에 따라 다른 기본 모델을 반환해야 함
+        # [OS 분기 및 상호 매핑] Whisper 모델의 경우 OS 호환성을 위해 모델명을 보정합니다.
         if task_type == "whisper":
-            # 사용자가 config.json에 명시적으로 모델을 바꿨다면 그 값을 존중하되,
-            # 기본값인 경우 OS에 맞춰 스위칭
-            default_mlx = cls.DEFAULT_CONFIG["models"]["whisper"]
-            
-            # Mac이 아닌 경우(Windows/Linux)이고, 모델명이 MLX 전용이라면 -> Faster-Whisper용 표준 모델명으로 변경
-            if sys.platform != "darwin" and "mlx-community" in model_name:
-                return "large-v3-turbo" # Faster-Whisper 표준 모델명 (VRAM 8GB 최적화용 Turbo 모델)
+            if sys.platform == "darwin":
+                # macOS 환경: Faster-Whisper 모델명이 들어온 경우 최적화된 MLX 모델로 매핑
+                if model_name == "large-v3":
+                    return "mlx-community/whisper-large-v3-mlx-4bit"
+                elif model_name == "large-v3-turbo":
+                    return "mlx-community/whisper-large-v3-turbo-q4"
+                # 기본 설정이 mlx-community/whisper-large-v3-turbo 인 경우(구버전 호환)
+                elif model_name == "mlx-community/whisper-large-v3-turbo":
+                    return "mlx-community/whisper-large-v3-turbo-q4"
+            else:
+                # macOS가 아닌 환경(Linux/Windows): MLX 전용 모델명이 들어온 경우 Faster-Whisper 표준 모델명으로 폴백
+                if "whisper-large-v3-turbo-q4" in model_name:
+                    return "large-v3-turbo"
+                elif "whisper-large-v3-mlx-4bit" in model_name or "whisper-large-v3-q4" in model_name:
+                    return "large-v3"
+                elif "mlx-community" in model_name:
+                    # 그 외의 MLX 모델명인 경우 안전한 폴백
+                    return "large-v3-turbo"
                 
         return model_name
 

@@ -60,3 +60,33 @@ def test_gemini_models_fallback(monkeypatch):
     
     models = ConfigManager.get_gemini_models()
     assert "gemini-2.5-flash" in models
+
+def test_whisper_model_mapping_by_platform(monkeypatch):
+    """
+    sys.platform 환경에 맞춰 Whisper 모델명이 알맞은 하드웨어 가속 최적화 모델명으로 상호 맵핑되는지 검증합니다.
+    """
+    # 1. macOS (darwin) 환경에서의 맵핑 테스트
+    monkeypatch.setattr(sys, "platform", "darwin")
+    
+    # 1.1 config.json 모킹 (대체값을 설정 파일에 주입하여 테스트)
+    monkeypatch.setattr(ConfigManager, "load_config", lambda: {"models": {"whisper": "large-v3"}})
+    assert ConfigManager.get_model("whisper") == "mlx-community/whisper-large-v3-mlx-4bit"
+    
+    monkeypatch.setattr(ConfigManager, "load_config", lambda: {"models": {"whisper": "large-v3-turbo"}})
+    assert ConfigManager.get_model("whisper") == "mlx-community/whisper-large-v3-turbo-q4"
+
+    monkeypatch.setattr(ConfigManager, "load_config", lambda: {"models": {"whisper": "mlx-community/whisper-large-v3-turbo"}})
+    assert ConfigManager.get_model("whisper") == "mlx-community/whisper-large-v3-turbo-q4"
+
+    # 2. Linux/Windows 환경에서의 맵핑 테스트
+    monkeypatch.setattr(sys, "platform", "linux")
+    
+    monkeypatch.setattr(ConfigManager, "load_config", lambda: {"models": {"whisper": "mlx-community/whisper-large-v3-turbo-q4"}})
+    assert ConfigManager.get_model("whisper") == "large-v3-turbo"
+    
+    monkeypatch.setattr(ConfigManager, "load_config", lambda: {"models": {"whisper": "mlx-community/whisper-large-v3-mlx-4bit"}})
+    assert ConfigManager.get_model("whisper") == "large-v3"
+
+    monkeypatch.setattr(ConfigManager, "load_config", lambda: {"models": {"whisper": "mlx-community/whisper-large-v3-q4"}})
+    assert ConfigManager.get_model("whisper") == "large-v3"
+
