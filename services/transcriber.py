@@ -3,6 +3,14 @@ import subprocess
 import re
 import json
 import torch
+import ssl
+import certifi
+import urllib.request
+
+# [Add] Mac 환경 SSL 인증서 에러의 근본적/보안적 해결 (certifi 사용)
+ssl_context = ssl.create_default_context(cafile=certifi.where())
+urllib.request.install_opener(urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl_context)))
+
 try:
     import mlx_whisper
 except ImportError:
