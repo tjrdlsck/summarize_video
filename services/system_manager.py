@@ -21,6 +21,22 @@ class ConfigManager:
         }
     }
 
+    # macOS (darwin) 추천 모델 목록
+    DARWIN_WHISPER_MODELS = [
+        "mlx-community/whisper-large-v3-turbo-q4",
+        "mlx-community/whisper-large-v3-mlx-4bit",
+        "mlx-community/whisper-large-v3-q4"
+    ]
+    # Windows/Linux (Faster-Whisper) 추천 모델 목록
+    OTHER_WHISPER_MODELS = [
+        "large-v3-turbo",
+        "large-v3",
+        "medium",
+        "small"
+    ]
+
+    _cached_gemini_models = None
+
     @classmethod
     def load_config(cls):
         """설정 파일을 로드합니다. 파일이 없으면 기본값을 생성합니다."""
@@ -65,6 +81,56 @@ class ConfigManager:
                 return "large-v3-turbo" # Faster-Whisper 표준 모델명 (VRAM 8GB 최적화용 Turbo 모델)
                 
         return model_name
+
+    @classmethod
+    def get_gemini_models(cls):
+        """
+        Google GenAI API를 호출하여 gemini 또는 gemma 모델 목록을 동적으로 가져옵니다.
+        실패하거나 API 키가 없는 경우 기본 폴백(Fallback) 리스트를 반환합니다.
+        지연 시간을 줄이기 위해 클래스 변수를 통해 인메모리 캐싱을 제공합니다.
+        """
+        if cls._cached_gemini_models:
+            return cls._cached_gemini_models
+            
+        default_models = [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-3-flash",
+            "gemini-3-pro",
+            "gemini-3-deep-think",
+            "gemma-3-27b-it",
+            "gemma-3-4b-it",
+            "gemma-3-12b-it"
+        ]
+        
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return default_models
+            
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            models_list = client.models.list()
+            
+            gemini_gemma = []
+            for m in models_list:
+                name = m.name
+                if name.startswith("models/"):
+                    name = name[len("models/"):]
+                
+                name_lower = name.lower()
+                if "gemini" in name_lower or "gemma" in name_lower:
+                    if name not in gemini_gemma:
+                        gemini_gemma.append(name)
+            
+            if gemini_gemma:
+                cls._cached_gemini_models = gemini_gemma
+                return gemini_gemma
+        except Exception as e:
+            print(f"[ConfigManager] Failed to fetch dynamic Gemini models: {e}")
+            
+        return default_models
 
 class SystemManager:
     _state_lock = threading.Lock()

@@ -1,5 +1,6 @@
 """Settings routes."""
 
+import sys
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.requests import SettingsUpdateRequest
@@ -10,8 +11,18 @@ router = APIRouter()
 
 @router.get("/api/settings")
 async def get_settings():
-    """현재 AI 모델 설정을 조회합니다."""
-    return ConfigManager.load_config()
+    """현재 AI 모델 설정 및 플랫폼 메타데이터를 함께 조회합니다."""
+    config = ConfigManager.load_config()
+    
+    whisper_models = ConfigManager.DARWIN_WHISPER_MODELS if sys.platform == "darwin" else ConfigManager.OTHER_WHISPER_MODELS
+    gemini_models = ConfigManager.get_gemini_models()
+    
+    return {
+        "models": config.get("models", {}),
+        "platform": sys.platform,
+        "whisper_models": whisper_models,
+        "gemini_models": gemini_models
+    }
 
 
 @router.post("/api/settings")
