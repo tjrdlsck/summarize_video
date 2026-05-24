@@ -117,21 +117,56 @@ def run_vad_worker(audio_path, result_queue):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt, parent_sys_path=None):
+def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt, parent_sys_path, whisper_kwargs=None):
     """
     [Worker Process] 별도 프로세스에서 실행되는 Whisper 추론 함수입니다.
-    stdout을 캡처하여 진행률을 실시간으로 보고합니다.
+    완료 후 프로세스가 종료되며 VRAM 점유를 완전히 해제합니다.
     """
-    if parent_sys_path:
-        import sys
-        for p in parent_sys_path:
-            if p not in sys.path:
-                sys.path.append(p)
+    import sys
+    import os
+    import inspect
+    
+    if whisper_kwargs is None:
+        whisper_kwargs = {}
+        
+    lang = whisper_kwargs.get("language", "ko")
+    if lang == "auto":
+        lang = None
+
+    prompt = whisper_kwargs.get("initial_prompt") or initial_prompt
+    condition = whisper_kwargs.get("condition_on_previous_text", False)
+    temperature = whisper_kwargs.get("temperature", 0.0)
+    vad_enabled = whisper_kwargs.get("vad", True)
+    
+    gpu_tier = whisper_kwargs.get("gpu_tier", "low")
+    
+    # 기본 베이스 (large-v3 기준 안정값)
+    base_batch = 4
+    if gpu_tier == "high":
+        base_batch = 16
+    elif gpu_tier == "mid":
+        base_batch = 8
+
+    # 모델 가중치 (VRAM 소모량 역비례)
+    model_name_lower = model_path.lower()
+    if "turbo" in model_name_lower:
+        multiplier = 2.0
+    elif "medium" in model_name_lower:
+        multiplier = 1.5
+    elif "small" in model_name_lower:
+        multiplier = 3.0
+    else:
+        multiplier = 1.0  # large-v3 등 기타
+
+    batch_size = int(base_batch * multiplier)
+    # mac tier ignores batch_size
+
+    for p in parent_sys_path:
+        if p not in sys.path:
+            sys.path.append(p)
     try:
         print(f"[Whisper Worker] PID {os.getpid()} started processing with model: {model_path}...")
         
-        # [New] stdout을 Hook 클래스로 리다이렉트
-        # 이제부터 print()나 라이브러리의 stdout 출력은 hook.write()로 전달됨
         hook = WhisperProgressHook(result_queue, total_duration)
         sys.stdout = hook
         
@@ -140,50 +175,54 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
         if sys.platform == "darwin" and mlx_whisper is not None:
             # --- [Mac] MLX Whisper Engine ---
             print("[Whisper Worker] Using MLX Engine (Apple Silicon Optimized)")
-            # MLX Whisper 추론 실행
+            
+            mlx_temp = temperature if temperature > 0.0 else (0.0, 0.2, 0.4)
+            
             output = mlx_whisper.transcribe(
                 wav_path,
                 path_or_hf_repo=model_path,
-                language="ko",
-                verbose=True,  # [중요] True여야 타임스탬프 로그가 출력되어 Hook이 작동함
+                language=lang,
+                verbose=True,
                 word_timestamps=True,
-                condition_on_previous_text=False,
-                temperature=(0.0, 0.2, 0.4),
-                initial_prompt=initial_prompt
+                condition_on_previous_text=condition,
+                temperature=mlx_temp,
+                initial_prompt=prompt
             )
         else:
             # --- [Windows/Linux] Faster-Whisper + Stable-Whisper Engine ---
-            # NVIDIA GPU(CUDA) 가속 사용
             print("[Whisper Worker] Using Faster-Whisper Engine (CUDA/CPU)")
+            import torch
+            import stable_whisper
             
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            # [최적화] CUDA 환경에서는 float16을 강제하여 VRAM 효율성 및 연산 속도를 극대화
             compute_type = "float16" if device == "cuda" else "int8"
             
             print(f"[Whisper Worker] Device: {device}, Compute Type: {compute_type}")
             
-            # Faster-Whisper 모델 로드 (backend='faster-whisper')
-            # stable-ts 2.x에서는 load_faster_whisper 함수 사용
             model = stable_whisper.load_faster_whisper(
                 model_path, 
                 device=device, 
                 compute_type=compute_type
             )
             
-            # 추론 실행
-            # verbose=True로 설정해야 Hook이 진행률을 잡을 수 있음
-            result = model.transcribe(
-                wav_path,
-                language="ko",
-                vad=True, # Faster-Whisper 내장 VAD 사용
-                verbose=True,
-                initial_prompt=initial_prompt,
-                temperature=0.0,
-                condition_on_previous_text=False,
-                compression_ratio_threshold=2.4,
-                no_speech_threshold=0.6,
-                log_prob_threshold=-1.0
-            )
+            transcribe_kwargs = {
+                "language": lang,
+                "vad": vad_enabled,
+                "verbose": True,
+                "initial_prompt": prompt,
+                "temperature": temperature,
+                "condition_on_previous_text": condition,
+                "compression_ratio_threshold": 2.4,
+                "no_speech_threshold": 0.6,
+                "log_prob_threshold": -1.0
+            }
+            
+            sig = inspect.signature(model.transcribe)
+            if "batch_size" in sig.parameters and batch_size > 1:
+                transcribe_kwargs["batch_size"] = batch_size
+                print(f"[Whisper Worker] Using batch_size={batch_size}")
+            
+            result = model.transcribe(wav_path, **transcribe_kwargs)
             
             # MLX 결과 포맷과 호환되도록 딕셔너리로 변환
             output = result.to_dict()
@@ -565,7 +604,6 @@ class VideoTranscriber:
                 print(f"--- [Transcriber] Task {task_id} cancelled by user. ---")
                 raise TaskCancelledError("User cancelled the task.")
 
-    # [Modify] 시그니처 변경: task_manager와 task_id를 선택적 인자로 받음
     def transcribe(
         self,
         video_path,
@@ -573,6 +611,7 @@ class VideoTranscriber:
         task_manager=None,
         task_id=None,
         content_type: str = "sermon",
+        whisper_kwargs: dict = None,
     ):
         """
         [Main Pipeline] 프로세스 격리 + 정밀 진행률 추적이 적용된 Transcribe 메서드
@@ -636,7 +675,7 @@ class VideoTranscriber:
             # [New] total_duration을 인자로 전달
             worker_process = ctx.Process(
                 target=run_whisper_worker,
-                args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt, sys.path),
+                args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt, sys.path, whisper_kwargs),
             )
             worker_process.start()
             

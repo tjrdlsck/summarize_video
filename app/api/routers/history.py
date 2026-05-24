@@ -130,6 +130,7 @@ async def get_history():
                     "title": display_title,
                     "total_chapters": data.get("total_chapters", 0),
                     "timestamp": os.path.getmtime(json_path),
+                    "folder_id": data.get("folder_id"),
                     "result_data": {
                         "video_filename": video_source,
                         "video_title": display_title,
