@@ -15,11 +15,26 @@ class ConfigManager:
         "models": {
             "summarizer": "gemini-2.5-flash",
             "planner": "gemini-2.5-flash-lite",
-            "refiner": "gemma-3-27b-it",
-            "shorts": "gemini-2.5-flash",
-            "whisper": "mlx-community/whisper-large-v3-mlx-4bit"
+            "refiner": "gemma-4-26b-a4b-it",
+            "shorts": "gemini-2.5-flash-lite",
+            "whisper": "mlx-community/whisper-large-v3-turbo-q4"
         }
     }
+
+    # macOS (darwin) 추천 모델 목록
+    DARWIN_WHISPER_MODELS = [
+        "mlx-community/whisper-large-v3-turbo-q4",
+        "mlx-community/whisper-large-v3-mlx-4bit"
+    ]
+    # Windows/Linux (Faster-Whisper) 추천 모델 목록
+    OTHER_WHISPER_MODELS = [
+        "large-v3-turbo",
+        "large-v3",
+        "medium",
+        "small"
+    ]
+
+    _cached_gemini_models = None
 
     @classmethod
     def load_config(cls):
@@ -52,7 +67,80 @@ class ConfigManager:
     def get_model(cls, task_type):
         """특정 작업에 설정된 모델명을 가져옵니다."""
         config = cls.load_config()
-        return config.get("models", {}).get(task_type, cls.DEFAULT_CONFIG["models"].get(task_type))
+        model_name = config.get("models", {}).get(task_type, cls.DEFAULT_CONFIG["models"].get(task_type))
+        
+        # [OS 분기 및 상호 매핑] Whisper 모델의 경우 OS 호환성을 위해 모델명을 보정합니다.
+        if task_type == "whisper":
+            if sys.platform == "darwin":
+                # macOS 환경: Faster-Whisper 모델명이 들어온 경우 최적화된 MLX 모델로 매핑
+                if model_name == "large-v3":
+                    return "mlx-community/whisper-large-v3-mlx-4bit"
+                elif model_name == "large-v3-turbo":
+                    return "mlx-community/whisper-large-v3-turbo-q4"
+                # 기본 설정이 mlx-community/whisper-large-v3-turbo 인 경우(구버전 호환)
+                elif model_name == "mlx-community/whisper-large-v3-turbo":
+                    return "mlx-community/whisper-large-v3-turbo-q4"
+            else:
+                # macOS가 아닌 환경(Linux/Windows): MLX 전용 모델명이 들어온 경우 Faster-Whisper 표준 모델명으로 폴백
+                if "whisper-large-v3-turbo-q4" in model_name:
+                    return "large-v3-turbo"
+                elif "whisper-large-v3-mlx-4bit" in model_name or "whisper-large-v3-q4" in model_name:
+                    return "large-v3"
+                elif "mlx-community" in model_name:
+                    # 그 외의 MLX 모델명인 경우 안전한 폴백
+                    return "large-v3-turbo"
+                
+        return model_name
+
+    @classmethod
+    def get_gemini_models(cls):
+        """
+        Google GenAI API를 호출하여 gemini 또는 gemma 모델 목록을 동적으로 가져옵니다.
+        실패하거나 API 키가 없는 경우 기본 폴백(Fallback) 리스트를 반환합니다.
+        지연 시간을 줄이기 위해 클래스 변수를 통해 인메모리 캐싱을 제공합니다.
+        """
+        if cls._cached_gemini_models:
+            return cls._cached_gemini_models
+            
+        default_models = [
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-3-flash",
+            "gemini-3-pro",
+            "gemini-3-deep-think",
+            "gemma-3-27b-it",
+            "gemma-3-4b-it",
+            "gemma-3-12b-it"
+        ]
+        
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return default_models
+            
+        try:
+            from google import genai
+            client = genai.Client(api_key=api_key)
+            models_list = client.models.list()
+            
+            gemini_gemma = []
+            for m in models_list:
+                name = m.name
+                if name.startswith("models/"):
+                    name = name[len("models/"):]
+                
+                name_lower = name.lower()
+                if "gemini" in name_lower or "gemma" in name_lower:
+                    if name not in gemini_gemma:
+                        gemini_gemma.append(name)
+            
+            if gemini_gemma:
+                cls._cached_gemini_models = gemini_gemma
+                return gemini_gemma
+        except Exception as e:
+            print(f"[ConfigManager] Failed to fetch dynamic Gemini models: {e}")
+            
+        return default_models
 
 class SystemManager:
     _state_lock = threading.Lock()

@@ -3,7 +3,11 @@ import subprocess
 import re
 import json
 import torch
-import mlx_whisper
+try:
+    import mlx_whisper
+except ImportError:
+    mlx_whisper = None
+
 import soundfile as sf
 import numpy as np
 import stable_whisper
@@ -61,11 +65,60 @@ class WhisperProgressHook:
     def flush(self):
         self.terminal.flush()
 
-def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt):
+def run_vad_worker(audio_path, result_queue):
+    """
+    [Worker Process] 별도 프로세스에서 실행되는 VAD 추론 함수입니다.
+    완료 후 프로세스가 종료되며 VRAM 점유를 완전히 해제합니다.
+    """
+    import torch
+    import soundfile as sf
+    import gc
+    try:
+        model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
+                                      model='silero_vad',
+                                      force_reload=False,
+                                      trust_repo=True)
+        (get_speech_timestamps, _, _, _, _) = utils
+        
+        # [하드웨어 가속 최적화 - 롤백]
+        # Silero VAD는 순차적 오디오 청크를 처리하는 초경량 모델이므로
+        # GPU 통신 오버헤드(PCIe)로 인해 오히려 속도가 느려질 수 있어 CPU로 고정합니다.
+        device = torch.device('cpu')
+        model = model.to(device)
+        
+        audio_data, sr = sf.read(audio_path)
+        wav = torch.from_numpy(audio_data).float()
+        
+        if wav.ndim > 1: 
+            wav = wav.mean(dim=1) 
+        wav = wav.unsqueeze(0).to(device)
+        
+        speech_timestamps = get_speech_timestamps(wav, model, threshold=0.5)
+        
+        segments = []
+        for item in speech_timestamps:
+            segments.append((item['start'] / 16000, item['end'] / 16000))
+            
+        result_queue.put({"status": "success", "data": segments})
+    except Exception as e:
+        result_queue.put({"status": "error", "message": str(e)})
+    finally:
+        if 'model' in locals():
+            del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt, parent_sys_path=None):
     """
     [Worker Process] 별도 프로세스에서 실행되는 Whisper 추론 함수입니다.
     stdout을 캡처하여 진행률을 실시간으로 보고합니다.
     """
+    if parent_sys_path:
+        import sys
+        for p in parent_sys_path:
+            if p not in sys.path:
+                sys.path.append(p)
     try:
         print(f"[Whisper Worker] PID {os.getpid()} started processing with model: {model_path}...")
         
@@ -74,18 +127,59 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
         hook = WhisperProgressHook(result_queue, total_duration)
         sys.stdout = hook
         
-        # MLX Whisper 추론 실행
-        output = mlx_whisper.transcribe(
-            wav_path,
-            path_or_hf_repo=model_path,
-            language="ko",
-            verbose=True,  # [중요] True여야 타임스탬프 로그가 출력되어 Hook이 작동함
-            word_timestamps=True,
-            condition_on_previous_text=False,
-            temperature=(0.0, 0.2, 0.4),
-            initial_prompt=initial_prompt,
-        )
-        
+        output = None
+
+        if sys.platform == "darwin" and mlx_whisper is not None:
+            # --- [Mac] MLX Whisper Engine ---
+            print("[Whisper Worker] Using MLX Engine (Apple Silicon Optimized)")
+            # MLX Whisper 추론 실행
+            output = mlx_whisper.transcribe(
+                wav_path,
+                path_or_hf_repo=model_path,
+                language="ko",
+                verbose=True,  # [중요] True여야 타임스탬프 로그가 출력되어 Hook이 작동함
+                word_timestamps=True,
+                condition_on_previous_text=False,
+                temperature=(0.0, 0.2, 0.4),
+                initial_prompt=initial_prompt
+            )
+        else:
+            # --- [Windows/Linux] Faster-Whisper + Stable-Whisper Engine ---
+            # NVIDIA GPU(CUDA) 가속 사용
+            print("[Whisper Worker] Using Faster-Whisper Engine (CUDA/CPU)")
+            
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            # [최적화] CUDA 환경에서는 float16을 강제하여 VRAM 효율성 및 연산 속도를 극대화
+            compute_type = "float16" if device == "cuda" else "int8"
+            
+            print(f"[Whisper Worker] Device: {device}, Compute Type: {compute_type}")
+            
+            # Faster-Whisper 모델 로드 (backend='faster-whisper')
+            # stable-ts 2.x에서는 load_faster_whisper 함수 사용
+            model = stable_whisper.load_faster_whisper(
+                model_path, 
+                device=device, 
+                compute_type=compute_type
+            )
+            
+            # 추론 실행
+            # verbose=True로 설정해야 Hook이 진행률을 잡을 수 있음
+            result = model.transcribe(
+                wav_path,
+                language="ko",
+                vad=True, # Faster-Whisper 내장 VAD 사용
+                verbose=True,
+                initial_prompt=initial_prompt,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                compression_ratio_threshold=2.4,
+                no_speech_threshold=0.6,
+                log_prob_threshold=-1.0
+            )
+            
+            # MLX 결과 포맷과 호환되도록 딕셔너리로 변환
+            output = result.to_dict()
+
         # stdout 복구
         sys.stdout = hook.terminal
         
@@ -98,6 +192,23 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
         sys.stdout = sys.__stdout__ # 혹시 모르니 표준출력 복구
         print(f"[Whisper Worker] Error: {e}")
         result_queue.put({"status": "error", "message": str(e)})
+        
+        # [Add] 에러 로그 파일 기록 및 Traceback 보존
+        try:
+            from services.logger import get_logger, log_error_with_traceback
+            logger = get_logger()
+            log_error_with_traceback(logger, f"[Whisper Worker] Inference crashed in worker process {os.getpid()}", e)
+        except Exception:
+            # 임포트 문제 등으로 로깅 모듈이 실패할 경우를 대비한 로컬 백업 로깅
+            try:
+                import traceback
+                log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "logs")
+                os.makedirs(log_dir, exist_ok=True)
+                backup_log = os.path.join(log_dir, f"worker_crash_{os.getpid()}.log")
+                with open(backup_log, "w", encoding="utf-8") as f:
+                    f.write(f"Worker Exception: {str(e)}\n\nTraceback:\n{traceback.format_exc()}")
+            except Exception:
+                pass
     finally:
         # [Add] 워커 프로세스 종료 전 메모리 정리
         gc.collect()
@@ -147,7 +258,7 @@ class VideoTranscriber:
             "-vn", 
             "-ac", "1", 
             "-ar", "16000",
-            "-af", "highpass=f=200,lowpass=f=8000,afftdn=nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
             "-c:a", "pcm_s16le", 
             output_wav, "-y", "-hide_banner", "-loglevel", "info"
         ]
@@ -207,41 +318,44 @@ class VideoTranscriber:
 
 
     def _get_vad_timestamps(self, audio_path):
-        """Silero VAD를 사용하여 실제 음성이 있는 구간(초 단위)을 추출"""
-        try:
-            model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                                          model='silero_vad',
-                                          force_reload=False,
-                                          trust_repo=True)
-            (get_speech_timestamps, _, _, _, _) = utils
+        """Silero VAD를 사용하여 실제 음성이 있는 구간(초 단위)을 추출 (별도 프로세스로 분리)"""
+        ctx = multiprocessing.get_context('spawn')
+        queue = ctx.Queue()
+        
+        worker_process = ctx.Process(
+            target=run_vad_worker,
+            args=(audio_path, queue),
+        )
+        worker_process.start()
+        
+        output = None
+        while worker_process.is_alive():
+            if not queue.empty():
+                msg = queue.get()
+                if msg["status"] == "success":
+                    output = msg["data"]
+                    break
+                elif msg["status"] == "error":
+                    print(f"[Warning] VAD execution failed: {msg['message']}")
+                    break
+            time.sleep(0.1)
             
-            audio_data, sr = sf.read(audio_path)
-            wav = torch.from_numpy(audio_data).float()
+        worker_process.join()
+        
+        # 잔여 메시지 확인
+        if not output and not queue.empty():
+            msg = queue.get()
+            if msg["status"] == "success":
+                output = msg["data"]
             
-            # 차원 및 샘플링 레이트 보정
-            if wav.ndim > 1: wav = wav.mean(dim=0, keepdim=True) # Stereo -> Mono
-            if wav.ndim == 1: wav = wav.unsqueeze(0)
-            
-            speech_timestamps = get_speech_timestamps(wav, model, threshold=0.5)
-            
-            # Sample -> Seconds 변환
-            segments = []
-            for item in speech_timestamps:
-                segments.append((item['start'] / 16000, item['end'] / 16000))
-            
-            return segments
-        except Exception as e:
-            print(f"[Warning] VAD execution failed: {e}")
-            return []
-        finally:
-            # [Add] VAD 모델 메모리 해제 시도
-            if 'model' in locals():
-                del model
-            gc.collect()
+        return output
 
     def _filter_hallucinations(self, whisper_segments, vad_segments):
         """Whisper 세그먼트가 VAD 구간과 겹치지 않으면(환각이면) 제거"""
-        if not vad_segments: return whisper_segments
+        if vad_segments is None: 
+            return whisper_segments # VAD 실행 오류 시 안전장치로 필터 통과
+        if not vad_segments: 
+            return [] # VAD가 정상 구동되었으나 음성이 감지되지 않은 경우 환각 차단
         
         valid_segments = []
         for seg in whisper_segments:
@@ -266,12 +380,18 @@ class VideoTranscriber:
     # [Add] 이 메서드를 클래스 내부에 새로 추가하세요. (_filter_hallucinations 밑 추천)
     def _sanitize_segments(self, segments):
         """
-        [Sanitizer v2] 강력한 중복 제거 및 타임스탬프 교정
+        [Sanitizer v3] 강력한 중복 제거 및 타임스탬프 교정
         - 긴 영상에서 발생하는 슬라이딩 윈도우 중복(Sliding Window Duplication)을 제거합니다.
-        - 텍스트 유사도를 검사하여 겹치는 구간을 병합하거나 삭제합니다.
+        - 띄어쓰기 오차를 제거한 텍스트 유사도 검사를 통해 겹치는 구간을 병합하거나 삭제합니다.
+        - stable_whisper 빌드 시 발생할 수 있는 타임스탬프 순서 역행(Timestamps not in ascending order)을
+          방지하기 위해 세그먼트 간 및 단어 단위 타임스탬프에 단조성(Monotonicity)을 강제합니다.
         """
         if not segments:
             return []
+
+        import copy
+        # deep copy를 수행하여 원본 데이터 조작 방지
+        segments = copy.deepcopy(segments)
 
         # 1. 무조건 시작 시간순 정렬 (ID 순서 무시)
         segments.sort(key=lambda x: x['start'])
@@ -293,31 +413,95 @@ class VideoTranscriber:
             # 2. 중첩(Overlap) 감지
             # 허용 오차(tolerance) 0.1초: 미세한 겹침은 무시하되, 큰 겹침은 처리
             if prev['end'] > current['start'] + 0.1:
-                overlap_duration = prev['end'] - current['start']
+                # 띄어쓰기 차이로 인한 매칭 실패를 막기 위해 공백 제거 정규화 적용
+                prev_text_norm = re.sub(r'\s+', '', prev['text'])
+                curr_text_norm = re.sub(r'\s+', '', current['text'])
                 
                 # (A) 텍스트 중복 검사 (핵심)
-                # 앞 문장의 뒷부분과 뒷 문장의 앞부분이 겹치는지 확인
-                prev_text = prev['text'].strip()
-                curr_text = current['text'].strip()
-                
-                # 텍스트가 완전히 포함되거나 매우 유사하면 -> 현재 세그먼트 삭제 (Duplicate)
-                if curr_text in prev_text or prev_text in curr_text:
+                if curr_text_norm in prev_text_norm or prev_text_norm in curr_text_norm:
                     # 더 긴 쪽을 유지 (정보량이 많은 쪽)
-                    if len(curr_text) > len(prev_text):
+                    if len(curr_text_norm) > len(prev_text_norm):
                         sanitized.pop()
                         sanitized.append(current)
-                    continue # 현재 루프 건너뜀 (삭제 효과)
+                    continue # 현재 루프 건너뜀 (현재 세그먼트 삭제 효과)
 
                 # (B) 시간 조정 (Trimming)
                 # 텍스트는 다르지만 시간이 겹침 -> 이전 세그먼트를 잘라서 겹침 해소
-                # 단, 이전 세그먼트가 너무 짧아지면(0.2초 미만) 삭제
                 prev['end'] = current['start']
                 if prev['end'] - prev['start'] < 0.2:
                     sanitized.pop()
             
             sanitized.append(current)
 
-        return sanitized
+        # 3. 단조성 강제 및 단어 타임스탬프 동기화 (Timestamp Enforcer)
+        final_sanitized = []
+        for seg in sanitized:
+            # 세그먼트 자체의 최소 길이 보장 (10ms 미만 제거)
+            if seg['end'] - seg['start'] < 0.01:
+                continue
+
+            if final_sanitized:
+                prev_seg = final_sanitized[-1]
+                if prev_seg['end'] > seg['start']:
+                    # 겹치는 경계를 정렬
+                    prev_seg['end'] = seg['start']
+                    # 이전 세그먼트의 변경된 경계에 맞춰 내부 단어들 재정렬
+                    self._align_words_with_segment_bounds(prev_seg)
+                    
+                    # 만약 이전 세그먼트가 너무 짧아졌다면 폐기
+                    if prev_seg['end'] - prev_seg['start'] < 0.01:
+                        final_sanitized.pop()
+
+            self._align_words_with_segment_bounds(seg)
+            final_sanitized.append(seg)
+
+        return final_sanitized
+
+    def _align_words_with_segment_bounds(self, seg):
+        """
+        세그먼트 내 단어들의 타임스탬프를 세그먼트의 start/end 경계 내로 조율하고,
+        단어 간의 타임스탬프 단조성(Monotonicity)을 강제합니다.
+        """
+        if 'words' not in seg or not seg['words']:
+            return
+
+        valid_words = []
+        seg_start = seg['start']
+        seg_end = seg['end']
+
+        for w in seg['words']:
+            w_start = w['start']
+            w_end = w['end']
+
+            # 세그먼트 시간 범위를 완전히 벗어난 단어 필터링
+            if w_start >= seg_end or w_end <= seg_start:
+                continue
+
+            # 경계 내로 클램핑 (Clamping)
+            w_start = max(w_start, seg_start)
+            w_end = min(w_end, seg_end)
+
+            if w_end > w_start:
+                w['start'] = w_start
+                w['end'] = w_end
+                valid_words.append(w)
+
+        # 시작 시간 기준으로 재정렬
+        valid_words.sort(key=lambda x: x['start'])
+
+        # 단어들 간의 역행 방지 및 단조성 보장
+        aligned_words = []
+        for w in valid_words:
+            if aligned_words:
+                prev_w = aligned_words[-1]
+                if prev_w['end'] > w['start']:
+                    w['start'] = prev_w['end']
+                
+                if w['end'] <= w['start']:
+                    continue
+            aligned_words.append(w)
+
+        seg['words'] = aligned_words
 
     def _remove_punctuation_from_subtitle_file(self, file_path):
         """
@@ -385,7 +569,15 @@ class VideoTranscriber:
         """
         [Main Pipeline] 프로세스 격리 + 정밀 진행률 추적이 적용된 Transcribe 메서드
         """
-        print(f"--- [Transcriber] Start processing: {video_path} ---")
+        # [Add] 로거 로딩 및 시작 로그 기록
+        try:
+            from services.logger import get_logger
+            logger = get_logger()
+            logger.info(f"--- [Transcriber] Start processing: {video_path} (Task ID: {task_id}) ---")
+        except Exception:
+            logger = None
+            print(f"--- [Transcriber] Start processing: {video_path} ---")
+            
         profile = get_content_profile(content_type)
         
         self._check_cancel(task_manager, task_id)
@@ -393,7 +585,14 @@ class VideoTranscriber:
         # 1. 오디오 변환 (FFmpeg 내부에서 0~20% 진행률 자동 업데이트)
         # progress_callback은 여기서 쓰지 않고 FFmpeg 내부 로직이 task_manager를 직접 호출함
         wav_path = self._convert_to_16k_wav(video_path, task_manager, task_id)
-        if not wav_path: raise Exception("Audio conversion failed")
+        if not wav_path:
+            exc = Exception("Audio conversion failed (FFmpeg returned None or failed)")
+            if logger:
+                logger.error(f"[Transcriber] FFmpeg conversion failed for {video_path}")
+                if task_id:
+                    from services.logger import log_task_error
+                    log_task_error(task_id, "audio_conversion", exc)
+            raise exc
 
         try:
             self._check_cancel(task_manager, task_id)
@@ -402,24 +601,34 @@ class VideoTranscriber:
             try:
                 audio_info = sf.info(wav_path)
                 total_duration = audio_info.duration
-            except Exception:
+                if logger:
+                    logger.info(f"[Transcriber] Audio duration: {total_duration:.2f} seconds")
+            except Exception as e:
                 total_duration = 100 # Fallback
+                if logger:
+                    logger.warning(f"[Transcriber] Failed to calculate audio duration: {e}. Fallback to 100s.")
 
             # 2. VAD 실행
             if progress_callback: progress_callback(20, "음성 구간 탐지(VAD) 실행 중...")
             vad_segments = self._get_vad_timestamps(wav_path)
+            if logger:
+                logger.info(f"[Transcriber] VAD completed. Detected {len(vad_segments)} speech segments.")
             
             self._check_cancel(task_manager, task_id)
             if progress_callback: progress_callback(25, "AI 자막 생성 준비 중...")
             
             # 3. Whisper 실행
-            print(" -> Spawning Whisper Worker Process...")
-            queue = multiprocessing.Queue()
+            if logger:
+                logger.info(f" -> Spawning Whisper Worker Process for {video_path}")
+            else:
+                print(" -> Spawning Whisper Worker Process...")
+            ctx = multiprocessing.get_context('spawn')
+            queue = ctx.Queue()
             
             # [New] total_duration을 인자로 전달
-            worker_process = multiprocessing.Process(
+            worker_process = ctx.Process(
                 target=run_whisper_worker,
-                args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt),
+                args=(wav_path, self._get_model(), queue, total_duration, profile.asr_initial_prompt, sys.path),
             )
             worker_process.start()
             
@@ -466,7 +675,13 @@ class VideoTranscriber:
                     elif msg["status"] == "error": raise Exception(f"Worker Error: {msg.get('message')}")
             
             if not output:
-                 raise Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
+                 exc = Exception(f"Whisper process crashed with exit code {worker_process.exitcode}")
+                 if logger:
+                     logger.error(f"[Transcriber] Whisper Worker process crashed. exitcode={worker_process.exitcode}")
+                 raise exc
+            
+            if logger:
+                logger.info(f"[Transcriber] Whisper Worker process completed successfully.")
             
             # 4. 후처리 (85% ~ 100%)
             if progress_callback: progress_callback(85, "데이터 정제 및 저장 중...")
@@ -526,7 +741,10 @@ class VideoTranscriber:
             self._remove_punctuation_from_subtitle_file(srt_path)
             self._remove_punctuation_from_subtitle_file(vtt_path)
 
-            print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
+            if logger:
+                logger.info(f"--- [Transcriber] Done. Saved results to {self.output_dir} ---")
+            else:
+                print(f"--- [Transcriber] Done. Saved to {self.output_dir} ---")
             return {
                 "status": "success",
                 "srt_path": srt_path,
@@ -535,9 +753,25 @@ class VideoTranscriber:
                 "segments": final_data 
             }
 
-        except TaskCancelledError:
+        except TaskCancelledError as e:
+            try:
+                if logger:
+                    logger.info(f"[Transcriber] Task {task_id} was cancelled by user.")
+            except Exception:
+                pass
             print(f"[Transcriber] Cleanup initiated for task {task_id}")
-            raise 
+            raise e
+
+        except Exception as e:
+            try:
+                from services.logger import log_error_with_traceback, log_task_error
+                if logger:
+                    log_error_with_traceback(logger, f"Transcription pipeline failed for: {video_path}", e)
+                if task_id:
+                    log_task_error(task_id, "transcribe", e)
+            except Exception as log_err:
+                print(f"[Backup Warning] Failed to write pipeline error log: {log_err}")
+            raise e
 
         finally:
             # [Add] 최종 메모리 정리
@@ -547,7 +781,7 @@ class VideoTranscriber:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            if os.path.exists(wav_path):
+            if 'wav_path' in locals() and os.path.exists(wav_path):
                 os.remove(wav_path)
 
 # --- [Module Test] ---

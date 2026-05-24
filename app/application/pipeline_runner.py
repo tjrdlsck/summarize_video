@@ -175,7 +175,7 @@ class PipelineRunner:
         except Exception as error:
             print(f"[{task_id}] Transcription Failed: {error}")
             cleanup_files(str(video_filename) if video_filename else None)
-            task_manager.fail_task(task_id, str(error))
+            task_manager.fail_task(task_id, str(error), exception=error)
 
     async def run_summary_pipeline(self, task_id: str, req: SummaryRequest) -> None:
         """AI 챕터 분석 및 요약 파이프라인."""
@@ -225,7 +225,7 @@ class PipelineRunner:
             task_manager.fail_task(task_id, "취소됨")
         except Exception as error:
             print(f"[{task_id}] Summary Failed: {error}")
-            task_manager.fail_task(task_id, str(error))
+            task_manager.fail_task(task_id, str(error), exception=error)
 
     async def run_blog_pipeline(self, task_id: str, req: BlogGenerationRequest) -> None:
         """블로그 포스트 생성 파이프라인."""
@@ -330,7 +330,7 @@ class PipelineRunner:
             task_manager.fail_task(task_id, "취소됨")
         except Exception as error:
             print(f"[{task_id}] Blog Generation Failed: {error}")
-            task_manager.fail_task(task_id, str(error))
+            task_manager.fail_task(task_id, str(error), exception=error)
 
     async def run_clip_pipeline(self, task_id: str, req: ClipRequest) -> None:
         """영상 클립 생성 파이프라인."""
@@ -439,7 +439,7 @@ class PipelineRunner:
 
         except Exception as error:
             print(f"[{task_id}] Clip Pipeline Failed: {error}")
-            task_manager.fail_task(task_id, str(error))
+            task_manager.fail_task(task_id, str(error), exception=error)
 
         finally:
             for temp_file in temp_files:
@@ -610,7 +610,7 @@ class PipelineRunner:
 
         except Exception as error:
             print(f"[{task_id}] Shorts Pipeline Failed: {error}")
-            task_manager.fail_task(task_id, str(error))
+            task_manager.fail_task(task_id, str(error), exception=error)
         finally:
             for temp_file in temp_files:
                 if temp_file and os.path.exists(temp_file):

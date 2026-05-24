@@ -41,6 +41,7 @@ function App() {
     const [loading, setLoading] = useState(false);
     const [activeTab, setActiveTab] = useState('chapters');
     const [expandedChapters, setExpandedChapters] = useState({});
+    const [uploadProgress, setUploadProgress] = useState(0);
 
     useEffect(() => {
         if (playerData && playerData.chapters) {
@@ -425,22 +426,66 @@ function App() {
     const handleFileUpload = async (file) => {
         if (!file) return;
         setLoading(true);
+        setUploadProgress(0);
+        
         try {
-            const formData = new FormData();
-            formData.append("file", file);
-            const upRes = await axios.post('/api/upload', formData);
+            // [New] Chunked Upload with Resume
+            const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB
+            const identifier = file.name + "-" + file.size + "-" + file.lastModified;
+            // Base64-like safe string for URL
+            const safeIdentifier = btoa(unescape(encodeURIComponent(identifier))).replace(/[\/+=]/g, '');
+
+            // 1. 상태 확인 (이어올리기)
+            let uploadedSize = 0;
+            try {
+                const statusRes = await axios.get(`/api/upload/status/${safeIdentifier}`);
+                uploadedSize = statusRes.data.uploaded || 0;
+            } catch (e) {
+                console.warn("Status check failed, starting from 0");
+            }
+
+            // 2. 청크 전송
+            let currentOffset = uploadedSize;
+            while (currentOffset < file.size) {
+                const chunk = file.slice(currentOffset, currentOffset + CHUNK_SIZE);
+                const formData = new FormData();
+                formData.append("identifier", safeIdentifier);
+                formData.append("chunk", chunk);
+
+                await axios.post('/api/upload/chunk', formData, {
+                    headers: { "Content-Type": "multipart/form-data" },
+                    onUploadProgress: (progressEvent) => {
+                        const totalUploaded = currentOffset + progressEvent.loaded;
+                        const percent = Math.round((totalUploaded * 100) / file.size);
+                        setUploadProgress(percent > 100 ? 100 : percent);
+                    }
+                });
+                
+                currentOffset += chunk.size;
+            }
+
+            // 3. 완료 요청
+            setUploadProgress(100);
+            const completeRes = await axios.post('/api/upload/complete', {
+                identifier: safeIdentifier,
+                filename: file.name
+            });
+
+            // 4. 자막 큐 등록
             await axios.post('/api/transcribe', {
-                filename: upRes.data.filename,
+                filename: completeRes.data.filename,
                 custom_title: titleInput,
                 content_type: contentType
             });
+
             setTitleInput("");
             alert("파일 업로드 완료. 자막 생성이 시작됩니다.");
             fetchActiveTasks();
         } catch (err) {
-            alert("오류 발생: " + err.message);
+            alert("오류 발생: " + (err.response?.data?.detail || err.message));
         } finally {
             setLoading(false);
+            setUploadProgress(0);
         }
     };
 
@@ -1041,9 +1086,12 @@ function App() {
                                                     >
                                                         URL 추가
                                                     </button>
-                                                    <label className="flex-1 bg-white border border-gray-300 py-1.5 rounded-lg text-xs font-bold text-gray-600 text-center cursor-pointer hover:bg-gray-50 transition">
-                                                        파일 업로드
-                                                        <input type="file" accept="video/mp4" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} />
+                                                    <label className="flex-1 bg-white border border-gray-300 py-1.5 rounded-lg text-xs font-bold text-gray-600 text-center cursor-pointer hover:bg-gray-50 transition relative overflow-hidden">
+                                                        <span className="relative z-10">{uploadProgress > 0 && uploadProgress < 100 ? `업로드 중 (${uploadProgress}%)` : '파일 업로드'}</span>
+                                                        {uploadProgress > 0 && uploadProgress < 100 && (
+                                                            <div className="absolute top-0 left-0 h-full bg-blue-100 z-0" style={{ width: `${uploadProgress}%`, opacity: 0.5 }}></div>
+                                                        )}
+                                                        <input type="file" accept="video/mp4" className="hidden" onChange={(e) => handleFileUpload(e.target.files[0])} disabled={uploadProgress > 0 && uploadProgress < 100} />
                                                     </label>
                                                 </div>
                                             </div>
