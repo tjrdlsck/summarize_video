@@ -44,6 +44,18 @@ class QueueWorker:
                             await self.runner.run_shorts_pipeline(task_id, req)
             except Exception as error:
                 print(f"[Worker Error] {error}")
+                try:
+                    from services.logger import get_logger, log_error_with_traceback
+                    logger = get_logger()
+                    log_error_with_traceback(logger, f"[Worker] Exception in task {task_id}", error)
+                except Exception as log_err:
+                    print(f"[Backup Warning] Failed to log worker exception: {log_err}")
+                
+                # 대기열 실행 실패 시 태스크를 실패 처리
+                try:
+                    task_manager.fail_task(task_id, f"Worker Error: {str(error)}", exception=error)
+                except Exception as fail_err:
+                    print(f"[Backup Warning] Failed to fail task {task_id}: {fail_err}")
             finally:
                 self.container.job_queue.task_done()
                 SystemManager.maybe_schedule_restart(

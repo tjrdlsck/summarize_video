@@ -141,6 +141,41 @@ class VideoDownloader:
             print(f"[Error] Upload failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    async def get_uploaded_size(self, identifier: str) -> int:
+        """현재 업로드된 임시 파일의 크기를 반환합니다. (이어올리기 용도)"""
+        temp_path = os.path.join(self.download_dir, f"{identifier}.part")
+        if os.path.exists(temp_path):
+            return os.path.getsize(temp_path)
+        return 0
+
+    async def append_chunk(self, identifier: str, chunk_data: bytes):
+        """청크 데이터를 임시 파일에 비동기로 추가(Append)합니다."""
+        temp_path = os.path.join(self.download_dir, f"{identifier}.part")
+        async with await anyio.open_file(temp_path, "ab") as f:
+            await f.write(chunk_data)
+        return True
+
+    async def finalize_upload(self, identifier: str, original_filename: str):
+        """모든 청크 전송 완료 후 임시 파일을 최종 파일로 변환합니다."""
+        temp_path = os.path.join(self.download_dir, f"{identifier}.part")
+        if not os.path.exists(temp_path):
+            return {"status": "error", "message": "임시 파일을 찾을 수 없습니다."}
+
+        safe_name = self._sanitize_filename(original_filename)
+        # 보안 및 중복 방지용 (identifier 자체를 접두어로 사용)
+        final_filename = f"{identifier}_{safe_name}"
+        final_path = os.path.join(self.download_dir, final_filename)
+
+        os.rename(temp_path, final_path)
+        print(f"--- [Upload Complete] File finalized at: {final_path} ---")
+
+        return {
+            "status": "success",
+            "file_path": final_path,
+            "filename": final_filename,
+            "original_filename": original_filename
+        }
+
     def download_from_url(self, url, progress_callback=None, task_manager=None, task_id=None):
         """
         YouTube URL을 통해 영상을 다운로드합니다.
@@ -178,8 +213,30 @@ class VideoDownloader:
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
-            'progress_hooks': [_progress_hook]
+            'progress_hooks': [_progress_hook],
+            # [Fix 403 Forbidden] 클라이언트 위장 (ios, android 클라이언트가 보안 체크가 느슨함)
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios', 'android', 'web'],
+                    'player_skip': ['webpage', 'configs']
+                }
+            },
+            # [Fix 403 Forbidden] User-Agent & Referer 최적화
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Referer': 'https://www.youtube.com/',
+                'Sec-Fetch-Mode': 'navigate'
+            },
+            'nocheckcertificate': True,
         }
+        
+        # [Windows Cookie 이슈 대응]
+        # 만약 위의 설정으로도 403이 발생하면, 크롬이 아닌 'edge' 쿠키 사용을 시도해볼 수 있습니다.
+        # Edge는 보통 잠금 이슈가 덜하며, 아래 주석을 해제하여 테스트 가능합니다.
+        # if os.name == 'nt':
+        #     ydl_opts['cookiesfrombrowser'] = ('edge', )
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

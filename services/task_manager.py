@@ -136,14 +136,34 @@ class TaskManager:
             
         self._save_tasks()
 
-    def fail_task(self, task_id: str, error_message: str):
+    def fail_task(self, task_id: str, error_message: str, exception: Exception = None):
+        import sys
+        safe_task_id = str(task_id).replace("/", "_").replace("\\", "_")
+        log_filename = f"task_{safe_task_id}.log"
+
         with self._lock:
             if task_id in self.tasks:
                 self.tasks[task_id]["status"] = "failed"
                 self.tasks[task_id]["progress"] = 0
                 self.tasks[task_id]["message"] = "오류 발생"
                 self.tasks[task_id]["error"] = error_message
+                self.tasks[task_id]["log_file"] = f"/static/logs/{log_filename}"
         self._save_tasks()
+
+        # 예외(exception) 객체 자동 캡처
+        exc = exception
+        if exc is None:
+            _, exc_val, _ = sys.exc_info()
+            if exc_val is not None:
+                exc = exc_val
+
+        if exc is not None:
+            try:
+                from services.logger import log_task_error
+                step_name = self.tasks.get(task_id, {}).get("type", "pipeline")
+                log_task_error(task_id, step_name, exc)
+            except Exception as log_err:
+                print(f"[Backup Warning] Failed to log task error: {log_err}")
 
     def get_task(self, task_id: str):
         with self._lock:

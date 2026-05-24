@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import subprocess
 import zipfile
 import asyncio
@@ -15,6 +16,31 @@ class VideoClipper:
     def __init__(self, temp_dir="static/temp"):
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
+
+    def _is_nvenc_available(self):
+        """
+        NVIDIA NVENC 가속 인코더가 현재 시스템에서 사용 가능한지 확인합니다.
+        """
+        try:
+            # 1. nvidia-smi 명령어를 실행하여 NVIDIA GPU 및 드라이버가 작동 중인지 확인
+            result = subprocess.run(
+                ["nvidia-smi"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            if result.returncode != 0:
+                return False
+            
+            # 2. ffmpeg에서 h264_nvenc 인코더를 지원하는지 확인
+            result = subprocess.run(
+                ["ffmpeg", "-encoders"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            return "h264_nvenc" in result.stdout
+        except Exception:
+            return False
 
     def _seconds_to_time_str(self, seconds, separator=","):
         """
@@ -62,29 +88,44 @@ class VideoClipper:
         fade_duration_out = 0.2
         audio_filter = f"afade=t=in:st=0:d={fade_duration_in},afade=t=out:st={duration - fade_duration_out}:d={fade_duration_out}"
 
+        # [FFmpeg Encoder & Quality Configuration]
+        # OS 및 그래픽 카드 가속 여부에 따른 인코더 설정
+        if self._is_nvenc_available():
+            # NVIDIA NVENC 가속 사용 (Windows / Linux 공용)
+            encoder = "h264_nvenc"
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
+        elif sys.platform == 'darwin':
+            # macOS: Apple Silicon 가속 사용
+            encoder = "h264_videotoolbox"
+            quality_opts = ["-q:v", "65"]
+        else:
+            # Linux 및 기타 OS: CPU 기반 범용 libx264 사용
+            encoder = "libx264"
+            quality_opts = ["-crf", "23", "-preset", "medium"]
+
         # [FFmpeg Command Configuration]
         cmd = [
             "ffmpeg", 
+            "-nostdin",
             "-i", input_path,
             "-ss", str(start_sec),
             "-to", str(end_sec),
             "-filter_complex", f"[0:a]{audio_filter}[af]", # 오디오 필터 적용
             "-map", "0:v", "-map", "[af]",                 # 비디오는 그대로, 오디오는 필터 거친 것 사용
-            "-c:v", "h264_videotoolbox", # Apple Silicon 가속 (필요시 libx264로 변경)
-            
-            # [수정된 부분] 고정 비트레이트(-b:v) 대신 품질 옵션(-q:v) 사용
-            "-q:v", "65",                # 0~100 사이 값. 65는 높은 화질과 적절한 용량의 균형점 (원본 수준 유지)
-            
-            # [Safari 호환성 유지] 화질은 챙기되, 재생 호환성은 놓치지 않음
+            "-c:v", encoder,                               # 자동 선택된 인코더
+        ]
+        cmd.extend(quality_opts)                           # 품질 옵션 추가
+        
+        # [Safari 호환성 유지]
+        cmd.extend([
             "-pix_fmt", "yuv420p",       # 모바일/웹 표준 색상 포맷
             "-profile:v", "main",        # 호환성 프로필
-            
             "-c:a", "aac", "-b:a", "192k",
             "-y",
             "-hide_banner",
-            "-loglevel", "info",         # 진행률 파싱을 위해 info 레벨 필수
+            "-loglevel", "info",
             output_path
-        ]
+        ])
 
         print(f"--- [Clipper] Starting Async Cut (High Quality + Fade): {output_filename} ---")
         
@@ -95,6 +136,7 @@ class VideoClipper:
             # 1. 비동기 서브프로세스 생성 (stderr Pipe 연결)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -378,29 +420,40 @@ class VideoClipper:
         filter_parts.append(f"{concat_input}concat=n={len(segments)}:v=1:a=1[outv][outa]")
         filter_complex_str = ";".join(filter_parts)
 
+        # [FFmpeg Encoder & Quality Configuration]
+        if self._is_nvenc_available():
+            encoder = "h264_nvenc"
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
+        elif sys.platform == 'darwin':
+            encoder = "h264_videotoolbox"
+            quality_opts = ["-q:v", "65"]
+        else:
+            encoder = "libx264"
+            quality_opts = ["-crf", "23", "-preset", "medium"]
+
         # [FFmpeg Command Configuration]
         cmd = [
             "ffmpeg", 
+            "-nostdin",
             "-i", input_path,
             "-filter_complex", filter_complex_str,
             "-map", "[outv]", 
             "-map", "[outa]",
-            "-c:v", "h264_videotoolbox", # macOS Hardware Acceleration
-            
-            # [수정된 부분] 고정 비트레이트(-b:v) 제거 -> 품질 기반(-q:v) 적용
-            "-q:v", "65",                # 원본 수준의 고화질 유지 (VBR)
-            
-            # [Safari 호환성 유지]
+            "-c:v", encoder,
+        ]
+        cmd.extend(quality_opts)
+        
+        # [Safari 호환성 유지]
+        cmd.extend([
             "-pix_fmt", "yuv420p",       # 모바일/웹 표준 색상 포맷
             "-profile:v", "main",        # 호환성 프로필
-            
             "-c:a", "aac", 
             "-b:a", "192k",
             "-y",
             "-hide_banner",
             "-loglevel", "info", 
             output_video_path
-        ]
+        ])
 
         print(f"--- [Clipper] Starting Merge Segments (High Quality + Audio Refinement): {len(segments)} cuts ---")
 
@@ -408,6 +461,7 @@ class VideoClipper:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE
             )

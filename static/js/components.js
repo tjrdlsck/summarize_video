@@ -200,6 +200,12 @@ window.SegmentedControl = function({ activeTab, onChange }) {
 
 // --- [Helper Component] TaskRow (Moved Outside to Prevent Focus Loss) ---
 const TaskRow = ({ label, task, description, value, onChange, suggestions }) => {
+    // value가 suggestions에 없는 경우 목록에 추가 (수동 입력된 기존 값 보존)
+    const options = suggestions ? [...suggestions] : [];
+    if (value && !options.includes(value)) {
+        options.unshift(value);
+    }
+
     return (
         <div className="space-y-2">
             <div className="flex justify-between items-center">
@@ -207,17 +213,17 @@ const TaskRow = ({ label, task, description, value, onChange, suggestions }) => 
                 <span className="text-[10px] text-indigo-500 font-mono font-bold bg-indigo-50 px-1.5 py-0.5 rounded uppercase tracking-wider">{task}</span>
             </div>
             <div className="relative">
-                <input 
-                    type="text" 
-                    list={`list-${task}`}
-                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition text-gray-700"
-                    placeholder="모델명을 입력하세요"
+                <select 
+                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:bg-white outline-none transition text-gray-700 appearance-none cursor-pointer"
                     value={value || ""}
                     onChange={(e) => onChange(e.target.value)}
-                />
-                <datalist id={`list-${task}`}>
-                    {suggestions && suggestions.map(opt => <option key={opt} value={opt} />)}
-                </datalist>
+                >
+                    <option value="" disabled>모델을 선택하세요</option>
+                    {options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-500">
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
             </div>
             <p className="text-[11px] text-gray-400 leading-relaxed pl-1">{description}</p>
         </div>
@@ -229,22 +235,9 @@ window.SettingsModal = function({ isOpen, onClose }) {
     const [settings, setSettings] = useState(null);
     const [isSaving, setIsSaving] = useState(false);
 
-    const GEMINI_MODELS = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-pro",
-        "gemini-3-flash",
-        "gemini-3-pro",
-        "gemini-3-deep-think",
-        "gemma-3-27b-it",
-        "gemma-3-4b-it",
-        "gemma-3-12b-it"
-    ];
-
-    const WHISPER_MODELS = [
-        "mlx-community/whisper-large-v3-turbo-q4",
-        "mlx-community/whisper-large-v3-mlx-4bit"
-    ];
+    const [platform, setPlatform] = useState("linux");
+    const [whisperModels, setWhisperModels] = useState([]);
+    const [geminiModels, setGeminiModels] = useState([]);
 
     useEffect(() => {
         if (isOpen) fetchSettings();
@@ -262,7 +255,10 @@ window.SettingsModal = function({ isOpen, onClose }) {
     const fetchSettings = async () => {
         try {
             const res = await axios.get('/api/settings');
-            setSettings(res.data);
+            setSettings({ models: res.data.models || {} });
+            setPlatform(res.data.platform || "linux");
+            setWhisperModels(res.data.whisper_models || []);
+            setGeminiModels(res.data.gemini_models || []);
         } catch (err) {
             console.error("Failed to fetch settings", err);
         }
@@ -271,7 +267,7 @@ window.SettingsModal = function({ isOpen, onClose }) {
     const handleSave = async () => {
         setIsSaving(true);
         try {
-            await axios.post('/api/settings', settings);
+            await axios.post('/api/settings', { models: settings.models });
             alert("설정이 저장되었습니다. 즉시 적용됩니다.");
             onClose();
         } catch (err) {
@@ -320,10 +316,10 @@ window.SettingsModal = function({ isOpen, onClose }) {
                     <TaskRow 
                         label="🎙️ 음성 인식 (STT)" 
                         task="whisper" 
-                        description="영상의 오디오를 텍스트로 변환하는 Whisper 모델을 지정합니다. (MLX 최적화 모델 권장)"
+                        description={`영상의 오디오를 텍스트로 변환하는 Whisper 모델을 지정합니다. ${platform === 'darwin' ? '(MLX 최적화 모델 권장)' : '(Faster-Whisper 가속 모델 권장)'}`}
                         value={settings.models['whisper']}
                         onChange={(val) => updateModel('whisper', val)}
-                        suggestions={WHISPER_MODELS}
+                        suggestions={whisperModels}
                     />
                     <TaskRow 
                         label="📝 메인 요약 & 챕터 분석" 
@@ -331,7 +327,7 @@ window.SettingsModal = function({ isOpen, onClose }) {
                         description="전체 영상의 맥락을 파악하고 논리적인 챕터로 구분하는 핵심 작업에 사용됩니다."
                         value={settings.models['summarizer']}
                         onChange={(val) => updateModel('summarizer', val)}
-                        suggestions={GEMINI_MODELS}
+                        suggestions={geminiModels}
                     />
                     <TaskRow 
                         label="🏗️ 블로그 구조 기획" 
@@ -339,7 +335,7 @@ window.SettingsModal = function({ isOpen, onClose }) {
                         description="전체 텍스트를 빠르게 스캔하여 블로그 포스트의 뼈대를 설계합니다. (경량 모델 권장)"
                         value={settings.models['planner']}
                         onChange={(val) => updateModel('planner', val)}
-                        suggestions={GEMINI_MODELS}
+                        suggestions={geminiModels}
                     />
                     <TaskRow 
                         label="✨ 문장 윤문 & 상세 작성" 
@@ -347,7 +343,7 @@ window.SettingsModal = function({ isOpen, onClose }) {
                         description="선택된 구간의 텍스트를 자연스러운 한국어 블로그 포스트로 변환합니다."
                         value={settings.models['refiner']}
                         onChange={(val) => updateModel('refiner', val)}
-                        suggestions={GEMINI_MODELS}
+                        suggestions={geminiModels}
                     />
                     <TaskRow 
                         label="🎬 숏츠 구간 발굴" 
@@ -355,7 +351,7 @@ window.SettingsModal = function({ isOpen, onClose }) {
                         description="임팩트 있는 구간을 찾고 구조화된 기획안을 생성합니다."
                         value={settings.models['shorts']}
                         onChange={(val) => updateModel('shorts', val)}
-                        suggestions={GEMINI_MODELS}
+                        suggestions={geminiModels}
                     />
 
                     <div className="bg-gray-50 p-4 rounded-2xl border border-dashed border-gray-200">
