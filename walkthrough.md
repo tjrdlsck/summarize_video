@@ -1,3 +1,99 @@
+# 🎥 동영상 구간 자르기 중간 구간 오디오 유실 결함 디버깅 완료 보고서 (Walkthrough)
+
+## 1. 디버깅 관점의 문제 분석 (Debugging & Problem Analysis)
+
+### 1.1 발견된 결함 (Symptom)
+* 프론트엔드(Front-end)에서 구간 잘라내기(Export) 버튼을 통해 비디오 클립을 생성할 때, 영상의 시작점(0.0초 부근)을 포함하여 자를 때는 소리가 정상적으로 출력되지만, 영상의 중간 구간(예: 5초 이후 구간)을 잘라내면 오디오 스트림(Audio Stream) 정보는 파일 내에 존재함에도 불구하고 소리가 완전히 재생되지 않는 무음(Silent, 최대 볼륨 $-91.0\text{ dB}$) 상태가 되는 결함이 식별되었습니다.
+
+### 1.2 근본 원인 분석 (Root Cause)
+* **FFmpeg 옵션 배치 위치에 따른 타임스탬프 보존 현상**:
+  기존 `services/clipper.py`의 `cut_video` 메서드는 FFmpeg 명령어를 구성할 때 시간 탐색 옵션(`-ss`, `-to`)을 입력 파일 지정 옵션(`-i`) 뒤에 배치하였습니다.
+  ```bash
+  ffmpeg -nostdin -i <input_path> -ss <start_sec> -to <end_sec> ...
+  ```
+  이 구성은 FFmpeg에서 **출력 옵션(Output Option)**으로 작동합니다. 출력 옵션 방식은 디코더가 입력 파일 전체를 읽어가면서 구간에 도달했을 때 비로소 인코딩을 시작하도록 프레임을 선택하므로, 디코더를 빠져나온 오디오 프레임들의 타임스탬프(PTS, Presentation Timestamp)가 0으로 리셋되지 않고 **원본 영상의 타임스탬프(예: 5.0초 ~ 10.0초)를 그대로 유지**합니다.
+  
+* **오디오 페이드 필터의 입력 타임라인 일치 실패**:
+  동영상 컷팅 시 적용되는 오디오 필터는 시작/종료 시점의 오디오 노이즈 및 끊김을 방지하기 위해 다음과 같이 페이드 인/아웃 필터(`afade`)를 지정하고 있었습니다:
+  `afade=t=in:st=0:d=0.1,afade=t=out:st={duration - 0.2}:d=0.2`
+  
+  예를 들어, 5.0초~10.0초 구간을 자르고자 하는 경우 잘라낸 클립의 길이는 5초이므로 페이드 아웃 시작 시간은 `st=4.8`이 됩니다. 하지만 디코딩된 오디오 데이터의 PTS는 5.0초에서 시작합니다. 
+  `afade=t=out:st=4.8` 필터 입장에서 들어오는 모든 오디오 프레임들의 타임스탬프($\ge 5.0\text{초}$)가 페이드 아웃 임계값인 $4.8\text{초} + 0.2\text{초} = 5.0\text{초}$ 이상에 속하므로, 필터가 **모든 프레임 데이터를 완전히 감쇄(Mute, 볼륨 0)하여 출력**해 버렸던 것입니다. 0초 부근을 자를 때는 타임스탬프가 0부터 시작했기에 0~4.8초 구간의 소리가 정상 노출되었으나, 중간 구간은 항상 임계값을 넘어 소리가 유실되는 부작용이 발생했습니다.
+
+---
+
+## 2. 해결 메커니즘 (Resolution Mechanics)
+
+이 문제를 최소한의 코드 수정으로 견고하게 극복하기 위해 FFmpeg 옵션 처리 프로세스를 리팩토링하였습니다.
+
+### 2.1 주요 해결 방법
+1. **FFmpeg 옵션 배치 순서 변경 (입력 옵션으로 전환)**:
+   - `-ss` 옵션을 입력 파일 지정 옵션(`-i`) 앞으로 이동시켰습니다.
+   - `-to` 옵션 대신 잘라낼 절대적 크기(길이)를 나타내는 `-t` 옵션을 신규 도입하여 `-i` 앞으로 함께 배치하였습니다.
+   ```bash
+   ffmpeg -nostdin -ss <start_sec> -t <duration> -i <input_path> ...
+   ```
+2. **타임스탬프 리셋 효과**:
+   - `-ss`와 `-t`가 입력 파일옵션 앞에 위치하게 됨에 따라 FFmpeg는 인코딩 전 단계에서 해당 위치로 키프레임 시크를 수행하고, 지정한 길이만큼만 프레임을 디코딩합니다.
+   - 이 과정을 통해 디코더에서 나오는 비디오/오디오 프레임의 타임스탬프(PTS)가 항상 **0부터 다시 시작**하도록 보정됩니다.
+   - 결과적으로 오디오 필터 체인으로 들어오는 입력 타임라인이 오프셋 0으로 동기화되어 `afade` 필터가 정상 범위(0초 ~ duration초) 내에서 페이드 효과를 정확히 수행하게 되었으며, 오디오 유실 결함이 완전히 복구되었습니다.
+
+### 2.2 코드 변경 요약
+
+#### [services/clipper.py](file:///home/radi/cli/summarize_video/services/clipper.py)
+* `cut_video` 내의 FFmpeg 명령어 매개변수 생성 로직을 변경하였습니다.
+```python
+        # [FFmpeg Command Configuration]
+        cmd = [
+            "ffmpeg", 
+            "-nostdin",
+            "-ss", str(start_sec),
+            "-t", str(duration),
+            "-i", input_path,
+            "-filter_complex", f"[0:a]{audio_filter}[af]", # 오디오 필터 적용
+            "-map", "0:v", "-map", "[af]",                 # 비디오는 그대로, 오디오는 필터 거친 것 사용
+            "-c:v", encoder,                               # 자동 선택된 인코더
+        ]
+```
+
+---
+
+## 3. 검증 결과 (Verification Results)
+
+### 3.1 회귀 테스트 통과 (`tests/test_clipper.py`)
+* 모킹(Mocking)된 인코더 선택 로직 테스트 3개 모두 정상 통과를 완료하였습니다.
+```bash
+$ ./venv/bin/pytest tests/test_clipper.py
+============================== 3 passed in 0.03s ===============================
+```
+
+### 3.2 신규 통합 테스트 수행 및 실제 소리 검증 (`tests/test_clipper_audio_leak.py`)
+* 실제 비디오 파일을 타깃으로 삼아 처음 잘라내기(0.0초~5.0초)와 중간 구간 잘라내기(5.0초~10.0초) 시나리오를 연달아 진행하고, 생성된 클립의 소리 존재 및 최대 볼륨 상태를 FFmpeg `volumedetect` 필터로 추출 및 검증하였습니다.
+```bash
+$ ./venv/bin/pytest tests/test_clipper_audio_leak.py -s
+tests/test_clipper_audio_leak.py 테스트 타깃 비디오: static/videos/자폭드론·방공포까지…튀르키예,_대규모_합동훈련서_화력_과시__연합뉴스_(Yonhapnews).mp4
+--- [Clipper] Starting Async Cut (High Quality + Fade): clip_test_start.mp4 ---
+--- [Clipper] Cut Success: static/temp_test/clip_test_start.mp4 ---
+--- [Clipper] Starting Async Cut (High Quality + Fade): clip_test_middle.mp4 ---
+--- [Clipper] Cut Success: static/temp_test/clip_test_middle.mp4 ---
+[검증 결과] 처음 구간 클립 오디오 스트림 존재: True, 최대 볼륨: -6.8 dB
+[검증 결과] 중간 구간 클립 오디오 스트림 존재: True, 최대 볼륨: -2.9 dB
+.
+============================== 1 passed in 1.72s ===============================
+```
+* **결과 분석**: 두 결과 클립 모두 오디오 스트림이 유효하며 최대 볼륨이 무음 임계점($-60.0\text{ dB}$)보다 큰 $-6.8\text{ dB}$ 및 $-2.9\text{ dB}$로 안정적으로 인코딩 및 소리 출력이 보존됨을 성공적으로 확인하였습니다.
+
+---
+
+## 4. 교훈 및 예방 조치 (Lessons Learned)
+
+* **FFmpeg 타임스탬프와 필터 상호작용의 관계**:
+  시간적 오프셋을 매개변수로 취하는 멀티미디어 필터(예: `afade`, `overlay`, `drawtext` 등)를 설계할 때는 입력 스트림의 타임스탬프(PTS) 기준점을 명확히 알아야 합니다. 가급적 입력 옵션 방식(`-ss` / `-t`를 `-i` 앞단에 배치)을 활용하여 타임라인을 0으로 강제 리셋시키는 것이 안전합니다.
+* **실제 멀티미디어 수치 검증 자동화**:
+  단순히 파일의 존재나 스트림 헤더(Header)의 존재만 체크하는 테스트는 무음 현상과 같은 데이터 논리 오류를 잡지 못합니다. FFmpeg의 `volumedetect` 필터 등 볼륨 분석 툴을 통합 테스트에 도입해 데시벨 수치를 파싱 검증하는 기법은 향후 유사 오디오 유실 회귀를 완벽히 막아내는 견고한 장치입니다.
+
+---
+
 # 🎥 리눅스 비디오 인코더 호환성 문제 해결 및 클립 내보내기 기능 검증 완료 보고서 (Walkthrough)
 
 프론트엔드에서 영상의 구간 잘라내기(Export) 및 AI 숏츠(Shorts) 생성 요청 시 백그라운드 태스크가 실패하거나 멈추던 문제를 분석하고 해결한 상세 내용을 디버깅 관점에서 보고합니다.
