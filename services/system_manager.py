@@ -24,8 +24,7 @@ class ConfigManager:
     # macOS (darwin) 추천 모델 목록
     DARWIN_WHISPER_MODELS = [
         "mlx-community/whisper-large-v3-turbo-q4",
-        "mlx-community/whisper-large-v3-mlx-4bit",
-        "mlx-community/whisper-large-v3-q4"
+        "mlx-community/whisper-large-v3-mlx-4bit"
     ]
     # Windows/Linux (Faster-Whisper) 추천 모델 목록
     OTHER_WHISPER_MODELS = [
