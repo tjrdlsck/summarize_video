@@ -141,6 +141,41 @@ class VideoDownloader:
             print(f"[Error] Upload failed: {e}")
             return {"status": "error", "message": str(e)}
 
+    async def get_uploaded_size(self, identifier: str) -> int:
+        """현재 업로드된 임시 파일의 크기를 반환합니다. (이어올리기 용도)"""
+        temp_path = os.path.join(self.download_dir, f"{identifier}.part")
+        if os.path.exists(temp_path):
+            return os.path.getsize(temp_path)
+        return 0
+
+    async def append_chunk(self, identifier: str, chunk_data: bytes):
+        """청크 데이터를 임시 파일에 비동기로 추가(Append)합니다."""
+        temp_path = os.path.join(self.download_dir, f"{identifier}.part")
+        async with await anyio.open_file(temp_path, "ab") as f:
+            await f.write(chunk_data)
+        return True
+
+    async def finalize_upload(self, identifier: str, original_filename: str):
+        """모든 청크 전송 완료 후 임시 파일을 최종 파일로 변환합니다."""
+        temp_path = os.path.join(self.download_dir, f"{identifier}.part")
+        if not os.path.exists(temp_path):
+            return {"status": "error", "message": "임시 파일을 찾을 수 없습니다."}
+
+        safe_name = self._sanitize_filename(original_filename)
+        # 보안 및 중복 방지용 (identifier 자체를 접두어로 사용)
+        final_filename = f"{identifier}_{safe_name}"
+        final_path = os.path.join(self.download_dir, final_filename)
+
+        os.rename(temp_path, final_path)
+        print(f"--- [Upload Complete] File finalized at: {final_path} ---")
+
+        return {
+            "status": "success",
+            "file_path": final_path,
+            "filename": final_filename,
+            "original_filename": original_filename
+        }
+
     def download_from_url(self, url, progress_callback=None, task_manager=None, task_id=None):
         """
         YouTube URL을 통해 영상을 다운로드합니다.

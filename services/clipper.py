@@ -106,6 +106,7 @@ class VideoClipper:
         # [FFmpeg Command Configuration]
         cmd = [
             "ffmpeg", 
+            "-nostdin",
             "-i", input_path,
             "-ss", str(start_sec),
             "-to", str(end_sec),
@@ -135,6 +136,7 @@ class VideoClipper:
             # 1. 비동기 서브프로세스 생성 (stderr Pipe 연결)
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -432,6 +434,7 @@ class VideoClipper:
         # [FFmpeg Command Configuration]
         cmd = [
             "ffmpeg", 
+            "-nostdin",
             "-i", input_path,
             "-filter_complex", filter_complex_str,
             "-map", "[outv]", 
@@ -458,6 +461,7 @@ class VideoClipper:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE
             )

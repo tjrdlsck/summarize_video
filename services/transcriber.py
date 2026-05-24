@@ -65,6 +65,50 @@ class WhisperProgressHook:
     def flush(self):
         self.terminal.flush()
 
+def run_vad_worker(audio_path, result_queue):
+    """
+    [Worker Process] 별도 프로세스에서 실행되는 VAD 추론 함수입니다.
+    완료 후 프로세스가 종료되며 VRAM 점유를 완전히 해제합니다.
+    """
+    import torch
+    import soundfile as sf
+    import gc
+    try:
+        model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
+                                      model='silero_vad',
+                                      force_reload=False,
+                                      trust_repo=True)
+        (get_speech_timestamps, _, _, _, _) = utils
+        
+        # [하드웨어 가속 최적화 - 롤백]
+        # Silero VAD는 순차적 오디오 청크를 처리하는 초경량 모델이므로
+        # GPU 통신 오버헤드(PCIe)로 인해 오히려 속도가 느려질 수 있어 CPU로 고정합니다.
+        device = torch.device('cpu')
+        model = model.to(device)
+        
+        audio_data, sr = sf.read(audio_path)
+        wav = torch.from_numpy(audio_data).float()
+        
+        if wav.ndim > 1: 
+            wav = wav.mean(dim=1) 
+        wav = wav.unsqueeze(0).to(device)
+        
+        speech_timestamps = get_speech_timestamps(wav, model, threshold=0.5)
+        
+        segments = []
+        for item in speech_timestamps:
+            segments.append((item['start'] / 16000, item['end'] / 16000))
+            
+        result_queue.put({"status": "success", "data": segments})
+    except Exception as e:
+        result_queue.put({"status": "error", "message": str(e)})
+    finally:
+        if 'model' in locals():
+            del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
 def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initial_prompt, parent_sys_path=None):
     """
     [Worker Process] 별도 프로세스에서 실행되는 Whisper 추론 함수입니다.
@@ -105,7 +149,8 @@ def run_whisper_worker(wav_path, model_path, result_queue, total_duration, initi
             print("[Whisper Worker] Using Faster-Whisper Engine (CUDA/CPU)")
             
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            compute_type = "int8_float16" if device == "cuda" else "int8"
+            # [최적화] CUDA 환경에서는 float16을 강제하여 VRAM 효율성 및 연산 속도를 극대화
+            compute_type = "float16" if device == "cuda" else "int8"
             
             print(f"[Whisper Worker] Device: {device}, Compute Type: {compute_type}")
             
@@ -273,38 +318,37 @@ class VideoTranscriber:
 
 
     def _get_vad_timestamps(self, audio_path):
-        """Silero VAD를 사용하여 실제 음성이 있는 구간(초 단위)을 추출"""
-        try:
-            model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                                          model='silero_vad',
-                                          force_reload=False,
-                                          trust_repo=True)
-            (get_speech_timestamps, _, _, _, _) = utils
+        """Silero VAD를 사용하여 실제 음성이 있는 구간(초 단위)을 추출 (별도 프로세스로 분리)"""
+        ctx = multiprocessing.get_context('spawn')
+        queue = ctx.Queue()
+        
+        worker_process = ctx.Process(
+            target=run_vad_worker,
+            args=(audio_path, queue),
+        )
+        worker_process.start()
+        
+        output = None
+        while worker_process.is_alive():
+            if not queue.empty():
+                msg = queue.get()
+                if msg["status"] == "success":
+                    output = msg["data"]
+                    break
+                elif msg["status"] == "error":
+                    print(f"[Warning] VAD execution failed: {msg['message']}")
+                    break
+            time.sleep(0.1)
             
-            audio_data, sr = sf.read(audio_path)
-            wav = torch.from_numpy(audio_data).float()
+        worker_process.join()
+        
+        # 잔여 메시지 확인
+        if not output and not queue.empty():
+            msg = queue.get()
+            if msg["status"] == "success":
+                output = msg["data"]
             
-            # 차원 및 샘플링 레이트 보정
-            if wav.ndim > 1: 
-                wav = wav.mean(dim=1) # Stereo -> Mono (samples, channels) 이므로 dim=1 기준 평균
-            wav = wav.unsqueeze(0) # (1, samples) 형태로 변환하여 Silero VAD에 전달
-            
-            speech_timestamps = get_speech_timestamps(wav, model, threshold=0.5)
-            
-            # Sample -> Seconds 변환
-            segments = []
-            for item in speech_timestamps:
-                segments.append((item['start'] / 16000, item['end'] / 16000))
-            
-            return segments
-        except Exception as e:
-            print(f"[Warning] VAD execution failed: {e}")
-            return None # 에러 발생 시 None 반환하여 필터 무력화 방지
-        finally:
-            # [Add] VAD 모델 메모리 해제 시도
-            if 'model' in locals():
-                del model
-            gc.collect()
+        return output
 
     def _filter_hallucinations(self, whisper_segments, vad_segments):
         """Whisper 세그먼트가 VAD 구간과 겹치지 않으면(환각이면) 제거"""
