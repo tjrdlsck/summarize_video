@@ -107,9 +107,9 @@ class VideoClipper:
         cmd = [
             "ffmpeg", 
             "-nostdin",
-            "-i", input_path,
             "-ss", str(start_sec),
-            "-to", str(end_sec),
+            "-t", str(duration),
+            "-i", input_path,
             "-filter_complex", f"[0:a]{audio_filter}[af]", # 오디오 필터 적용
             "-map", "0:v", "-map", "[af]",                 # 비디오는 그대로, 오디오는 필터 거친 것 사용
             "-c:v", encoder,                               # 자동 선택된 인코더
