@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import subprocess
 import zipfile
 import asyncio
@@ -15,6 +16,31 @@ class VideoClipper:
     def __init__(self, temp_dir="static/temp"):
         self.temp_dir = temp_dir
         os.makedirs(self.temp_dir, exist_ok=True)
+
+    def _is_nvenc_available(self):
+        """
+        NVIDIA NVENC 가속 인코더가 현재 시스템에서 사용 가능한지 확인합니다.
+        """
+        try:
+            # 1. nvidia-smi 명령어를 실행하여 NVIDIA GPU 및 드라이버가 작동 중인지 확인
+            result = subprocess.run(
+                ["nvidia-smi"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            if result.returncode != 0:
+                return False
+            
+            # 2. ffmpeg에서 h264_nvenc 인코더를 지원하는지 확인
+            result = subprocess.run(
+                ["ffmpeg", "-encoders"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            return "h264_nvenc" in result.stdout
+        except Exception:
+            return False
 
     def _seconds_to_time_str(self, seconds, separator=","):
         """
@@ -64,14 +90,18 @@ class VideoClipper:
 
         # [FFmpeg Encoder & Quality Configuration]
         # OS 및 그래픽 카드 가속 여부에 따른 인코더 설정
-        if os.name == 'nt':
-            # Windows: NVIDIA NVENC 가속 사용
+        if self._is_nvenc_available():
+            # NVIDIA NVENC 가속 사용 (Windows / Linux 공용)
             encoder = "h264_nvenc"
             quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
-        else:
+        elif sys.platform == 'darwin':
             # macOS: Apple Silicon 가속 사용
             encoder = "h264_videotoolbox"
             quality_opts = ["-q:v", "65"]
+        else:
+            # Linux 및 기타 OS: CPU 기반 범용 libx264 사용
+            encoder = "libx264"
+            quality_opts = ["-crf", "23", "-preset", "medium"]
 
         # [FFmpeg Command Configuration]
         cmd = [
@@ -389,12 +419,15 @@ class VideoClipper:
         filter_complex_str = ";".join(filter_parts)
 
         # [FFmpeg Encoder & Quality Configuration]
-        if os.name == 'nt':
+        if self._is_nvenc_available():
             encoder = "h264_nvenc"
             quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
-        else:
+        elif sys.platform == 'darwin':
             encoder = "h264_videotoolbox"
             quality_opts = ["-q:v", "65"]
+        else:
+            encoder = "libx264"
+            quality_opts = ["-crf", "23", "-preset", "medium"]
 
         # [FFmpeg Command Configuration]
         cmd = [
