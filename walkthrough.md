@@ -115,6 +115,77 @@ $ ./venv/bin/pytest
 * **외부 의존성 결합 시 방어 코드 체계화**: 외부 API(Google GenAI) 연동 로직에는 네트워크 실패나 인증 오류 등을 항시 상정하여 폴백(Fallback)이나 기본값, 메모리 캐시를 결합하여 UI 장애를 차단하는 프랙티스를 정립하였습니다.
 
 ---
+
+# 🔀 Git Flow 이력 꼬임 오류 복구 및 develop -> main 배포 병합 완료 보고서
+
+## 1. 디버깅 관점의 문제 분석 (Debugging & Problem Analysis)
+
+### 1.1 최초 발견된 문제 (Symptom)
+* 로컬의 배포 브랜치(Branch)인 `main` 브랜치가 원격 저장소(Remote Repository)의 `origin/main` 브랜치보다 20개의 커밋(Commit)만큼 앞선(`ahead`) 상태로 표시되며 이력이 오염되어 있었습니다.
+* 이로 인해 사용자가 `develop` 브랜치의 변경 사항(특히 `feat/#85` 관련 수정본)을 `main` 브랜치에 풀 리퀘스트(Pull Request, PR)를 통하여 안전하게 병합하려 했으나, 로컬 `main` 상태 불일치 및 꼬임 현상으로 정상적인 PR 배포 파이프라인 흐름을 진행하기 어려운 상황이었습니다.
+
+### 1.2 근본 원인 분석 (Root Cause)
+* **로컬에서의 임의 직접 병합(Direct Merge)**: 로컬 `main` 브랜치에서 `develop` 브랜치(머지 커밋 `b2de946`)를 직접 머지(Merge)하는 작업이 사전에 오동작했거나 오입력되었습니다.
+* 원래 Git Flow 표준 규격에 따르면, 모든 통합 브랜치(`develop`) 변경 사항은 GitHub과 같은 원격 호스팅 서비스에서 풀 리퀘스트를 생성 및 승인(Approve)받고 병합한 후, 로컬에서는 단순 `pull`을 받아 동기화해야 합니다. 로컬에서 직접 `main` 브랜치를 강제로 업데이트한 후 `push`를 시도하려고 하면 PR 없이 병합이 진행되는 문제와 원격 브랜치와의 싱크 오류가 수반됩니다.
+
+---
+
+## 2. 해결 메커니즘 (Resolution Mechanics)
+
+로컬 `main` 브랜치를 안전하게 원래의 표준 릴리즈 시점으로 되돌린 뒤, GitHub CLI 도구인 `gh`를 활용하여 원격 릴리즈 PR을 생성 및 병합하고 최종 동기화하는 로드맵을 적용하여 복구했습니다.
+
+### 2.1 주요 해결 방법
+1. **로컬 `main` 이력 강제 초기화**:
+   - `main` 브랜치로 전환한 후, 원격의 정상적인 최종 릴리즈 커밋(`0f6df95`)을 가리키는 `origin/main` 상태로 완전히 강제 재설정(Hard Reset)을 수행하였습니다.
+   ```bash
+   git checkout main
+   git reset --hard origin/main
+   ```
+   - 이를 통해 로컬의 꼬인 20개 커밋을 취소하고 원격 `main` 브랜치와 동일한 상태(`Your branch is up to date with 'origin/main'`)로 복구하였습니다.
+
+2. **GitHub CLI (`gh`) 기반 `develop` -> `main` 풀 리퀘스트 생성**:
+   - `develop` 브랜치(최신 `feat/#85`이 포함된 통합 브랜치)의 코드를 최종 배포하기 위해 릴리즈 PR #91을 생성하였습니다.
+   ```bash
+   gh pr create --base main --head develop --title "[Release] develop 브랜치 변경사항 main 병합" --body "feat/#85을 포함한 develop 브랜치 변경사항을 main 브랜치에 병합합니다."
+   ```
+
+3. **풀 리퀘스트 병합 및 브랜치 유지**:
+   - 생성된 PR #91을 병합하는 과정에서 `develop` 브랜치가 삭제되지 않도록 `--delete-branch=false` 및 일반 머지 방식(`--merge`)을 강제하여 병합을 자동 수행하였습니다.
+   ```bash
+   gh pr merge 91 --merge --delete-branch=false
+   ```
+
+4. **로컬 및 원격 브랜치 동기화**:
+   - 병합 완료 후 로컬 `main` 브랜치에서 `pull`을 받아 원격 `origin/main`의 최신 배포 내역(PR 병합 커밋 `51c8e05`)을 성공적으로 가리키도록 설정했습니다.
+   - 로컬 `develop` 브랜치 역시 로컬 작업 추적 문서(`task.md`, `implementation_plan.md`)를 커밋하고 원격과 정상 동기화하였습니다.
+
+---
+
+## 3. 검증 결과 (Verification Results)
+
+### 3.1 로컬 및 원격 Git Log 검증
+`git log --oneline -n 15 --graph --all` 조회를 통해 최종 그래프가 다음과 같이 깔끔하게 정렬되었음을 확인하였습니다.
+```text
+* 435c0bb (HEAD -> develop, origin/develop) [Docs]: 태스크 완료 상태 반영
+* 24897fa [Docs]: develop -> main 병합용 기획서 및 작업 목록 반영
+| *   51c8e05 (origin/main, origin/HEAD, main) Merge pull request #91 from tjrdlsck/develop
+| |\
+| |/
+|/|
+* |   b2de946 Merge branch 'feat/#85' into develop
+```
+- `main` 브랜치는 PR #91 병합 결과물(`51c8e05`)을 정확히 가리키고 있습니다.
+- `develop` 브랜치는 `feat/#85` 통합 커밋(`b2de946`)에 아티팩트(문서) 반영 커밋 2개가 추가로 얹어진 안전한 상태로 원격과 일치합니다.
+- `feat/#85`에서 수행된 Whisper API 모델 보정 및 macOS/Linux 분기 처리를 포함한 19개의 커밋이 누락 없이 모두 `main`에 통합 완료되었습니다.
+
+---
+
+## 4. 교훈 및 예방 조치 (Lessons Learned)
+
+* **배포 및 통합 브랜치 보호**: `main`과 `develop` 브랜치는 로컬에서 직접 수동 머지하지 않고, 반드시 원격 PR을 통과한 후 로컬에서 가져오는(Pull) 습관을 들이는 것이 이력 꼬임을 원천 차단하는 지름길입니다.
+* **로컬 꼬임 발생 시 `git reset --hard` 활용**: 로컬의 커밋 상태가 원격 브랜치와 방향을 잃고 꼬였을 경우, 당황하여 추가 커밋을 생성하기보다, 정상 상태인 원격 브랜치를 기준으로 `reset --hard`를 사용해 로컬 상태를 복원하고 원격 파이프라인(GitHub PR)을 타는 것이 가장 안전하고 빠른 복구 메커니즘(Mechanism)입니다.
+
+---
 ### 📚 참고 자료 (References)
 * [Google GenAI SDK Models List Documentation](https://github.com/google/generative-ai-python)
 * [FastAPI Response Models & Pydantic Schemas](https://fastapi.tiangolo.com/tutorial/response-model/)
@@ -122,3 +193,4 @@ $ ./venv/bin/pytest
 * [FFmpeg NVIDIA NVENC Encoding Guide](https://trac.ffmpeg.org/wiki/HWAccelIntro#NVENC)
 * [FFmpeg H.264 Video Encoding Guide](https://trac.ffmpeg.org/wiki/Encode/H.264)
 * [Python sys Module Documentation](https://docs.python.org/3/library/sys.html)
+* [GitHub CLI gh pr command reference](https://cli.github.com/manual/gh_pr)
