@@ -9,6 +9,7 @@ import subprocess
 from urllib.request import urlopen
 import anyio # [Add] 비동기 파일 I/O를 위해 추가
 from yt_dlp.utils import DownloadError
+from services.logger import get_logger, log_error_with_traceback, log_task_error
 
 class VideoDownloader:
     """
@@ -138,6 +139,11 @@ class VideoDownloader:
             }
 
         except Exception as e:
+            logger = get_logger("downloader")
+            if task_id:
+                log_task_error(task_id, "save_uploaded_file", e)
+            else:
+                log_error_with_traceback(logger, "Upload failed", e)
             print(f"[Error] Upload failed: {e}")
             return {"status": "error", "message": str(e)}
 
@@ -283,6 +289,12 @@ class VideoDownloader:
                 }
 
         except Exception as e:
+            logger = get_logger("downloader")
+            if task_id:
+                log_task_error(task_id, "download_from_url", e)
+            else:
+                log_error_with_traceback(logger, f"Download failed for URL: {url}", e)
+
             if "cancelled by user" in str(e):
                 print(f"[Downloader] Task {task_id} cancelled. Cleaning up partial files...")
                 if 'final_path' in locals() and final_path:

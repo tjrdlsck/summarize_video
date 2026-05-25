@@ -287,7 +287,8 @@ class PipelineRunner:
         output_path = os.path.join(RESULTS_DIR, f"{base_name}_blog_view.json")
 
         try:
-            task_manager.update_progress(task_id, 0, "블로그 구조 설계 중 (Gemini 2.5 Flash-Lite)...")
+            planner_model = ConfigManager.get_model("planner")
+            task_manager.update_progress(task_id, 0, f"블로그 구조 설계 중 ({planner_model})...")
 
             if not os.path.exists(transcript_path):
                 raise FileNotFoundError("자막 데이터가 없습니다.")

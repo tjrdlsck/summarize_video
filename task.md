@@ -1,19 +1,9 @@
-# 대시보드 UI/UX 개편 및 폴더 기능 구현 작업 목록
-
-## 백엔드 (Backend)
-- [x] `app/schemas/requests.py`: 폴더 및 재생성 API용 Pydantic 스키마 추가
-- [x] `services/downloader.py`: 파일 업로드명 중복 방지 로직 `(1), (2)` 형태로 개선
-- [x] `app/api/routers/folder.py`: 폴더 관리 및 이동 API 구현 (신규 라우터)
-- [x] `app/api/routers/__init__.py`: `folder_router` 라우터 등록
-- [x] `app/api/routers/history.py`: 히스토리에 폴더 정보 연동되게 수정
-
-## 프론트엔드 (Frontend)
-- [x] `static/js/components.js`: `RegenerateModal` 컴포넌트 구현
-- [x] `static/js/app.js`: 작업 카드 디자인 배지 형태로 변경 및 하단 불필요 버튼 제거
-- [x] `static/js/app.js`: 폴더 목록 UI 및 상태 관리 구현
-- [x] `static/js/app.js`: 카드 체크박스 및 플로팅 바 (다중 이동) 로직 구현
-- [x] `static/js/app.js`: HTML5 Drag & Drop 이벤트 구현으로 폴더 이동 지원
-- [x] `static/js/app.js`: 상세 화면(Player View) 상단에 AI 콘텐츠 재생성 버튼 연동
-
-## 테스트 및 마무리
-- [x] 로컬 환경 통합 구현 완료 (테스트 대기 중)
+- [x] `services/logger.py` 업데이트: 정규식을 활용한 API 키/민감 정보 마스킹 함수(`mask_sensitive_info`) 구현 및 `log_error_with_traceback`, `log_task_error`에 적용
+- [x] `services/transcriber.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
+- [x] `services/summarizer.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
+- [x] `services/downloader.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
+- [x] `app/api/routers/system.py` API 엔드포인트 구현: `/api/system/logs`, `/api/system/logs/{filename}` 라우트 추가
+- [x] `templates/index.html` 수정: "오류 로그 보기" 버튼 및 로그 뷰어 모달(Modal) UI 추가
+- [x] `static/js/app.js` 및 `static/js/components.js` 수정: 로그 API 호출 및 모달 연동 프론트엔드 로직 구현
+- [x] 구현 검증: 로컬 테스트 및 동작 확인 (에러 유발 후 마스킹 및 모달 확인)
+- [x] `walkthrough.md` 작성: 구현 결과 요약 및 리뷰 제공
