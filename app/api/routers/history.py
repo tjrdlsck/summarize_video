@@ -24,6 +24,7 @@ async def delete_history(filename: str):
             f"{base_name}_summary.json",
             f"{base_name}_transcript.json",
             f"{base_name}_blog_view.json",
+            f"{base_name}_blog.json",
             f"{base_name}_clips.json",
             f"{base_name}.srt",
             f"{base_name}.vtt",

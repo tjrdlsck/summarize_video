@@ -1,57 +1,52 @@
-# 시스템 업데이트 다운그레이드 기능 추가
+# 백엔드 예외 처리 강화 및 프론트엔드 에러 로그 뷰어 구현
 
-현재 시스템은 최신 버전이 있을 때만 감지하여 업데이트를 수행합니다. 사용자가 원하는 이전 버전(Commit)으로 다운그레이드(롤백)할 수 있도록 시스템 전반(UI, API, 구동 스크립트)을 수정합니다.
+현재 백엔드 서비스의 예외 상황(Exception)에 대한 방어 코드가 부족하여 장애 발생 시 디버깅이 어렵습니다. 
+모든 주요 모듈에 방어 코드를 추가하고, 상세 에러 로그(Traceback 포함)를 파일 및 콘솔에 기록합니다.
+또한 프론트엔드에서 이러한 서버 로그를 손쉽게 수집하고 모아볼 수 있는 로그 뷰어 기능을 구현합니다.
 
 ## User Review Required
 
-> [!WARNING]
-> 이 기능은 `git reset --hard` 또는 `git checkout`을 사용하여 소스 코드를 강제로 과거 시점으로 되돌립니다.
-> 과거 시점으로 이동하면 로컬에서 수정한 커밋되지 않은 코드가 유실될 수 있습니다. 
-> 또한 과거 버전에서는 데이터베이스나 기타 설정 파일의 포맷이 달라 오류가 발생할 가능성도 있습니다.
+> [!IMPORTANT]
+> - **API 키 마스킹 기능이 추가되었습니다.** `services/logger.py`에서 로그를 기록하기 전에 정규표현식(Regex)을 사용하여 OpenAI API 키(`sk-...`)나 Bearer 토큰 등 민감한 정보를 `***MASKED_API_KEY***`로 치환하는 로직을 적용할 예정입니다.
 > 
-> 버전 목록을 보여줄 때 몇 개까지 보여주는 것이 좋을까요? 기본적으로 **최근 20개의 커밋**을 보여주도록 구현할 예정입니다.
+> - 로그 파일은 하루 단위로 갱신되며(`app_YYYY-MM-DD.log`), 에러가 발생한 태스크의 경우 `task_{id}.log` 형태로 저장됩니다. 프론트엔드 뷰어에서는 이 두 가지 형태의 로그 목록을 모두 불러와 선택해서 볼 수 있도록 설계했습니다. 이 구조가 적합한지 최종 확인 부탁드립니다.
 
 ## Proposed Changes
 
+### Backend - Defensive Logging & API
+
+#### [MODIFY] [services/logger.py](file:///home/radi/cli/summarize_video/services/logger.py)
+- **민감 정보 마스킹 (Data Masking):** 정규식을 기반으로 로깅 문자열을 사전 검사하여, API 키나 민감한 인증 토큰을 마스킹(`***MASKED***`)하는 유틸리티 함수(`mask_sensitive_info`)를 추가합니다.
+- 예외 로깅 함수(`log_error_with_traceback`, `log_task_error`) 내부에 이 마스킹 로직을 연동하여, 로그 파일에 민감 정보가 기록되는 것을 원천 차단합니다.
+
+#### [MODIFY] [services/transcriber.py](file:///home/radi/cli/summarize_video/services/transcriber.py)
+#### [MODIFY] [services/summarizer.py](file:///home/radi/cli/summarize_video/services/summarizer.py)
+#### [MODIFY] [services/downloader.py](file:///home/radi/cli/summarize_video/services/downloader.py)
+- 각 서비스 모듈의 주요 처리 함수 내에 `try-except Exception as e` 블록을 추가합니다.
+- 예외 발생 시 `services.logger`를 활용하여 오류 원인과 Traceback을 상세히 남기고, 적절한 HTTP 예외를 발생시키거나 안전하게 실패 처리하도록 수정합니다.
+
+#### [MODIFY] [app/api/routers/system.py](file:///home/radi/cli/summarize_video/app/api/routers/system.py)
+- 프론트엔드에서 로그를 조회할 수 있도록 2개의 API 엔드포인트를 추가합니다.
+  - `GET /api/system/logs`: `static/logs/` 디렉토리에 있는 로그 파일 목록 반환.
+  - `GET /api/system/logs/{filename}`: 특정 로그 파일의 내용 반환.
+
+### Frontend - Error Log Viewer
+
+#### [MODIFY] [templates/index.html](file:///home/radi/cli/summarize_video/templates/index.html)
+- 화면 우측 상단(또는 설정 메뉴 근처)에 **[오류 로그 보기]** 버튼을 추가합니다.
+- 로그 목록과 내용을 표시할 수 있는 **로그 뷰어 모달(Modal)** 구조를 추가합니다.
+
+#### [MODIFY] [static/js/app.js](file:///home/radi/cli/summarize_video/static/js/app.js)
+#### [MODIFY] [static/js/components.js](file:///home/radi/cli/summarize_video/static/js/components.js)
+- **로그 보기 버튼 이벤트**: 클릭 시 `/api/system/logs` API를 호출하여 로그 파일 목록을 가져오고 모달을 띄웁니다.
+- **파일 선택 이벤트**: 목록에서 특정 파일을 클릭하면 `/api/system/logs/{filename}` API를 호출하여 로그 상세 내용을 우측 또는 아래 영역에 출력합니다.
+
 ---
-
-### Backend API & System Manager
-
-#### [MODIFY] [system_manager.py](file:///home/radi/cli/summarize_video/services/system_manager.py)
-- `get_versions(limit=20)` 메서드 추가: `git log` 명령어를 사용하여 최근 커밋 목록(해시, 날짜, 커밋 메시지)을 조회하여 반환.
-- `perform_update(target_version: str = "latest")` 수정: 타겟 버전 정보를 `.target_version` 파일에 저장하여 `run.py` 프로세스가 읽을 수 있도록 전달.
-
-#### [MODIFY] [requests.py](file:///home/radi/cli/summarize_video/app/schemas/requests.py)
-- `SystemUpdateRequest` 스키마 추가: `target_version` 문자열을 포함하도록 정의.
-
-#### [MODIFY] [system.py](file:///home/radi/cli/summarize_video/app/api/routers/system.py)
-- `GET /api/system/versions` 엔드포인트 추가.
-- `POST /api/system/update` 엔드포인트에서 `SystemUpdateRequest` 객체를 받아 `SystemManager.perform_update`를 호출할 때 타겟 버전을 넘기도록 수정.
-
----
-
-### Guardian Process
-
-#### [MODIFY] [run.py](file:///home/radi/cli/summarize_video/run.py)
-- `UPDATE_SIGNAL (5)` 수신 시 로직 변경:
-  - `.target_version` 파일이 존재하면 읽고 삭제.
-  - 타겟 버전이 "latest" 이면 기존과 동일하게 `git checkout -B main origin/main` 실행.
-  - 특정 커밋 해시가 타겟이면 `git reset --hard <target_version>`을 사용하여 해당 버전으로 롤백.
-
----
-
-### Frontend UI
-
-#### [MODIFY] [app.js](file:///home/radi/cli/summarize_video/static/js/app.js)
-- 상단 배너 혹은 설정 영역에 **"버전 관리(Version History)"** 모달 버튼 추가.
-- 모달 내부에서 `GET /api/system/versions` API를 호출하여 최근 업데이트 내역을 목록(리스트) 형태로 표시.
-- 각 버전 아이템 옆에 **[이 버전으로 롤백]** 버튼을 배치.
-- 롤백 진행 시 `POST /api/system/update`에 선택된 해시값을 전송하고 시스템을 재시작.
-
 ## Verification Plan
 
 ### Manual Verification
-1. 프론트엔드에서 "버전 관리" 메뉴가 나타나는지 확인.
-2. 버전 목록이 정상적으로 과거 커밋 내역(해시, 메시지)을 표시하는지 확인.
-3. 과거의 특정 버전을 선택하고 롤백을 실행했을 때 서버가 재시작되며 해당 커밋으로 소스코드가 변경되는지 확인.
-4. "최신 버전으로 업데이트" 기능을 통해 다시 원래 상태(최신화)로 복구 가능한지 확인.
+1. 임의로 백엔드 코드(`transcriber.py` 등)에 에러를 발생시키는 코드를 삽입하며, 에러 메시지에 임의의 가짜 API 키(`sk-1234567890abcdef1234567890abcdef`)를 포함시킵니다.
+2. 프론트엔드에서 작업을 수행하여 에러를 유발합니다.
+3. 메인 화면에서 "오류 로그 보기" 버튼을 클릭합니다.
+4. 모달 창에서 최신 로그 파일을 선택합니다.
+5. 로그 내용에 Traceback 정보가 출력되며, 해당 가짜 API 키가 `***MASKED_API_KEY***` 등으로 안전하게 치환되어 출력되는지 확인합니다.

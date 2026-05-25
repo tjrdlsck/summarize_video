@@ -1,10 +1,21 @@
 import os
 import logging
 import traceback
+import re
 from datetime import datetime
 
 # 로그 저장 디렉토리 정의
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static", "logs")
+
+def mask_sensitive_info(text: str) -> str:
+    """API 키 및 토큰과 같은 민감 정보를 마스킹 처리합니다."""
+    if not isinstance(text, str):
+        return str(text)
+    # OpenAI API Key 패턴 마스킹 (sk-...)
+    text = re.sub(r'sk-[a-zA-Z0-9]{32,}', '***MASKED_API_KEY***', text)
+    # Bearer 토큰 패턴 마스킹
+    text = re.sub(r'Bearer\s+[a-zA-Z0-9\-\._~+/]+=*', 'Bearer ***MASKED_TOKEN***', text)
+    return text
 
 def get_logger(name="video_summarizer"):
     """
@@ -48,7 +59,12 @@ def log_error_with_traceback(logger, message, exception):
     """
     tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
     tb_text = "".join(tb_lines)
-    logger.error(f"{message}\n[Exception Info]\nType: {type(exception).__name__}\nMessage: {str(exception)}\n\n[Traceback Details]\n{tb_text}")
+    
+    masked_message = mask_sensitive_info(message)
+    masked_exc_str = mask_sensitive_info(str(exception))
+    masked_tb_text = mask_sensitive_info(tb_text)
+    
+    logger.error(f"{masked_message}\n[Exception Info]\nType: {type(exception).__name__}\nMessage: {masked_exc_str}\n\n[Traceback Details]\n{masked_tb_text}")
 
 def log_task_error(task_id, step_name, exception):
     """
@@ -66,6 +82,9 @@ def log_task_error(task_id, step_name, exception):
     tb_lines = traceback.format_exception(type(exception), exception, exception.__traceback__)
     tb_text = "".join(tb_lines)
     
+    masked_exc_str = mask_sensitive_info(str(exception))
+    masked_tb_text = mask_sensitive_info(tb_text)
+
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = (
         f"==================================================\n"
@@ -74,9 +93,9 @@ def log_task_error(task_id, step_name, exception):
         f"Task ID: {task_id}\n"
         f"Failed Step: {step_name}\n"
         f"Error Type: {type(exception).__name__}\n"
-        f"Error Message: {str(exception)}\n"
+        f"Error Message: {masked_exc_str}\n"
         f"--------------------------------------------------\n"
-        f"Traceback:\n{tb_text}"
+        f"Traceback:\n{masked_tb_text}"
         f"==================================================\n\n"
     )
     

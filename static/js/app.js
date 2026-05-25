@@ -46,6 +46,7 @@ function App() {
 
     // [New] Settings State
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [isLogViewerOpen, setIsLogViewerOpen] = useState(false);
 
     // Player UI State
     const [loading, setLoading] = useState(false);
@@ -233,6 +234,20 @@ function App() {
             await axios.post('/api/folders', { name: name.trim() });
             fetchFolders();
         } catch (err) { alert("폴더 생성 실패: " + err.message); }
+    };
+
+    const handleDeleteFolder = async (folderId, folderName) => {
+        if (!confirm(`'${folderName}' 폴더를 삭제하시겠습니까?\n내부에 있던 영상들은 '미분류'로 이동됩니다.`)) return;
+        try {
+            await axios.delete(`/api/folders/${folderId}`);
+            if (currentFolder === folderId) {
+                setCurrentFolder(null); // 폴더가 삭제되면 '모든 영상' 보기로 이동
+            }
+            fetchFolders();
+            fetchHistory(); // 미분류로 이동된 상태 업데이트
+        } catch (err) { 
+            alert("폴더 삭제 실패: " + (err.response?.data?.detail || err.message)); 
+        }
     };
 
     const handleMoveToFolder = async (filenames, folderId) => {
@@ -990,6 +1005,13 @@ function App() {
 
                     <div className="flex items-center gap-3 shrink-0">
                         <button 
+                            onClick={() => setIsLogViewerOpen(true)}
+                            className="text-red-500 hover:text-white transition px-3 py-1.5 rounded-full hover:bg-red-500 text-sm font-bold border border-red-500"
+                            title="오류 로그 보기"
+                        >
+                            오류 로그 보기
+                        </button>
+                        <button 
                             onClick={() => setIsSettingsOpen(true)}
                             className="text-gray-400 hover:text-indigo-600 transition p-2 rounded-full hover:bg-indigo-50"
                             title="설정"
@@ -1008,6 +1030,7 @@ function App() {
             </header>
 
             <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+            <LogViewerModal isOpen={isLogViewerOpen} onClose={() => setIsLogViewerOpen(false)} />
             <TaskMonitor tasks={activeTasks} onCancel={handleCancelTask} />
 
             <main className="flex-1 flex overflow-hidden bg-gray-50">
@@ -1109,21 +1132,30 @@ function App() {
                                                 {folders.map(folder => (
                                                     <li 
                                                         key={folder.id}
-                                                        onClick={() => setCurrentFolder(folder.id)}
-                                                        onDragOver={(e) => { e.preventDefault(); setDragOverFolder(folder.id); }}
-                                                        onDragLeave={() => setDragOverFolder(null)}
-                                                        onDrop={(e) => {
-                                                            e.preventDefault();
-                                                            setDragOverFolder(null);
-                                                            const filename = e.dataTransfer.getData("filename");
-                                                            if (filename) handleMoveToFolder([filename], folder.id);
-                                                        }}
                                                         className={`px-3 py-2.5 rounded-lg cursor-pointer text-sm font-medium flex items-center justify-between group transition ${dragOverFolder === folder.id ? 'bg-indigo-100 ring-2 ring-indigo-400 transform scale-[1.02]' : currentFolder === folder.id ? 'bg-indigo-50 text-indigo-700 font-bold' : 'text-gray-600 hover:bg-gray-50'}`}
                                                     >
-                                                        <div className="flex items-center gap-3 truncate">
+                                                        <div 
+                                                            className="flex items-center gap-3 truncate flex-1"
+                                                            onClick={() => setCurrentFolder(folder.id)}
+                                                            onDragOver={(e) => { e.preventDefault(); setDragOverFolder(folder.id); }}
+                                                            onDragLeave={() => setDragOverFolder(null)}
+                                                            onDrop={(e) => {
+                                                                e.preventDefault();
+                                                                setDragOverFolder(null);
+                                                                const filename = e.dataTransfer.getData("filename");
+                                                                if (filename) handleMoveToFolder([filename], folder.id);
+                                                            }}
+                                                        >
                                                             <svg className="w-5 h-5 text-indigo-400" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"></path></svg>
                                                             <span className="truncate">{folder.name}</span>
                                                         </div>
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); handleDeleteFolder(folder.id, folder.name); }}
+                                                            className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition-opacity p-1 rounded-full hover:bg-red-50 ml-2 flex-shrink-0"
+                                                            title="폴더 삭제"
+                                                        >
+                                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                                        </button>
                                                     </li>
                                                 ))}
                                             </ul>
