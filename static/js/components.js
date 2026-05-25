@@ -832,3 +832,113 @@ window.RegenerateModal = function({ isOpen, onClose, onSubmit, initialContentTyp
         </div>
     );
 };
+
+// --- [New] Log Viewer Modal ---
+function LogViewerModal({ isOpen, onClose }) {
+    const [logs, setLogs] = React.useState([]);
+    const [selectedLogContent, setSelectedLogContent] = React.useState("");
+    const [loadingLogs, setLoadingLogs] = React.useState(false);
+    const [loadingContent, setLoadingContent] = React.useState(false);
+
+    React.useEffect(() => {
+        if (isOpen) {
+            fetchLogs();
+            setSelectedLogContent("");
+        }
+    }, [isOpen]);
+
+    const fetchLogs = async () => {
+        setLoadingLogs(true);
+        try {
+            const res = await axios.get('/api/system/logs');
+            setLogs(res.data.logs || []);
+        } catch (error) {
+            console.error("Failed to fetch logs", error);
+            alert("로그 목록을 불러오지 못했습니다.");
+        } finally {
+            setLoadingLogs(false);
+        }
+    };
+
+    const loadLogContent = async (filename) => {
+        setLoadingContent(true);
+        try {
+            const res = await axios.get(`/api/system/logs/${filename}`);
+            setSelectedLogContent(res.data);
+        } catch (error) {
+            console.error("Failed to fetch log content", error);
+            setSelectedLogContent("로그 내용을 불러오지 못했습니다.");
+        } finally {
+            setLoadingContent(false);
+        }
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+            <div className="bg-white rounded-3xl w-full max-w-6xl h-[85vh] shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                
+                {/* Header */}
+                <div className="flex justify-between items-center p-6 border-b shrink-0 bg-gray-50">
+                    <div>
+                        <h2 className="text-2xl font-bold text-gray-800">서버 오류 로그 뷰어</h2>
+                        <p className="text-sm text-gray-500 mt-1">시스템에서 발생한 예외 및 에러 내역을 확인합니다.</p>
+                    </div>
+                    <div className="flex gap-3">
+                        <button onClick={fetchLogs} className="p-2 text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-full transition" title="새로고침">
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                        </button>
+                        <button onClick={onClose} className="p-2 text-gray-500 hover:text-red-500 hover:bg-red-50 rounded-full transition">
+                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                </div>
+
+                {/* Content Body */}
+                <div className="flex flex-1 overflow-hidden">
+                    {/* Left: Log File List */}
+                    <div className="w-1/3 border-r bg-white flex flex-col overflow-hidden">
+                        <div className="p-4 border-b bg-gray-50 font-bold text-gray-700">로그 파일 목록</div>
+                        <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                            {loadingLogs ? (
+                                <div className="text-center py-10 text-gray-400">목록 불러오는 중...</div>
+                            ) : logs.length === 0 ? (
+                                <div className="text-center py-10 text-gray-400">로그 파일이 없습니다.</div>
+                            ) : (
+                                logs.map(log => (
+                                    <button 
+                                        key={log.filename}
+                                        onClick={() => loadLogContent(log.filename)}
+                                        className="w-full text-left p-3 rounded-xl hover:bg-gray-100 transition border border-transparent focus:outline-none"
+                                    >
+                                        <div className="font-bold text-gray-800 text-sm truncate">{log.filename}</div>
+                                        <div className="flex justify-between mt-1 text-xs text-gray-400">
+                                            <span>{new Date(log.modified).toLocaleString()}</span>
+                                            <span>{(log.size / 1024).toFixed(1)} KB</span>
+                                        </div>
+                                    </button>
+                                ))
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Right: Log Content */}
+                    <div className="flex-1 bg-gray-900 flex flex-col overflow-hidden relative">
+                        {loadingContent ? (
+                            <div className="flex-1 flex items-center justify-center text-gray-400">내용 불러오는 중...</div>
+                        ) : selectedLogContent ? (
+                            <pre className="flex-1 overflow-auto p-6 text-sm font-mono text-green-400 whitespace-pre-wrap">
+                                {selectedLogContent}
+                            </pre>
+                        ) : (
+                            <div className="flex-1 flex items-center justify-center text-gray-500">
+                                좌측에서 로그 파일을 선택해주세요.
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}
