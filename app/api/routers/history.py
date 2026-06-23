@@ -19,6 +19,38 @@ async def delete_history(filename: str):
 
     try:
         base_name = os.path.splitext(filename)[0]
+        deleted_count = 0
+
+        clips_json_path = os.path.join(RESULTS_DIR, f"{base_name}_clips.json")
+        if os.path.exists(clips_json_path):
+            try:
+                with open(clips_json_path, "r", encoding="utf-8") as file:
+                    clips_data = json.load(file)
+                
+                for clip in clips_data:
+                    files_to_delete = []
+                    if clip.get("filename"):
+                        files_to_delete.append(clip["filename"])
+                    if clip.get("filename_video"):
+                        files_to_delete.append(clip["filename_video"])
+                        files_to_delete.append(clip["filename_video"].replace(".mp4", ".srt"))
+                        files_to_delete.append(clip["filename_video"].replace(".mp4", ".vtt"))
+                    if clip.get("filename_zip"):
+                        files_to_delete.append(clip["filename_zip"])
+                    if clip.get("filename_vtt"):
+                        files_to_delete.append(clip["filename_vtt"])
+                    
+                    for f_name in files_to_delete:
+                        if f_name:
+                            p = os.path.join(CLIPS_DIR, f_name)
+                            if os.path.exists(p):
+                                try:
+                                    os.remove(p)
+                                    deleted_count += 1
+                                except Exception:
+                                    pass
+            except Exception as e:
+                print(f"[Delete History Error] Failed to clean AI Shorts: {e}")
 
         result_targets = [
             f"{base_name}_summary.json",
@@ -30,7 +62,6 @@ async def delete_history(filename: str):
             f"{base_name}.vtt",
         ]
 
-        deleted_count = 0
         for target in result_targets:
             path = os.path.join(RESULTS_DIR, target)
             if os.path.exists(path):

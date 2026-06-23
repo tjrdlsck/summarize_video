@@ -59,6 +59,37 @@ def cleanup_orphaned_files() -> None:
 
                 print(f"[Cleanup] Found zombie record: {video_source} (Source missing)")
                 base_name = os.path.splitext(video_source)[0]
+                
+                clips_json_path = os.path.join(RESULTS_DIR, f"{base_name}_clips.json")
+                if os.path.exists(clips_json_path):
+                    try:
+                        with open(clips_json_path, "r", encoding="utf-8") as file:
+                            clips_data = json.load(file)
+                        for clip in clips_data:
+                            files_to_delete = []
+                            if clip.get("filename"):
+                                files_to_delete.append(clip["filename"])
+                            if clip.get("filename_video"):
+                                files_to_delete.append(clip["filename_video"])
+                                files_to_delete.append(clip["filename_video"].replace(".mp4", ".srt"))
+                                files_to_delete.append(clip["filename_video"].replace(".mp4", ".vtt"))
+                            if clip.get("filename_zip"):
+                                files_to_delete.append(clip["filename_zip"])
+                            if clip.get("filename_vtt"):
+                                files_to_delete.append(clip["filename_vtt"])
+                            
+                            for f_name in files_to_delete:
+                                if f_name:
+                                    p = os.path.join(CLIPS_DIR, f_name)
+                                    if os.path.exists(p):
+                                        try:
+                                            os.remove(p)
+                                            cleanup_count += 1
+                                        except Exception:
+                                            pass
+                    except Exception:
+                        pass
+
                 zombie_targets = [
                     f"{base_name}_summary.json",
                     f"{base_name}_transcript.json",
@@ -99,6 +130,49 @@ def cleanup_orphaned_files() -> None:
                 os.remove(file_path)
                 cleanup_count += 1
                 print(f"[Cleanup] Removed orphaned result: {filename}")
+            except Exception:
+                pass
+
+    if os.path.exists(CLIPS_DIR):
+        valid_clip_files = set()
+        if os.path.exists(RESULTS_DIR):
+            for filename in os.listdir(RESULTS_DIR):
+                if filename.endswith("_clips.json"):
+                    clips_json_path = os.path.join(RESULTS_DIR, filename)
+                    try:
+                        with open(clips_json_path, "r", encoding="utf-8") as file:
+                            clips_data = json.load(file)
+                        for clip in clips_data:
+                            if clip.get("filename"):
+                                valid_clip_files.add(clip["filename"])
+                            if clip.get("filename_video"):
+                                valid_clip_files.add(clip["filename_video"])
+                                valid_clip_files.add(clip["filename_video"].replace(".mp4", ".srt"))
+                                valid_clip_files.add(clip["filename_video"].replace(".mp4", ".vtt"))
+                            if clip.get("filename_zip"):
+                                valid_clip_files.add(clip["filename_zip"])
+                            if clip.get("filename_vtt"):
+                                valid_clip_files.add(clip["filename_vtt"])
+                    except Exception:
+                        pass
+        
+        valid_base_names = set()
+        if os.path.exists(VIDEOS_DIR):
+            for video in os.listdir(VIDEOS_DIR):
+                valid_base_names.add(os.path.splitext(video)[0])
+
+        for clip_file in os.listdir(CLIPS_DIR):
+            if clip_file in valid_clip_files:
+                continue
+            
+            has_valid_base = any(base in clip_file for base in valid_base_names)
+            if has_valid_base:
+                continue
+            
+            try:
+                os.remove(os.path.join(CLIPS_DIR, clip_file))
+                cleanup_count += 1
+                print(f"[Cleanup] Removed orphaned clip: {clip_file}")
             except Exception:
                 pass
 
