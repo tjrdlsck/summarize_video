@@ -1,9 +1,23 @@
-- [x] `services/logger.py` 업데이트: 정규식을 활용한 API 키/민감 정보 마스킹 함수(`mask_sensitive_info`) 구현 및 `log_error_with_traceback`, `log_task_error`에 적용
-- [x] `services/transcriber.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
-- [x] `services/summarizer.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
-- [x] `services/downloader.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
-- [x] `app/api/routers/system.py` API 엔드포인트 구현: `/api/system/logs`, `/api/system/logs/{filename}` 라우트 추가
-- [x] `templates/index.html` 수정: "오류 로그 보기" 버튼 및 로그 뷰어 모달(Modal) UI 추가
-- [x] `static/js/app.js` 및 `static/js/components.js` 수정: 로그 API 호출 및 모달 연동 프론트엔드 로직 구현
-- [x] 구현 검증: 로컬 테스트 및 동작 확인 (에러 유발 후 마스킹 및 모달 확인)
-- [x] `walkthrough.md` 작성: 구현 결과 요약 및 리뷰 제공
+# 작업 태스크 관리 (Task Tracker)
+
+## 📌 이슈 및 브랜치 정보
+- **이슈:** [Bug] 동영상 시간 포맷 오류 (hh:mm:ss 미적용) ([#111](https://github.com/tjrdlsck/summarize_video/issues/111))
+- **대상 브랜치:** `feat/#111` (기준 브랜치: `develop`)
+
+## 🛠️ 작업 현황
+- [x] `.ignore` 파일 생성 및 설정
+- [x] 원격 저장소 확인 (`git remote -v`)
+- [x] GitHub 이슈 생성 (`gh issue create`)
+- [x] 로컬 `develop` 브랜치 풀 및 피처 브랜치 `feat/#111` 생성 및 체크아웃
+- [x] 동영상 시간 포맷 관련 코드 탐색 및 수정 (`static/js/app.js` 내 `formatTimeSimple`)
+- [x] 로컬 테스트 수행 (`tests/` 폴더 내 테스트 스크립트 실행 및 로그 저장)
+- [x] 디버깅 로그 기록 및 `walkthrough.md` 반영
+- [x] 버전 및 환경 의존성에 따른 치명적 장애 예상 지점 분석 ([version_compatibility_analysis.md](file:///home/radi/cli/summarize_video/version_compatibility_analysis.md))
+- [x] NumPy 버전 1.26.4 다운그레이드 패치 (`requirements.txt`, `requirements_win.txt`)
+- [x] `yt-dlp` 업그레이드 권한 샌드박스 우회 폴백 적용 (`services/downloader.py` 내 `--user` 재시도 추가)
+- [x] 패치 후 로컬 전체 테스트 재수행 및 통과 검증
+- [x] 프론트엔드 외부 라이브러리 CDN 버전 고정 누락 진단 및 보고서 작성 ([frontend_version_compatibility_analysis.md](file:///home/radi/cli/summarize_video/frontend_version_compatibility_analysis.md))
+- [x] `templates/index.html` CDN 외부 라이브러리(React, ReactDOM, Babel, Marked, Axios) 버전 정밀 고정
+- [x] React 개발용 빌드 -> Production 배포용 빌드로 최적화 전환
+- [x] 코드 및 문서 커밋 & 푸시 (`git push origin feat/#111`)
+- [x] PR 생성 완료 (PR [#112](https://github.com/tjrdlsck/summarize_video/pull/112))
