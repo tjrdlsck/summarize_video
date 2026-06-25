@@ -10,5 +10,7 @@
 - [x] GitHub 이슈 생성 (`gh issue create`)
 - [x] 로컬 `develop` 브랜치 풀 및 피처 브랜치 `feat/#111` 생성 및 체크아웃
 - [x] 동영상 시간 포맷 관련 코드 탐색 및 수정 (`static/js/app.js` 내 `formatTimeSimple`)
-- [ ] 로컬 테스트 수행 (`tests/` 폴더 내 테스트 스크립트 작성 및 실행)
-- [ ] PR 생성 및 Merge
+- [x] 로컬 테스트 수행 (`tests/` 폴더 내 테스트 스크립트 실행 및 로그 저장)
+- [x] 디버깅 로그 기록 및 `walkthrough.md` 반영
+- [x] 코드 및 문서 커밋 & 푸시 (`git push origin feat/#111`)
+- [x] PR 생성 완료 (PR [#112](https://github.com/tjrdlsck/summarize_video/pull/112))
