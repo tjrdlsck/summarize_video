@@ -1,9 +1,14 @@
-- [x] `services/logger.py` 업데이트: 정규식을 활용한 API 키/민감 정보 마스킹 함수(`mask_sensitive_info`) 구현 및 `log_error_with_traceback`, `log_task_error`에 적용
-- [x] `services/transcriber.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
-- [x] `services/summarizer.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
-- [x] `services/downloader.py` 방어 코드 추가: 주요 함수 로직에 `try-except` 블록 적용 및 에러 로깅 연동
-- [x] `app/api/routers/system.py` API 엔드포인트 구현: `/api/system/logs`, `/api/system/logs/{filename}` 라우트 추가
-- [x] `templates/index.html` 수정: "오류 로그 보기" 버튼 및 로그 뷰어 모달(Modal) UI 추가
-- [x] `static/js/app.js` 및 `static/js/components.js` 수정: 로그 API 호출 및 모달 연동 프론트엔드 로직 구현
-- [x] 구현 검증: 로컬 테스트 및 동작 확인 (에러 유발 후 마스킹 및 모달 확인)
-- [x] `walkthrough.md` 작성: 구현 결과 요약 및 리뷰 제공
+# 작업 태스크 관리 (Task Tracker)
+
+## 📌 이슈 및 브랜치 정보
+- **이슈:** [Bug] 동영상 시간 포맷 오류 (hh:mm:ss 미적용) ([#111](https://github.com/tjrdlsck/summarize_video/issues/111))
+- **대상 브랜치:** `feat/#111` (기준 브랜치: `develop`)
+
+## 🛠️ 작업 현황
+- [x] `.ignore` 파일 생성 및 설정
+- [x] 원격 저장소 확인 (`git remote -v`)
+- [x] GitHub 이슈 생성 (`gh issue create`)
+- [x] 로컬 `develop` 브랜치 풀 및 피처 브랜치 `feat/#111` 생성 및 체크아웃
+- [x] 동영상 시간 포맷 관련 코드 탐색 및 수정 (`static/js/app.js` 내 `formatTimeSimple`)
+- [ ] 로컬 테스트 수행 (`tests/` 폴더 내 테스트 스크립트 작성 및 실행)
+- [ ] PR 생성 및 Merge
