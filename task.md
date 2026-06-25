@@ -16,5 +16,6 @@
 - [x] NumPy 버전 1.26.4 다운그레이드 패치 (`requirements.txt`, `requirements_win.txt`)
 - [x] `yt-dlp` 업그레이드 권한 샌드박스 우회 폴백 적용 (`services/downloader.py` 내 `--user` 재시도 추가)
 - [x] 패치 후 로컬 전체 테스트 재수행 및 통과 검증
+- [x] 프론트엔드 외부 라이브러리 CDN 버전 고정 누락 진단 및 보고서 작성 ([frontend_version_compatibility_analysis.md](file:///home/radi/cli/summarize_video/frontend_version_compatibility_analysis.md))
 - [x] 코드 및 문서 커밋 & 푸시 (`git push origin feat/#111`)
 - [x] PR 생성 완료 (PR [#112](https://github.com/tjrdlsck/summarize_video/pull/112))
