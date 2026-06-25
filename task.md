@@ -12,6 +12,9 @@
 - [x] 동영상 시간 포맷 관련 코드 탐색 및 수정 (`static/js/app.js` 내 `formatTimeSimple`)
 - [x] 로컬 테스트 수행 (`tests/` 폴더 내 테스트 스크립트 실행 및 로그 저장)
 - [x] 디버깅 로그 기록 및 `walkthrough.md` 반영
+- [x] 버전 및 환경 의존성에 따른 치명적 장애 예상 지점 분석 ([version_compatibility_analysis.md](file:///home/radi/cli/summarize_video/version_compatibility_analysis.md))
+- [x] NumPy 버전 1.26.4 다운그레이드 패치 (`requirements.txt`, `requirements_win.txt`)
+- [x] `yt-dlp` 업그레이드 권한 샌드박스 우회 폴백 적용 (`services/downloader.py` 내 `--user` 재시도 추가)
+- [x] 패치 후 로컬 전체 테스트 재수행 및 통과 검증
 - [x] 코드 및 문서 커밋 & 푸시 (`git push origin feat/#111`)
 - [x] PR 생성 완료 (PR [#112](https://github.com/tjrdlsck/summarize_video/pull/112))
-- [x] 버전 및 환경 의존성에 따른 치명적 장애 예상 지점 분석 ([version_compatibility_analysis.md](file:///home/radi/cli/summarize_video/version_compatibility_analysis.md))
