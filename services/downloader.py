@@ -85,8 +85,16 @@ class VideoDownloader:
                 "message": "yt-dlp is already at latest version",
             }
 
+        # 1. 기본 업그레이드 시도
         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"]
         process = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # 2. 실패 시 권한 문제일 수 있으므로 --user 플래그로 2차 시도
+        if process.returncode != 0:
+            print("[Warning] Default yt-dlp upgrade failed. Retrying with --user flag...")
+            user_cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "--user", "yt-dlp"]
+            process = subprocess.run(user_cmd, capture_output=True, text=True)
+
         if process.returncode != 0:
             return {
                 "status": "failed",

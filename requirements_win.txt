@@ -27,7 +27,7 @@ MarkupSafe==3.0.3
 more-itertools==10.8.0
 msgpack==1.1.2
 numba==0.63.1
-numpy==2.1.0
+numpy==1.26.4
 openai-whisper==20250625
 packaging==25.0
 platformdirs==4.5.1
