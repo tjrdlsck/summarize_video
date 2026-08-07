@@ -8,6 +8,7 @@ def test_convention_file_exists_and_contains_os_spec():
     content = convention_path.read_text(encoding="utf-8")
     assert "Development & Target Environment" in content
     assert "Directory Structure & Architectural Blueprint" in content
+    assert "Branch Scope & Execution Workflow" in content
     assert "Linux" in content
 
 def test_archived_docs_directory_and_ignore():

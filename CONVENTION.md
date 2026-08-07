@@ -43,6 +43,19 @@ summarize_video/
 
 ---
 
+## 0.2 Branch Scope & Execution Workflow (브랜치 스코프 및 작업 수칙)
+
+개발자 및 AI 에이전트는 코드 수정 및 작업 진행 시 아래 수칙을 엄격히 준수해야 합니다.
+
+- **현재 브랜치 작업 원칙 (Current Branch Only)**: 사용자의 별도 명시적 요청이 없는 한, 모든 기능 개발, 문서 수정 및 리팩토링은 **현재 활성화된 Feature 브랜치 내에서만** 수행합니다.
+- **임의 병합 금지 (No Autonomous Merging)**: 작업이 완료되더라도 상위 브랜치(`develop`, `main`)로의 **Merge(병합) 작업을 임의로 진행하지 않습니다.**
+- **작업 완료 기준 (Completion Criteria)**: 
+  1. 현재 브랜치 상에서 로컬 테스트(`pytest`) 통과 검증
+  2. 규격에 맞는 **Commit** 작성
+  3. 원격 리포지토리로 **Push** 및 PR 등록까지만 완료하고 최종 병합은 사용자의 지시를 기다립니다.
+
+---
+
 ## 1. Python Style Guide (PEP 8 & Google Style)
 
 Python 코드는 가독성이 최우선입니다. $O(1)$의 가독성을 목표로 합니다.
