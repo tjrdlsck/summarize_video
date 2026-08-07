@@ -10,3 +10,9 @@ build/
 *.log
 *.lock
 coverage/
+docs/archive/
+test_results/
+static/results/
+static/logs/
+static/clips/
+static/temp/

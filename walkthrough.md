@@ -1,134 +1,18 @@
-# 💡 버그 분석 및 해결 보고서: 쇼츠(Shorts) 자동생성 클립 미삭제 현상 및 과거 고아 파일(Orphaned Files) 정리
+# 📝 Walkthrough: 레거시 문서 아카이빙 및 개발 OS/아키텍처 컨벤션 명시
 
-## 🔍 문제 정의 (Problem Definition)
-초기화면에서 카드(분석된 영상 내역)를 삭제할 때, 영상과 관련된 대부분의 결과 파일은 삭제되나 **AI 쇼츠 기획/자동생성으로 만들어진 클립 파일(`.mp4`, `.srt`, `.vtt`, `.zip`)이 삭제되지 않고 고아 파일(Orphaned File)로 남는 현상**이 발생했습니다. 
+## 💡 문제 정의 (Root Cause & Background)
+- **증상**: LLM 기반 Vibe Coding 진행 시 루트 디렉터리의 대량 파편화된 기획/분석 문서(`PRD.md`, `PROJECT_ANALYSIS.md` 등)를 읽고 구 버전 아키텍처 코드를 제안하는 환각(Hallucination) 발상.
+- **원인**: 컨텍스트 윈도우(Context Window) 내 지식 충돌(Knowledge Drift) 및 개발 대상 OS/디렉터리 계층 분리 가이드 부재.
 
-### 🧨 근본 원인 (Root Cause)
-1. **파일명 매칭 규칙의 불일치:**
-   - 기존 `app/api/routers/history.py`의 `delete_history()` 로직은 `CLIPS_DIR` 내부를 순회하며 클립의 파일명에 `base_name`(원본 영상의 확장자 제외 이름)이 포함되어 있는지(`if base_name in clip_name:`) 확인하여 삭제를 진행했습니다.
-   - 하지만 AI 숏츠는 `AI_Shorts_{index}_{safe_title}.mp4` 와 같은 독자적인 네이밍 규칙을 사용하여 저장되므로, 파일명에 원본 영상의 `base_name`이 존재하지 않습니다. 이로 인해 조건에 일치하지 않아 삭제 루프에서 누락되었습니다.
-2. **청소(Cleanup) 데몬 로직의 동일한 문제:**
-   - 서버 시작 시 동작하는 `app/application/cleanup.py`의 `cleanup_orphaned_files()`에서도 원본 영상이 없는 '좀비(Zombie)' 결과를 삭제할 때, 단순 메타데이터 파일 자체만 삭제하고 실제 숏츠 비디오는 지우지 못하는 동일한 취약점이 있었습니다.
-3. **과거에 발생한 고아 파일 방치 위험:**
-   - 버그 픽스 이전(과거)에 삭제된 카드의 경우 이미 `_clips.json` 메타데이터마저 삭제되었기 때문에, 메타데이터를 기반으로 한 삭제 픽스조차 이들을 구제할 수 없어 영구적인 용량 누수(Storage Leak)가 발생할 수 있습니다.
+## 🛠️ 해결 메커니즘 및 로직 수정
+1. **문서 아카이빙**:
+   - `docs/archive/` 경로 생성 후 구버전 마크다운 파일 5종 이동.
+   - `.ignore` 파일에 `docs/archive/`를 명시하여 AI 지식 탐색 노이즈 제거.
+2. **컨벤션 재정립 ([`CONVENTION.md`](file:///home/radi/cli/summarize_video/CONVENTION.md))**:
+   - **`0. Development & Target Environment`**: Linux (POSIX) & macOS 타깃, `pathlib.Path` 표준화, PyTorch/Whisper Multiprocessing(`fork` vs `spawn`) 주의점 기재.
+   - **`0.1 Directory Structure & Architectural Blueprint`**: `app/` (FastAPI Layered Architecture) vs `services/` (Domain Services) 분리 명세 및 계층별 개발 원칙 추가.
+3. **검증**:
+   - `tests/test_convention_and_architecture.py` 신규 작성 및 pytest 검증 통과.
 
-## 🛠️ 해결 메커니즘 (Resolution Mechanics)
-
-### 1. `app/api/routers/history.py` 수정 (정상적인 카드 삭제 시)
-*   카드(History) 삭제 요청 시, `_clips.json` 파일이 존재하는지 가장 먼저 확인합니다.
-*   파일이 있다면 JSON 객체 배열을 파싱하여, 각각의 `clip` 딕셔너리에서 `filename_video`, `filename_zip`, `filename_vtt` 값을 추출하고 쌍을 이루는 자막 파일(`.srt`, `.vtt`)도 함께 구성하여 명시적으로 삭제하도록 했습니다.
-
-### 2. `app/application/cleanup.py` 수정 (서버 기동 시 Deep Cleanup)
-*   **좀비 레코드 삭제 보완:** 서버 기동 시 고아 레코드를 탐지했을 때, 삭제 대상(`zombie_targets`) 목록을 비우기 전에 동일하게 `_clips.json`을 읽어들여 AI 숏츠 실물 파일들을 지우도록 로직을 갱신했습니다.
-*   **Deep Orphan Cleanup 도입 (안전한 전체 스캔):** 
-    - 서버 기동 시 한 번, `RESULTS_DIR` 내의 모든 `_clips.json`을 순회하며 **현재 유효한 모든 AI 숏츠 실물 파일명들의 집합(Set)** 을 생성합니다. (`valid_clip_files`)
-    - 또한 `VIDEOS_DIR` 내의 유효한 비디오들의 `base_name` 집합도 구성합니다. (`valid_base_names`)
-    - 그 후 `CLIPS_DIR` 내부를 전수 검사하여, **1) 유효한 클립 파일 목록에 없고, 2) 유효한 비디오의 `base_name`을 이름에 포함하지 않은 파일**은 완벽한 고아 파일(과거 버그로 인해 버려진 파일)로 간주하고 일괄 삭제하는 로직을 마지막 단계에 주입했습니다.
-    - 이를 통해 기존 작업물(살아있는 카드)의 클립은 절대 날아가지 않도록 안전하게 보호하면서도, 과거의 찌꺼기 파일들까지 모두 청소(GC: Garbage Collection)합니다.
-
-## 🎓 교훈 (Lessons Learned)
-*   **메타데이터 기반의 의존성 관리:** 리소스 간의 생명 주기(Lifecycle)를 관리할 때, 파일명 규칙에 의존하는 하드코딩 방식은 예기치 않은 데이터 누수(Memory/Storage Leak)를 초래할 수 있습니다.
-*   **Deep Cleanup (가비지 컬렉션):** 에러가 수정되기 전 누적된 고아 파일들을 청소할 때는 항상 **"지워야 할 것"을 찾는 것보다 "살려야 할 유효한 리소스(Set)"를 확정하고 그 외의 것을 지우는 방식**이 훨씬 안전하며 기존 데이터를 유실할 위험을 원천 차단합니다.
-
----
-
-> [!NOTE]
-> 해당 수정 사항은 현재 브랜치에 코드 레벨로 직접 반영되었습니다. 로컬 단위 테스트가 완료되면 확인 후 Commit 및 Push를 진행하시면 됩니다.
-
-## 🔍 추가 수정: 요약노트 `<mark>` 하이라이팅 프론트엔드 미출력 문제
-- **원인:** LLM 프롬프트에 `` `<mark>핵심 문장</mark>` `` 형식으로 백틱(\`) 기호와 함께 프롬프트를 주입하여, LLM이 실제로 백틱까지 텍스트로 생성해버리는 문제가 있었습니다. 이로 인해 프론트엔드의 `marked.js`가 이를 실제 HTML 태그가 아닌 인라인 코드(`<code>`) 블록으로 해석하여 렌더링이 무시되었습니다. (프론트엔드의 CSS 자체는 정상적으로 `.markdown-body mark` 로 구현되어 있었습니다.)
-- **수정:** `services/summarizer.py`와 `services/refiner.py`의 프롬프트를 수정하여 백틱을 제거하고, 순수 HTML 태그만 출력하도록 가이드라인을 명확하게 갱신했습니다.
-
----
-
-# 💡 버그 분석 및 해결 보고서: 동영상 시간 포맷팅 방식 오류 (hh:mm:ss 미적용)
-
-## 🔍 문제 정의 (Problem Definition)
-비디오 요약 및 쇼츠 자동생성 도구의 재생 시간 혹은 챕터 표시 영역에서 시간 타임스탬프가 `98:23`과 같이 60분을 초과하여 `mm:ss` 형식으로 노출되는 현상이 발생했습니다. 동영상의 전체 길이가 1시간 이상인 경우 시(hour) 단위로 올바르게 파싱되지 않아 가독성이 저해되었습니다.
-
-### 🧨 근본 원인 (Root Cause)
-`static/js/app.js` 파일 내의 `formatTimeSimple` 함수는 입력받은 초(seconds) 단위 시간을 단순히 분(minute)과 초(second)로만 변환하도록 설계되어 있었습니다.
-```javascript
-    const formatTimeSimple = (s) => {
-        if (!s && s !== 0) return "0:00";
-        const m = Math.floor(s / 60);
-        const sec = Math.floor(s % 60);
-        return `${m}:${sec < 10 ? '0' : ''}${sec}`;
-    };
-```
-이로 인해 `s = 5903`초(98분 23초)와 같이 3600초(1시간)를 넘는 값에 대해서도 `Math.floor(s / 60)`이 적용되어 `98:23`으로 표시되는 버그가 발생했습니다.
-
-## 🛠️ 해결 메커니즘 (Resolution Mechanics)
-사용자 인터페이스(UI) 측면에서 1시간 미만의 동영상에 대해서는 직관적인 `mm:ss` 포맷을 유지하고, 1시간 이상의 동영상에 대해서만 `h:mm:ss` 형식으로 자동 전환되어 가독성을 높일 수 있도록 조건부 렌더링 로직을 도입했습니다.
-
-### 1. `static/js/app.js` 수정
-`formatTimeSimple` 함수를 다음과 같이 수정하여 시간(`h`), 분(`m`), 초(`sec`) 단위를 구분하여 계산하도록 하였습니다.
-```javascript
-    const formatTimeSimple = (s) => {
-        if (!s && s !== 0) return "0:00";
-        const h = Math.floor(s / 3600);
-        const m = Math.floor((s % 3600) / 60);
-        const sec = Math.floor(s % 60);
-        if (h > 0) {
-            return `${h}:${m < 10 ? '0' : ''}${m}:${sec < 10 ? '0' : ''}${sec}`;
-        }
-        return `${m}:${sec < 10 ? '0' : ''}${sec}`;
-    };
-```
-- **1시간 이상인 경우 (`h > 0`):** `h:mm:ss` 형식으로 변환하여 반환합니다. (예: `1:38:23`)
-- **1시간 미만인 경우 (`h == 0`):** 기존 `mm:ss` 형식으로 변환하여 반환합니다. (예: `05:30`)
-
-## 🎓 교훈 (Lessons Learned)
-* **시간 계산의 한계 설정:** 시간 단위를 변환할 때 다루는 데이터의 최대값 범위(여기서는 1시간 이상의 동영상 지원 여부)를 미리 파악하고 설계해야 합니다.
-* **조건부 포맷팅의 유용성:** 고정된 포맷(`hh:mm:ss`)을 강제하기보다는, 데이터의 규모에 맞는 가변 포맷을 적용함으로써 사용자 경험(UX)을 극대화할 수 있습니다.
-
----
-
-# 💡 버그 분석 및 해결 보고서: 패키지 및 환경 호환성 장애 예방 조치
-
-## 🔍 문제 정의 (Problem Definition)
-NumPy의 급격한 메이저 업데이트(NumPy 2.x) 및 외부 자원 다운로더(`yt-dlp`)의 환경(권한 부족)에 따른 런타임 크래시 가능성을 탐지하고, 이를 방어하여 프로덕션 환경에서의 극단적인 가용성 저하를 미연에 방지하고자 합니다.
-
-### 🧨 근본 원인 (Root Cause)
-1. **NumPy 2.x 바이너리 불일치:**
-   `requirements.txt`와 `requirements_win.txt`에 지정된 `numpy==2.3.5` (또는 `2.1.0`)는 C API 변경사항을 포함하는 NumPy 2.x 계열로, Numba 0.63.1, Librosa 0.11.0, Faster-Whisper 1.1.0 등 사전 컴파일된 이진 확장 라이브러리들과의 결합 시 바이너리 호환성 오류(`numpy.dtype size changed`)를 일으킬 소지가 농후했습니다.
-2. **`yt-dlp` 업그레이드 권한 제약:**
-   `yt-dlp` 서명 우회를 위한 자동 업그레이드 명령어(`pip install --upgrade yt-dlp`) 수행 시, 가상환경이 아닌 글로벌 환경이나 도커 컨테이너와 같이 쓰기 권한이 차단된 샌드박스 환경에서는 권한 에러(Permission Error)로 인해 업그레이드가 완전히 가로막혀 유튜브 다운로드 기능이 영구 중단되는 결함이 있었습니다.
-
-## 🛠️ 해결 메커니즘 (Resolution Mechanics)
-
-### 1. `requirements.txt` 및 `requirements_win.txt` 수정
-- NumPy의 버전을 다차원 과학계산 및 오디오 라이브러리군이 완벽하게 바이너리 수준에서 호환하는 NumPy 1.x 대역의 최신 안정 빌드인 `numpy==1.26.4`로 다운그레이드하여 호환성을 전면 복구했습니다.
-
-### 2. `services/downloader.py` 수정
-- `_attempt_ytdlp_upgrade` 함수에서 1차 기본 설치 명령어가 실패할 경우, 권한 문제를 격리 및 우회하기 위해 `--user` 플래그를 추가한 2차 업그레이드 복구 로직(`pip install --upgrade --user yt-dlp`)을 시도하도록 구현하였습니다.
-
-## 🎓 교훈 (Lessons Learned)
-* **메이저 버전의 파괴적 영향 검토:** 과학 기술/AI 라이브러리 분야에서 NumPy, PyTorch 등의 핵심 코어 패키지를 다룰 때는 메이저 업그레이드가 가져올 타 라이브러리의 바이너리 호환성 상실 위험을 면밀히 사전에 분석하고 상한 한계선(Upper Bound) 버전을 지정해야 합니다.
-* **샌드박스 환경 격리 고려:** 자가 업데이트 로직을 짤 때는 항상 타겟 호스트의 권한 수준이 한정적일 수 있음을 전제하고, `--user` 옵션이나 가상환경 유무를 고려한 다중 격리 폴백(Multi-tier Fallback) 장치를 설계해야 합니다.
-
----
-
-# 💡 버그 분석 및 해결 보고서: 프론트엔드 외부 라이브러리 CDN 버전 고정 및 최적화
-
-## 🔍 문제 정의 (Problem Definition)
-`templates/index.html` 파일 내에서 마크다운 파서(`marked`) 및 HTTP 통신 라이브러리(`axios`) 등의 외부 자바스크립트 자원을 가져올 때, 명시적인 버전 정보가 누락되어 원격 CDN 배포본의 최신 메이저/마이너 업데이트 시 프론트엔드 렌더링 및 API 통신 전체가 예기치 않게 실패할 위험이 존재했습니다.
-
-### 🧨 근본 원인 (Root Cause)
-1. **`marked`와 `axios` 버전 미지정:**
-   버전을 적지 않은 채 CDN 스크립트 태그를 임포트하면 매 접속 시 최신 버전이 캐싱되지 않고 실시간으로 리다이렉트되어 로드됩니다. Marked.js나 Axios가 향후 파괴적인 변경을 적용하는 메이저 판올림을 릴리즈할 때, 기존 자바스크립트 코드와의 함수/객체 구조 호환성이 깨져 즉각 기능이 정지되는 리스크가 존재했습니다.
-2. **React 개발용 빌드 사용에 따른 낭비:**
-   React와 ReactDOM 라이브러리가 `@18` 대역으로 지정되어 있으나, 마이너 버전 고정이 누락되었고 실 서비스(Production) 환경에서도 불필요하게 무겁고 추가 검증 코드가 삽입된 `react.development.js`를 사용하고 있어 성능 오버헤드가 유발되었습니다.
-
-## 🛠️ 해결 메커니즘 (Resolution Mechanics)
-
-### 1. `templates/index.html` 수정
-외부 자원을 로드하는 경로를 정밀한 패치 버전으로 완전 고정(Pinning)하였습니다.
-- **React & ReactDOM:** `react@18.3.1` 및 `react-dom@18.3.1`로 고정하고, 서비스 성능 향상 및 브라우저 콘솔 최적화를 위해 `.development.js`를 `.production.min.js` 빌드로 전환하였습니다.
-- **Babel Standalone:** JSX 파서의 안정성을 보장하기 위해 `babel-standalone@7.24.7` 버전으로 고정하였습니다.
-- **Marked.js:** 기존 `marked.parse(...)` 문법과의 정합성이 완벽하게 증명된 `marked@12.0.1` 버전으로 고정하였습니다.
-- **Axios:** 통신 안전성과 302 리다이렉션으로 인한 네트워크 딜레이 해소를 위해 `axios@1.7.2` 버전으로 명시적 고정 처리하였습니다.
-
-## 🎓 교훈 (Lessons Learned)
-* **CDN 자원의 정적화(Static-like) 필요성:** 외부 CDN 스크립트를 주입하여 웹 UI를 구성할 때는 패키지 빌드 시점의 의존성 잠금(package-lock.json 등)과 동일하게 반드시 명확한 패치 버전까지 고정하여 잠금 처리를 해야 외부 서버 변경에 따른 런타임 크래시를 방어할 수 있습니다.
-* **배포 환경 성능 최적화:** React 등의 웹 라이브러리는 서비스 기동 전에 항상 프로덕션 빌드(production.min.js)가 적용되어 있는지 점검하여 런타임 성능 및 콘솔 품질을 확보해야 합니다.
+## 🧪 테스트 결과
+- Pytest 로컬 실행: `tests/test_convention_and_architecture.py` 2/2 PASSED.

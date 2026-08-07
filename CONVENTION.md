@@ -1,6 +1,45 @@
 # 📜 AI Video Analyst Project Coding Convention
 
-본 문서는 프로젝트의 유지보수성, 가독성 및 확장성을 극대화하기 위해 Google과 Meta의 엔지니어링 표준을 바탕으로 작성된 코드 규칙입니다. 모든 기여자는 본 규칙을 엄격히 준수해야 합니다.
+본 문서는 프로젝트의 유지보수성, 가독성, 확장성 및 **LLM 바이브코딩(Vibe Coding) 시 발생 가능한 환각(Hallucination) 방지**를 위해 Google과 Meta의 엔지니어링 표준을 바탕으로 작성된 코드 및 아키텍처 규칙입니다. 모든 기여자와 AI 에이전트는 본 규칙을 엄격히 준수해야 합니다.
+
+---
+
+## 0. Development & Target Environment (개발 및 타깃 환경)
+
+본 프로젝트의 개발 및 배포 표준 타깃 환경은 다음과 같습니다. OS 관련 구문 작성 시 호환성에 각별히 유의해야 합니다.
+
+- **Primary OS**: **Linux (Ubuntu / POSIX compliant)** 및 **macOS (Apple Silicon)**
+- **Python Version**: Python 3.12+
+- **Path Separation**: 파일 경로 처리 시 항상 `pathlib.Path` 또는 POSIX 스타일 (`/`)을 사용합니다. (Windows 전용 `\\` 하드코딩 또는 OS 특정 종속 구문 금지)
+- **Multiprocessing**: Linux 환경에서는 `fork`, macOS/Windows 환경에서는 `spawn` 모드가 적용되므로 CUDA context 생성 및 sub-process 관리에 주의해야 합니다.
+
+---
+
+## 0.1 Directory Structure & Architectural Blueprint (디렉터리 구조 및 아키텍처 명세)
+
+프로젝트 내 코드와 모듈은 아래 계층 분리 원칙(Separation of Concerns, SoC)을 반드시 준수하여 배치해야 합니다.
+
+```
+summarize_video/
+├── app/                      # [Core App] FastAPI 웹 애플리케이션 및 계층형 아키텍처
+│   ├── api/routers/          # HTTP REST API 엔드포인트 라우터 (Media, Tasks, History 등)
+│   ├── application/          # 비즈니스 오케스트레이션 및 파이프라인 (pipeline_runner.py, worker.py 등)
+│   └── core/                 # 의존성 주입(DI Container), 경로 설정(paths.py), 시스템 바인딩
+├── services/                 # [Domain Services] 순수 비즈니스 로직 / 단일 기능 수행 전용 모듈
+│   ├── transcriber.py        # STT (Whisper) 자막 추출 로직
+│   ├── summarizer.py         # LLM (Gemini/Claude) 요약 로직
+│   ├── clipper.py            # FFmpeg 하이라이트 영상 클리핑 로직
+│   └── ...
+├── tests/                    # [Testing Protocol] Pytest 기반 자동화 테스트 코드 (Git 수록 필수)
+├── docs/archive/             # [Archived Docs] 아카이빙된 레거시 분석/기획 마크다운 문서
+└── static/                   # [Static Assets] 정적 파일 및 로그/결과 산출물 (Git 추적 제외)
+```
+
+### 계층별 개발 규칙:
+1. **API 계층 (`app/api/routers/`)**: HTTP 요청 처리 및 입력 검증(`app/schemas/`)만 담당하며, 직접 비즈니스 로직을 구현하지 않고 Application/Service 계층을 호출합니다.
+2. **파이프라인 계층 (`app/application/`)**: 여러 Domain Service들을 순차적/비동기적으로 연결하여 전체 영상 요약 작업을 실행하고 진행 상황(`progress.py`)을 추적합니다.
+3. **도메인 서비스 계층 (`services/`)**: 외부에 의존하지 않는 독립적인 단일 비즈니스 로직(STT, 요약, 클리핑 등)을 제공합니다.
+4. **아카이브 문서 (`docs/archive/`)**: 레거시 PRD, 기획서, 호환성 분석 문서는 이 폴더에 격리하여 LLM 탐색 시 지식 오염을 방지합니다.
 
 ---
 
@@ -80,5 +119,5 @@ FastAPI와 현대적 JS의 핵심은 비동기 처리입니다.
 3.  **Separation of Concerns (SoC)**: 비즈니스 로직(Services), 데이터 접근(Models), 인터페이스(API/UI)를 엄격히 분리합니다.
 
 ---
-**최종 업데이트**: 2025-12-26
-**작성자**: AI Video Analyst Team (Gemini CLI)
+**최종 업데이트**: 2026-08-07
+**작성자**: AI Video Analyst Team
