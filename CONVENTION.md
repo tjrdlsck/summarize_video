@@ -1,6 +1,6 @@
 # 📜 AI Video Analyst Project Coding Convention
 
-본 문서는 프로젝트의 유지보수성, 가독성, 확장성 및 **LLM 바이브코딩(Vibe Coding) 시 발생 가능한 환각(Hallucination) 방지**를 위해 Google과 Meta의 엔지니어링 표준을 바탕으로 작성된 코드 및 아키텍처 규칙입니다. 모든 기여자와 AI 에이전트는 본 규칙을 엄격히 준수해야 합니다.
+본 문서는 프로젝트의 유지보수성, 가독성, 확장성 및 **Gemini 3.6 Flash / LLM 에이전트 바이브 코딩(Vibe Coding) 시 발생 가능한 환각(Hallucination) 방지**를 위해 작성된 표준 아키텍처 및 개발 수칙입니다. 모든 기여자와 AI 에이전트는 본 규칙을 엄격히 준수해야 합니다.
 
 ---
 
@@ -56,81 +56,30 @@ summarize_video/
 
 ---
 
-## 1. Python Style Guide (PEP 8 & Google Style)
+## 0.3 Gemini 3.6 Agentic Vibe Coding Rules (LLM 에이전트 바이브 코딩 전용 수칙)
 
-Python 코드는 가독성이 최우선입니다. $O(1)$의 가독성을 목표로 합니다.
+Gemini 3.6 Flash 모델 및 AI 에이전트가 코드를 작성하거나 리팩토링할 때 필수 적용되는 강력한 실행 제약 조건(Strict Guardrails)입니다.
 
-### 1.1 명명 규칙 (Naming Convention)
-- **Classes**: `PascalCase` (예: `VideoSummarizer`)
-- **Functions & Variables**: `snake_case` (예: `run_analysis_pipeline`, `video_path`)
-- **Constants**: `UPPER_SNAKE_CASE` (예: `MAX_RETRIES`, `DEFAULT_MODEL_NAME`)
-- **Private Members**: Leading underscore 사용 (예: `_internal_process`)
-
-### 1.2 타입 힌팅 (Type Hinting)
-모든 함수 정의에는 반드시 Python 3.9+의 Type Hinting을 적용합니다. 이는 정적 분석을 통해 버그를 사전에 방지하기 위함입니다.
-```python
-def process_data(input_path: str, threshold: float = 0.5) -> dict[str, Any]:
-    ...
-```
-
-### 1.3 문서화 (Docstrings)
-함수와 클래스에는 **Google Style Docstring**을 작성합니다.
-```python
-def summarize(self, segments: list[dict], video_filename: str) -> dict:
-    """Gemini API를 사용하여 영상 자막을 요약합니다.
-
-    Args:
-        segments: 분석된 자막 세그먼트 리스트.
-        video_filename: 원본 영상 파일명.
-
-    Returns:
-        요약 결과와 챕터 정보가 담긴 딕셔너리.
-    """
-```
+1. **축약 및 생략 전면 금지 (Anti-Lazy Coding Directive)**:
+   - 코드 생성 시 `...`, `# rest of code`, `# 기존 코드와 동일` 등 임의의 줄임표나 생략 코드를 반환하는 것을 엄격히 금지합니다. 항상 실행 가능한 전체 코드(Full Code)를 제공해야 합니다.
+2. **로그 기반 실증 진단 (Log-First Empirical Protocol)**:
+   - 오류 발생 시 짐작이나 추측으로 코드를 수정하지 않습니다. 반드시 런타임 로그 및 스택 트레이스(Stack Trace)를 전량 조회하고 근본 원인(Root Cause)을 분석한 후 수정을 진행합니다.
+   - 예외 상황을 은폐하는 소극적 처리(Silent `try...except`, Dummy 0-byte/Fallback 데이터 반환)를 금지합니다.
+3. **실증적 테스트 기반 완결성 (Empirical Test-Driven Verification)**:
+   - 파일 수정 후 반드시 `pytest` 테스트 또는 빌드 검증 명령어를 로컬에서 직접 실행하여 $100\%$ 성공을 확인하기 전까지는 작업을 완료(Done)라 선언할 수 없습니다.
+4. **엄격한 타입 안전성 (Strict Type Safety & Pydantic v2)**:
+   - Python 3.12+ 명시적 Type Hinting과 Pydantic v2 기반 스키마 검증을 적용하여 런타임 타입 오류 및 JSON 파싱 에러를 사전에 방지합니다.
+5. **문자 단위 정확한 매칭 (Verbatim Exact Matching)**:
+   - 기존 코드 수정 시 3줄 이상의 변경되지 않는 선/후 맥락을 유지하여 비동기 변경 충돌 및 구문 파괴를 방지합니다.
 
 ---
 
-## 2. JavaScript & Frontend Convention
+## 1. Core Engineering Principles
 
-웹 프론트엔드는 모던 ES6+ 문법을 따르며, 선언적인(Declarative) 코드 작성을 지향합니다.
-
-- **Variable Declarations**: `var` 사용 금지. `const`를 기본으로 하되, 재할당이 필요한 경우에만 `let` 사용.
-- **Arrow Functions**: 익명 함수나 콜백에서는 화살표 함수(`=>`) 사용 권장.
-- **DOM Access**: Direct DOM 조작을 최소화하고, 데이터 중심의 렌더링을 지향.
-- **Naming**: `camelCase` 사용 (예: `videoPlayer`, `handleButtonClick`).
-
----
-
-## 3. Asynchronous Programming (Async/Await)
-
-FastAPI와 현대적 JS의 핵심은 비동기 처리입니다.
-- **Non-blocking**: I/O 바운드 작업(API 호출, 파일 읽기/쓰기)은 반드시 `async`와 `await`를 사용합니다.
-- **Error Handling**: 모든 비동기 호출은 `try...except` (Python) 또는 `try...catch` (JS) 블록으로 감싸서 예외 상황에 대비합니다.
-
----
-
-## 4. Git Commit Message (Conventional Commits)
-
-커밋 메시지는 작업의 의도를 명확히 전달해야 합니다. 아래의 형식을 따릅니다.
-
-`type: description`
-
-- **feat**: 새로운 기능 추가
-- **fix**: 버그 수정
-- **docs**: 문서 수정 (CONVENTION.md, README.md 등)
-- **style**: 코드 포맷팅, 세미콜론 누락 등 (로직 변경 없음)
-- **refactor**: 코드 리팩토링
-- **test**: 테스트 코드 추가
-- **chore**: 빌드 업무, 패키지 매니저 설정 등
-
----
-
-## 5. Software Engineering Principles
-
-1.  **DRY (Don't Repeat Yourself)**: 중복되는 로직은 반드시 함수나 클래스로 추상화합니다.
-2.  **KISS (Keep It Simple, Stupid)**: 복잡한 로직보다는 명확하고 단순한 로직을 선호합니다.
-3.  **Separation of Concerns (SoC)**: 비즈니스 로직(Services), 데이터 접근(Models), 인터페이스(API/UI)를 엄격히 분리합니다.
+1. **비동기 기본 원칙 (Async-First I/O)**: FastAPI 및 I/O 바운드 작업(네트워크 API 호출, 소켓, 파일 IO)은 반드시 `async/await` non-blocking 패턴으로 작성합니다.
+2. **단일 책임 원칙 (Separation of Concerns)**: 비즈니스 로직(`services/`), 데이터 스키마 (`app/schemas/`), 라우터 엔드포인트(`app/api/`)의 책임을 엄격히 구분합니다.
+3. **Conventional Commits**: 커밋 메시지는 한국어로 `[feat]`, `[fix]`, `[docs]`, `[refactor]`, `[test]`, `[chore]` 커밋 타입을 준수하여 작성합니다.
 
 ---
 **최종 업데이트**: 2026-08-07
-**작성자**: AI Video Analyst Team
+**작성자**: AI Video Analyst Team (Gemini 3.6 Flash Optimization)
