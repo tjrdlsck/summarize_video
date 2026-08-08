@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime
 from functools import partial
@@ -618,10 +619,27 @@ class PipelineRunner:
                     raise Exception("Task cancelled")
 
                 current_base_progress = phase_start + (index * slot_weight)
+                clip_start_time = time.time()
 
                 def ffmpeg_callback(local_percent: int) -> None:
                     global_progress = int(current_base_progress + (local_percent / 100.0) * slot_weight)
-                    task_manager.update_progress(task_id, global_progress, f"숏츠 {index + 1}/{len(candidates)} 제작 중... ({local_percent}%)")
+                    elapsed = time.time() - clip_start_time
+                    
+                    if local_percent > 3:
+                        eta_seconds = int((elapsed / local_percent) * (100 - local_percent))
+                        if eta_seconds > 60:
+                            m, s = divmod(eta_seconds, 60)
+                            eta_str = f"남은 시간 약 {m}분 {s}초"
+                        else:
+                            eta_str = f"남은 시간 약 {eta_seconds}초"
+                    else:
+                        eta_str = "예상 시간 계산 중..."
+
+                    task_manager.update_progress(
+                        task_id, 
+                        global_progress, 
+                        f"숏츠 {index + 1}/{len(candidates)} GPU 렌더링 중... ({local_percent}% | {eta_str})"
+                    )
 
                 safe_title = re.sub(r"[\\/*?:\"<>|]", "", candidate["title"]).replace(" ", "_")
                 video_filename = f"AI_Shorts_{index + 1}_{safe_title}.mp4"

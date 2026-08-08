@@ -27,7 +27,7 @@ async def test_merge_segments_cuda_input_opts():
     clipper = VideoClipper()
     segments = [{"start": 10.0, "end": 20.0}]
 
-    with patch.object(clipper, "_is_cuda_hwaccel_available", return_value=True), \
+    with patch.object(clipper, "_is_nvenc_available", return_value=True), \
          patch("asyncio.create_subprocess_exec") as mock_exec:
         
         mock_proc = MagicMock()
@@ -41,6 +41,5 @@ async def test_merge_segments_cuda_input_opts():
         # subprocess_exec에 전달된 명령어 args 검증
         args = mock_exec.call_args[0]
         cmd_str = " ".join(args)
-        assert "-hwaccel cuda" in cmd_str
         assert "-c:v h264_nvenc" in cmd_str
         assert "-preset p2" in cmd_str

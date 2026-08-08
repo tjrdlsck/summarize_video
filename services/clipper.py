@@ -107,11 +107,7 @@ class VideoClipper:
 
         # [FFmpeg Encoder & Quality Configuration]
         input_opts = []
-        if self._is_cuda_hwaccel_available():
-            input_opts = ["-hwaccel", "cuda"]
-            encoder = "h264_nvenc"
-            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
-        elif self._is_nvenc_available():
+        if self._is_nvenc_available():
             encoder = "h264_nvenc"
             quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
         elif sys.platform == 'darwin':
@@ -442,11 +438,7 @@ class VideoClipper:
 
         # [FFmpeg Encoder & Quality Configuration]
         input_opts = []
-        if self._is_cuda_hwaccel_available():
-            input_opts = ["-hwaccel", "cuda"]
-            encoder = "h264_nvenc"
-            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
-        elif self._is_nvenc_available():
+        if self._is_nvenc_available():
             encoder = "h264_nvenc"
             quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
         elif sys.platform == 'darwin':

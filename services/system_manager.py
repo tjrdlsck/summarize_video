@@ -116,6 +116,9 @@ class ConfigManager:
             "gemma-3-12b-it"
         ]
         
+        from dotenv import load_dotenv
+        load_dotenv()
+        
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:
             return default_models

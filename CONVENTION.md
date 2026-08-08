@@ -6,12 +6,17 @@
 
 ## 0. Development & Target Environment (개발 및 타깃 환경)
 
-본 프로젝트의 개발 및 배포 표준 타깃 환경은 다음과 같습니다. OS 관련 구문 작성 시 호환성에 각별히 유의해야 합니다.
+본 프로젝트의 개발 및 배포 표준 타깃 환경은 다음과 같습니다. OS 관련 구문 및 셸 명령어 작성 시 호환성과 Windows 환경에 각별히 유의해야 합니다.
 
-- **Primary OS**: **Linux (Ubuntu / POSIX compliant)** 및 **macOS (Apple Silicon)**
+- **Primary OS**: **Windows (Win32 / PowerShell)** (Linux / macOS cross-platform compatible)
 - **Python Version**: Python 3.12+
-- **Path Separation**: 파일 경로 처리 시 항상 `pathlib.Path` 또는 POSIX 스타일 (`/`)을 사용합니다. (Windows 전용 `\\` 하드코딩 또는 OS 특정 종속 구문 금지)
-- **Multiprocessing**: Linux 환경에서는 `fork`, macOS/Windows 환경에서는 `spawn` 모드가 적용되므로 CUDA context 생성 및 sub-process 관리에 주의해야 합니다.
+- **Encoding**: 파일 생성 및 읽기/쓰기 시 항상 `UTF-8` 인코딩을 명시합니다. (PowerShell 사용 시 `Get-Content -Encoding UTF8` / `Out-File -Encoding UTF8` 사용)
+- **Path Separation**: Python 코드 내 파일 경로 처리 시 항상 `pathlib.Path` 또는 `os.path.join`을 사용합니다. (하드코딩 경로 구분자 지양)
+- **Shell & Commands (PowerShell)**:
+  - 파일 삭제 시 `rm -rf` 대신 `Remove-Item -Recurse -Force` 사용
+  - 환경변수 설정 시 `export VAR=value` 대신 `$env:VAR='value'` 사용
+  - 백그라운드 작업 시 `&` 대신 `Start-Process -NoNewWindow` 또는 `Start-Job` 사용
+- **Multiprocessing**: Windows 환경에서는 `spawn` 프로세스 시작 모드가 기본 적용되므로 `if __name__ == '__main__':` 모듈 엔트리포인트 가드가 필수적이며, CUDA context 생성 및 sub-process 관리에 유의해야 합니다.
 
 ---
 

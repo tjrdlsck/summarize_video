@@ -463,7 +463,9 @@ class ShortsMaker:
                     continue
 
                 validated_segments = sorted(validated_segments, key=lambda x: x["start"])
-                if current_total_duration < min_duration:
+                # 15초 이상이면 숏츠로서 유효하도록 하한선 완화 (최소 15초)
+                effective_min = max(15.0, min_duration * 0.5)
+                if current_total_duration < effective_min:
                     continue
 
                 overlap_segments = self._collect_candidate_transcripts(annotated_transcripts, validated_segments)
