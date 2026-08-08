@@ -43,6 +43,7 @@ function App() {
     const [isUpdating, setIsUpdating] = useState(false);
     const [restartStatus, setRestartStatus] = useState({ pending: false, remaining_seconds: null, reason: null });
     const restartAlertShownRef = useRef(false);
+    const notifiedFailedTasksRef = useRef(new Set());
 
     // [New] Settings State
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -443,7 +444,17 @@ function App() {
     const fetchActiveTasks = async () => {
         try {
             const res = await axios.get(`/api/tasks?t=${Date.now()}`);
-            setActiveTasks(res.data);
+            const newTasks = res.data || [];
+            
+            newTasks.forEach(task => {
+                if (task.status === 'failed' && !notifiedFailedTasksRef.current.has(task.task_id)) {
+                    notifiedFailedTasksRef.current.add(task.task_id);
+                    const cleanName = typeof normalizeLegacyTitle === 'function' ? normalizeLegacyTitle(task.filename) : task.filename;
+                    alert(`⚠️ 작업 실패 안내 (${cleanName}):\n${task.error || task.message || '작업 처리 중 오류가 발생했습니다.'}`);
+                }
+            });
+
+            setActiveTasks(newTasks);
             fetchRestartStatus();
         } catch (err) { console.error(err); }
     };
