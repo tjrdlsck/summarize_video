@@ -10,3 +10,4 @@ build/
 *.log
 *.lock
 coverage/
+docs/archive/

@@ -1,23 +1,7 @@
-# 작업 태스크 관리 (Task Tracker)
+# Task List: 업로드 100% 대기 해소 및 청크 파일 병합 고속화 구현
 
-## 📌 이슈 및 브랜치 정보
-- **이슈:** [Bug] 동영상 시간 포맷 오류 (hh:mm:ss 미적용) ([#111](https://github.com/tjrdlsck/summarize_video/issues/111))
-- **대상 브랜치:** `feat/#111` (기준 브랜치: `develop`)
-
-## 🛠️ 작업 현황
-- [x] `.ignore` 파일 생성 및 설정
-- [x] 원격 저장소 확인 (`git remote -v`)
-- [x] GitHub 이슈 생성 (`gh issue create`)
-- [x] 로컬 `develop` 브랜치 풀 및 피처 브랜치 `feat/#111` 생성 및 체크아웃
-- [x] 동영상 시간 포맷 관련 코드 탐색 및 수정 (`static/js/app.js` 내 `formatTimeSimple`)
-- [x] 로컬 테스트 수행 (`tests/` 폴더 내 테스트 스크립트 실행 및 로그 저장)
-- [x] 디버깅 로그 기록 및 `walkthrough.md` 반영
-- [x] 버전 및 환경 의존성에 따른 치명적 장애 예상 지점 분석 ([version_compatibility_analysis.md](file:///home/radi/cli/summarize_video/version_compatibility_analysis.md))
-- [x] NumPy 버전 1.26.4 다운그레이드 패치 (`requirements.txt`, `requirements_win.txt`)
-- [x] `yt-dlp` 업그레이드 권한 샌드박스 우회 폴백 적용 (`services/downloader.py` 내 `--user` 재시도 추가)
-- [x] 패치 후 로컬 전체 테스트 재수행 및 통과 검증
-- [x] 프론트엔드 외부 라이브러리 CDN 버전 고정 누락 진단 및 보고서 작성 ([frontend_version_compatibility_analysis.md](file:///home/radi/cli/summarize_video/frontend_version_compatibility_analysis.md))
-- [x] `templates/index.html` CDN 외부 라이브러리(React, ReactDOM, Babel, Marked, Axios) 버전 정밀 고정
-- [x] React 개발용 빌드 -> Production 배포용 빌드로 최적화 전환
-- [x] 코드 및 문서 커밋 & 푸시 (`git push origin feat/#111`)
-- [x] PR 생성 완료 (PR [#112](https://github.com/tjrdlsck/summarize_video/pull/112))
+- [x] 구현 계획서 수립 및 사용자 승인 (`implementation_plan.md`) <!-- id: 0 -->
+- [x] `services/downloader.py`: `finalize_upload` 비동기 스레드 풀 격리 및 청크 병합 최적화 <!-- id: 1 -->
+- [x] `static/js/app.js`: `handleFileUpload` 내 단계별 상태 문구(`uploadStatusText`) 업데이트 로직 도입 <!-- id: 2 -->
+- [x] `static/js/components.js`: `VideoUploadModal` 프로그레스 영역 및 버튼에 단계별 실시간 안내 문구 적용 <!-- id: 3 -->
+- [x] 단위/통합 테스트 작성 및 검증 (`tests/test_chunked_upload_finalizer.py` 및 전체 pytest 57/57 Passed 통과) <!-- id: 4 -->

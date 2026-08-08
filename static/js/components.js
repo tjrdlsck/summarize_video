@@ -49,6 +49,21 @@ window.normalizeLegacyTitle = (title) => {
 
 // [Sub Component] Task Monitor Widget (Upgraded v2)
 window.TaskMonitor = function({ tasks, onCancel }) {
+    React.useEffect(() => {
+        if (!tasks || tasks.length === 0) return;
+        const autoDismissible = tasks.filter(t => 
+            (t.status === 'failed' || t.status === 'canceled' || (t.status === 'completed' && t.type !== 'clip_export')) && t.finished_at
+        );
+        const timers = autoDismissible.map(t => {
+            const elapsedMs = Date.now() - (t.finished_at * 1000);
+            const remainingMs = Math.max(0, 10000 - elapsedMs);
+            return setTimeout(() => {
+                onCancel(t.task_id, true);
+            }, remainingMs);
+        });
+        return () => timers.forEach(timer => clearTimeout(timer));
+    }, [tasks, onCancel]);
+
     if (!tasks || tasks.length === 0) return null;
 
     const dismissibleTasks = tasks.filter(t => t.status === 'failed' || t.status === 'completed' || t.status === 'canceled');
@@ -439,7 +454,7 @@ window.SettingsModal = function({ isOpen, onClose }) {
 };
 
 // [New Component] Video Upload & Batch Analysis Modal
-window.VideoUploadModal = function({ isOpen, onClose, onSubmit, uploadProgress, isUploading }) {
+window.VideoUploadModal = function({ isOpen, onClose, onSubmit, uploadProgress, uploadStatusText, isUploading }) {
     const [tab, setTab] = useState('url'); // 'url' or 'file'
     const [urlInput, setUrlInput] = useState("");
     const [fileInput, setFileInput] = useState(null);
@@ -661,7 +676,7 @@ window.VideoUploadModal = function({ isOpen, onClose, onSubmit, uploadProgress, 
                         className="flex-[2] py-3 text-sm font-bold text-white bg-indigo-600 rounded-2xl hover:bg-indigo-700 transition shadow-lg shadow-indigo-200 disabled:opacity-50 flex items-center justify-center gap-2"
                     >
                         {isUploading ? (
-                            <><span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></span> 등록 중...</>
+                            <><span className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></span> {uploadStatusText || '등록 중...'}</>
                         ) : '🚀 분석 시작'}
                     </button>
                 </div>

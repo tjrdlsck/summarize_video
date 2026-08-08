@@ -13,10 +13,12 @@ class ConfigManager:
     CONFIG_PATH = "data/config.json"
     DEFAULT_CONFIG = {
         "models": {
-            "summarizer": "gemini-2.5-flash",
+            "summarizer_map": "gemini-3.1-flash-lite",
+            "summarizer_reduce": "gemini-3.5-flash-lite",
+            "summarizer": "gemini-3.5-flash-lite",
             "planner": "gemini-3.1-flash-lite",
-            "refiner": "gemma-4-26b-a4b-it",
-            "shorts": "gemini-3.1-flash-lite",
+            "shorts": "gemini-3.5-flash-lite",
+            "refiner": "gemini-3.1-flash-lite",
             "whisper": "mlx-community/whisper-large-v3-turbo-q4"
         }
     }
@@ -113,6 +115,9 @@ class ConfigManager:
             "gemma-3-4b-it",
             "gemma-3-12b-it"
         ]
+        
+        from dotenv import load_dotenv
+        load_dotenv()
         
         api_key = os.getenv("GOOGLE_API_KEY")
         if not api_key:

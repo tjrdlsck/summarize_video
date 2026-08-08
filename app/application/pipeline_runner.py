@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import time
 import uuid
 from datetime import datetime
 from functools import partial
@@ -30,6 +31,24 @@ class PipelineRunner:
 
     def __init__(self, container: AppContainer) -> None:
         self.container = container
+
+    def _resolve_video_path(self, req_filename: str, summary_data: dict = None) -> str:
+        """보관 중인 동영상 파일 경로를 스마트하게 탐색하고 없으면 FileNotFoundError를 발생시킵니다."""
+        candidates = [os.path.join(VIDEOS_DIR, req_filename)]
+        if summary_data and summary_data.get("video_source"):
+            candidates.insert(0, os.path.join(VIDEOS_DIR, summary_data["video_source"]))
+
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+
+        if os.path.exists(VIDEOS_DIR):
+            clean_name = re.sub(r"^[0-9a-fA-F]{8}_", "", req_filename)
+            for fname in os.listdir(VIDEOS_DIR):
+                if fname == req_filename or clean_name in fname:
+                    return os.path.join(VIDEOS_DIR, fname)
+
+        raise FileNotFoundError(f"원본 영상 파일('{req_filename}')을 찾을 수 없습니다. 대시보드에서 영상을 다시 업로드해 주세요.")
 
     async def run_transcription_pipeline(self, task_id: str, req: TranscriptionRequest) -> None:
         """영상 다운로드 및 자막 생성(STT) 파이프라인."""
@@ -217,7 +236,7 @@ class PipelineRunner:
         except TaskCancelledError:
             print(f"[{task_id}] Task Cancelled by User.")
             cleanup_files(str(video_filename) if video_filename else None)
-            task_manager.fail_task(task_id, "취소됨")
+            task_manager.request_cancel(task_id)
 
         except Exception as error:
             print(f"[{task_id}] Transcription Failed: {error}")
@@ -270,7 +289,7 @@ class PipelineRunner:
 
         except TaskCancelledError:
             print(f"[{task_id}] Summary Task Cancelled.")
-            task_manager.fail_task(task_id, "취소됨")
+            task_manager.request_cancel(task_id)
         except Exception as error:
             print(f"[{task_id}] Summary Failed: {error}")
             task_manager.fail_task(task_id, str(error), exception=error)
@@ -287,8 +306,8 @@ class PipelineRunner:
         output_path = os.path.join(RESULTS_DIR, f"{base_name}_blog_view.json")
 
         try:
-            planner_model = ConfigManager.get_model("planner")
-            task_manager.update_progress(task_id, 0, f"블로그 구조 설계 중 ({planner_model})...")
+            refiner_model = ConfigManager.get_model("refiner")
+            task_manager.update_progress(task_id, 0, f"블로그 작성 준비 중 ({refiner_model})...")
 
             if not os.path.exists(transcript_path):
                 raise FileNotFoundError("자막 데이터가 없습니다.")
@@ -298,23 +317,52 @@ class PipelineRunner:
 
             loop = asyncio.get_running_loop()
 
-            blog_plan = await loop.run_in_executor(
-                None,
-                partial(
-                    summarizer.plan_blog_structure,
-                    segments,
-                    req.filename,
-                    status_callback=lambda msg: loop.call_soon_threadsafe(task_manager.update_progress, task_id, 10, msg),
-                ),
-            )
+            summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
+            blog_title = "Untitled Blog Post"
+            temp_chapters = []
 
-            if "error" in blog_plan:
-                raise Exception(blog_plan["error"])
+            if os.path.exists(summary_path):
+                with open(summary_path, "r", encoding="utf-8") as file:
+                    summary_data = json.load(file)
+                    blog_title = summary_data.get("blog_title") or summary_data.get("video_title") or "Untitled Blog Post"
+                    raw_chaps = summary_data.get("chapters", [])
+                    for chap in raw_chaps:
+                        s_time = chap.get("time", {}).get("start", 0.0)
+                        e_time = chap.get("time", {}).get("end", 0.0)
+                        # Find start_id and end_id from segments matching timestamps
+                        s_id = 1
+                        e_id = len(segments)
+                        for seg in segments:
+                            if seg["start"] <= s_time <= seg["end"]:
+                                s_id = seg["id"]
+                            if seg["start"] <= e_time <= seg["end"]:
+                                e_id = seg["id"]
+                        temp_chapters.append({
+                            "title": chap["title"],
+                            "start_id": s_id,
+                            "end_id": e_id,
+                            "focus_point": chap.get("summary", "")
+                        })
 
-            blog_title = blog_plan.get("blog_title", "Untitled Blog Post")
-            temp_chapters = blog_plan.get("chapters", [])
+            if not temp_chapters:
+                planner_model = ConfigManager.get_model("planner")
+                task_manager.update_progress(task_id, 5, f"블로그 구조 설계 중 ({planner_model})...")
+                blog_plan = await loop.run_in_executor(
+                    None,
+                    partial(
+                        summarizer.plan_blog_structure,
+                        segments,
+                        req.filename,
+                        status_callback=lambda msg: loop.call_soon_threadsafe(task_manager.update_progress, task_id, 10, msg),
+                    ),
+                )
+                if "error" in blog_plan:
+                    raise Exception(blog_plan["error"])
+
+                blog_title = blog_plan.get("blog_title", "Untitled Blog Post")
+                temp_chapters = blog_plan.get("chapters", [])
+
             total_chaps = len(temp_chapters)
-
             if not temp_chapters:
                 raise ValueError("생성된 블로그 구조가 없습니다.")
 
@@ -342,6 +390,7 @@ class PipelineRunner:
                         raw_text="",
                         chapter_title=chapter["title"],
                         segments=chapter_segments,
+                        content_type=req.content_type,
                     ),
                 )
 
@@ -377,7 +426,7 @@ class PipelineRunner:
 
         except TaskCancelledError:
             print(f"[{task_id}] Blog Task Cancelled.")
-            task_manager.fail_task(task_id, "취소됨")
+            task_manager.request_cancel(task_id)
         except Exception as error:
             print(f"[{task_id}] Blog Generation Failed: {error}")
             task_manager.fail_task(task_id, str(error), exception=error)
@@ -392,9 +441,7 @@ class PipelineRunner:
         try:
             task_manager.update_progress(task_id, 0, "클립 생성 준비...")
 
-            video_path = os.path.join(VIDEOS_DIR, req.filename)
-            if not os.path.exists(video_path):
-                raise FileNotFoundError(f"Video file not found: {req.filename}")
+            video_path = self._resolve_video_path(req.filename)
 
             if req.end_time <= req.start_time:
                 raise ValueError(f"잘못된 구간 설정: 종료 시간({req.end_time})이 시작 시간({req.start_time})보다 빠르거나 같습니다.")
@@ -513,6 +560,8 @@ class PipelineRunner:
 
             transcript_path = os.path.join(RESULTS_DIR, f"{base_name}_transcript.json")
             srt_path = os.path.join(RESULTS_DIR, f"{base_name}.srt")
+            vtt_path = os.path.join(RESULTS_DIR, f"{base_name}.vtt")
+            effective_sub_path = srt_path if os.path.exists(srt_path) else (vtt_path if os.path.exists(vtt_path) else None)
             summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
 
             if not os.path.exists(transcript_path):
@@ -523,12 +572,14 @@ class PipelineRunner:
 
             video_title = req.filename
             chapters = None
+            map_notes = None
             effective_content_type = req.content_type
             if os.path.exists(summary_path):
                 with open(summary_path, "r", encoding="utf-8") as file:
                     summary_data = json.load(file)
                     video_title = summary_data.get("video_title", req.filename)
                     chapters = summary_data.get("chapters")
+                    map_notes = summary_data.get("map_notes")
                     effective_content_type = summary_data.get("content_type", effective_content_type)
 
             if task_manager.is_cancelled(task_id):
@@ -551,6 +602,7 @@ class PipelineRunner:
                     humor_weight=req.humor_weight,
                     keep_original_tone=req.keep_original_tone,
                     speaker_mode=req.speaker_mode,
+                    map_notes=map_notes,
                 ),
             )
 
@@ -561,17 +613,34 @@ class PipelineRunner:
             phase_start, phase_end = 30, 90
             slot_weight = (phase_end - phase_start) / len(candidates)
             results = []
-            video_path = os.path.join(VIDEOS_DIR, req.filename)
+            video_path = self._resolve_video_path(req.filename, summary_data if 'summary_data' in locals() else None)
 
             for index, candidate in enumerate(candidates):
                 if task_manager.is_cancelled(task_id):
                     raise Exception("Task cancelled")
 
                 current_base_progress = phase_start + (index * slot_weight)
+                clip_start_time = time.time()
 
                 def ffmpeg_callback(local_percent: int) -> None:
                     global_progress = int(current_base_progress + (local_percent / 100.0) * slot_weight)
-                    task_manager.update_progress(task_id, global_progress, f"숏츠 {index + 1}/{len(candidates)} 제작 중... ({local_percent}%)")
+                    elapsed = time.time() - clip_start_time
+                    
+                    if local_percent > 3:
+                        eta_seconds = int((elapsed / local_percent) * (100 - local_percent))
+                        if eta_seconds > 60:
+                            m, s = divmod(eta_seconds, 60)
+                            eta_str = f"남은 시간 약 {m}분 {s}초"
+                        else:
+                            eta_str = f"남은 시간 약 {eta_seconds}초"
+                    else:
+                        eta_str = "예상 시간 계산 중..."
+
+                    task_manager.update_progress(
+                        task_id, 
+                        global_progress, 
+                        f"숏츠 {index + 1}/{len(candidates)} GPU 렌더링 중... ({local_percent}% | {eta_str})"
+                    )
 
                 safe_title = re.sub(r"[\\/*?:\"<>|]", "", candidate["title"]).replace(" ", "_")
                 video_filename = f"AI_Shorts_{index + 1}_{safe_title}.mp4"
@@ -580,7 +649,7 @@ class PipelineRunner:
                     video_path,
                     candidate["segments"],
                     output_filename=video_filename,
-                    sub_input_path=srt_path,
+                    sub_input_path=effective_sub_path,
                     progress_callback=ffmpeg_callback,
                     task_manager=task_manager,
                     task_id=task_id,

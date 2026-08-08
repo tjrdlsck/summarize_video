@@ -42,6 +42,23 @@ class VideoClipper:
         except Exception:
             return False
 
+    def _is_cuda_hwaccel_available(self):
+        """
+        NVIDIA CUDA 디코딩 가속(-hwaccel cuda)이 지원되는지 확인합니다.
+        """
+        if not self._is_nvenc_available():
+            return False
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hwaccels"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            return "cuda" in result.stdout
+        except Exception:
+            return False
+
     def _seconds_to_time_str(self, seconds, separator=","):
         """
         초(float)를 SRT/VTT 시간 포맷(HH:MM:SS,mmm)으로 변환
@@ -89,32 +106,29 @@ class VideoClipper:
         audio_filter = f"afade=t=in:st=0:d={fade_duration_in},afade=t=out:st={duration - fade_duration_out}:d={fade_duration_out}"
 
         # [FFmpeg Encoder & Quality Configuration]
-        # OS 및 그래픽 카드 가속 여부에 따른 인코더 설정
+        input_opts = []
         if self._is_nvenc_available():
-            # NVIDIA NVENC 가속 사용 (Windows / Linux 공용)
             encoder = "h264_nvenc"
-            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
         elif sys.platform == 'darwin':
-            # macOS: Apple Silicon 가속 사용
             encoder = "h264_videotoolbox"
             quality_opts = ["-q:v", "65"]
         else:
-            # Linux 및 기타 OS: CPU 기반 범용 libx264 사용
             encoder = "libx264"
-            quality_opts = ["-crf", "23", "-preset", "medium"]
+            quality_opts = ["-crf", "23", "-preset", "superfast"]
 
         # [FFmpeg Command Configuration]
-        cmd = [
-            "ffmpeg", 
-            "-nostdin",
+        cmd = ["ffmpeg", "-nostdin"]
+        cmd.extend(input_opts)
+        cmd.extend([
             "-ss", str(start_sec),
             "-t", str(duration),
             "-i", input_path,
-            "-filter_complex", f"[0:a]{audio_filter}[af]", # 오디오 필터 적용
-            "-map", "0:v", "-map", "[af]",                 # 비디오는 그대로, 오디오는 필터 거친 것 사용
-            "-c:v", encoder,                               # 자동 선택된 인코더
-        ]
-        cmd.extend(quality_opts)                           # 품질 옵션 추가
+            "-filter_complex", f"[0:a]{audio_filter}[af]",
+            "-map", "0:v", "-map", "[af]",
+            "-c:v", encoder,
+        ])
+        cmd.extend(quality_opts)
         
         # [Safari 호환성 유지]
         cmd.extend([
@@ -410,9 +424,11 @@ class VideoClipper:
             # 비디오 트림
             filter_parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{i}]")
             
-            # [New] 오디오 트림 + 페이드 인/아웃 적용
-            # 각 세그먼트가 독립적으로 0초부터 시작하는 PTS를 가지므로 st=0 및 st=duration-f_out 사용 가능
-            audio_fade = f"afade=t=in:st=0:d={f_in},afade=t=out:st={max(0, duration-f_out)}:d={f_out}"
+            # [New] 오디오 트림 + 세그먼트 길이 연동 동적 페이드 인/아웃 적용
+            effective_f_in = min(f_in, max(0.01, duration / 2.0))
+            effective_f_out = min(f_out, max(0.01, duration / 2.0))
+            fade_out_st = max(0.0, duration - effective_f_out)
+            audio_fade = f"afade=t=in:st=0:d={effective_f_in:.3f},afade=t=out:st={fade_out_st:.3f}:d={effective_f_out:.3f}"
             filter_parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS,{audio_fade}[a{i}]")
             
             concat_input += f"[v{i}][a{i}]"
@@ -421,26 +437,27 @@ class VideoClipper:
         filter_complex_str = ";".join(filter_parts)
 
         # [FFmpeg Encoder & Quality Configuration]
+        input_opts = []
         if self._is_nvenc_available():
             encoder = "h264_nvenc"
-            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
         elif sys.platform == 'darwin':
             encoder = "h264_videotoolbox"
             quality_opts = ["-q:v", "65"]
         else:
             encoder = "libx264"
-            quality_opts = ["-crf", "23", "-preset", "medium"]
+            quality_opts = ["-crf", "23", "-preset", "superfast"]
 
         # [FFmpeg Command Configuration]
-        cmd = [
-            "ffmpeg", 
-            "-nostdin",
+        cmd = ["ffmpeg", "-nostdin"]
+        cmd.extend(input_opts)
+        cmd.extend([
             "-i", input_path,
             "-filter_complex", filter_complex_str,
             "-map", "[outv]", 
             "-map", "[outa]",
             "-c:v", encoder,
-        ]
+        ])
         cmd.extend(quality_opts)
         
         # [Safari 호환성 유지]
@@ -543,55 +560,56 @@ class VideoClipper:
                 # 1. 해당 구간의 자막을 임시 파일로 추출 (기존 cut_subtitle 메서드 활용)
                 temp_sub_name = f"temp_sub_{uuid.uuid4().hex[:8]}.srt"
                 
-                # cut_subtitle은 해당 구간을 0초부터 시작하도록 잘라서 저장해줍니다.
-                temp_sub_path = self.cut_subtitle(
-                    original_sub_path, 
-                    seg['start'], 
-                    seg['end'], 
-                    output_filename=temp_sub_name
-                )
-                
-                if temp_sub_path and os.path.exists(temp_sub_path):
-                    with open(temp_sub_path, 'r', encoding='utf-8') as f:
-                        lines = f.readlines()
+                temp_sub_path = None
+                try:
+                    temp_sub_path = self.cut_subtitle(
+                        original_sub_path, 
+                        seg['start'], 
+                        seg['end'], 
+                        output_filename=temp_sub_name
+                    )
                     
-                    # 2. 추출된 자막의 타임스탬프를 current_offset 만큼 뒤로 밀기(Shift)
-                    for line in lines:
-                        if '-->' in line:
-                            match = time_pattern.search(line)
-                            if match:
-                                t1_str = match.group(1).replace(',', '.')
-                                t2_str = match.group(2).replace(',', '.')
-                                
-                                t1 = self._time_str_to_seconds(t1_str)
-                                t2 = self._time_str_to_seconds(t2_str)
-                                
-                                # 병합된 타임라인 기준 시간으로 변환
-                                new_t1 = t1 + current_offset
-                                new_t2 = t2 + current_offset
-                                
-                                s1 = self._seconds_to_time_str(new_t1, ',')
-                                s2 = self._seconds_to_time_str(new_t2, ',')
-                                
-                                merged_lines.append(f"{index_counter}\n")
-                                merged_lines.append(f"{s1} --> {s2}\n")
-                                index_counter += 1
+                    if temp_sub_path and os.path.exists(temp_sub_path):
+                        with open(temp_sub_path, 'r', encoding='utf-8') as f:
+                            lines = f.readlines()
                         
-                        # 인덱스 번호(숫자만 있는 줄)는 건너뛰고, 타임라인도 아니면(텍스트) 그대로 추가
-                        elif line.strip().isdigit():
-                            continue 
-                        elif line.strip() == "WEBVTT":
-                            continue
-                        elif line.strip() == "":
-                            merged_lines.append("\n")
-                        else:
-                            merged_lines.append(line)
-                    
-                    # 처리가 끝난 임시 파일 삭제
-                    try:
-                        os.remove(temp_sub_path)
-                    except Exception:
-                        pass
+                        # 2. 추출된 자막의 타임스탬프를 current_offset 만큼 뒤로 밀기(Shift)
+                        for line in lines:
+                            if '-->' in line:
+                                match = time_pattern.search(line)
+                                if match:
+                                    t1_str = match.group(1).replace(',', '.')
+                                    t2_str = match.group(2).replace(',', '.')
+                                    
+                                    t1 = self._time_str_to_seconds(t1_str)
+                                    t2 = self._time_str_to_seconds(t2_str)
+                                    
+                                    # 병합된 타임라인 기준 시간으로 변환
+                                    new_t1 = t1 + current_offset
+                                    new_t2 = t2 + current_offset
+                                    
+                                    s1 = self._seconds_to_time_str(new_t1, ',')
+                                    s2 = self._seconds_to_time_str(new_t2, ',')
+                                    
+                                    merged_lines.append(f"{index_counter}\n")
+                                    merged_lines.append(f"{s1} --> {s2}\n")
+                                    index_counter += 1
+                            
+                            # 인덱스 번호(숫자만 있는 줄)는 건너뛰고, 타임라인도 아니면(텍스트) 그대로 추가
+                            elif line.strip().isdigit():
+                                continue 
+                            elif line.strip() == "WEBVTT":
+                                continue
+                            elif line.strip() == "":
+                                merged_lines.append("\n")
+                            else:
+                                merged_lines.append(line)
+                finally:
+                    if temp_sub_path and os.path.exists(temp_sub_path):
+                        try:
+                            os.remove(temp_sub_path)
+                        except Exception:
+                            pass
 
                 # 다음 구간을 위해 오프셋 증가 (현재 구간 길이만큼)
                 seg_duration = seg['end'] - seg['start']

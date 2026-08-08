@@ -15,6 +15,7 @@ function App() {
     const [activeTasks, setActiveTasks] = useState([]);
     const [playerData, setPlayerData] = useState(null);
     const [blogData, setBlogData] = useState(null);
+    const [uploadStatusText, setUploadStatusText] = useState("");
 
     // Subtitle Studio State
     const [selectedStudioItem, setSelectedStudioItem] = useState(null);
@@ -43,6 +44,7 @@ function App() {
     const [isUpdating, setIsUpdating] = useState(false);
     const [restartStatus, setRestartStatus] = useState({ pending: false, remaining_seconds: null, reason: null });
     const restartAlertShownRef = useRef(false);
+    const notifiedFailedTasksRef = useRef(new Set());
 
     // [New] Settings State
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -443,7 +445,17 @@ function App() {
     const fetchActiveTasks = async () => {
         try {
             const res = await axios.get(`/api/tasks?t=${Date.now()}`);
-            setActiveTasks(res.data);
+            const newTasks = res.data || [];
+            
+            newTasks.forEach(task => {
+                if (task.status === 'failed' && !notifiedFailedTasksRef.current.has(task.task_id)) {
+                    notifiedFailedTasksRef.current.add(task.task_id);
+                    const cleanName = typeof normalizeLegacyTitle === 'function' ? normalizeLegacyTitle(task.filename) : task.filename;
+                    alert(`⚠️ 작업 실패 안내 (${cleanName}):\n${task.error || task.message || '작업 처리 중 오류가 발생했습니다.'}`);
+                }
+            });
+
+            setActiveTasks(newTasks);
             fetchRestartStatus();
         } catch (err) { console.error(err); }
     };
@@ -547,7 +559,9 @@ function App() {
                     onUploadProgress: (progressEvent) => {
                         const totalUploaded = currentOffset + progressEvent.loaded;
                         const percent = Math.round((totalUploaded * 100) / file.size);
-                        setUploadProgress(percent > 100 ? 100 : percent);
+                        const safePercent = percent > 100 ? 100 : percent;
+                        setUploadProgress(safePercent);
+                        setUploadStatusText(`파일 전송 중... (${safePercent}%)`);
                     }
                 });
                 
@@ -556,12 +570,14 @@ function App() {
 
             // 3. 완료 요청
             setUploadProgress(100);
+            setUploadStatusText("📦 서버 파일 병합 완료 중...");
             const completeRes = await axios.post('/api/upload/complete', {
                 identifier: safeIdentifier,
                 filename: file.name
             });
 
             // 4. 자막 큐 등록 (모달 설정 반영)
+            setUploadStatusText("⚙️ 분석 작업 대기열(Queue) 등록 중...");
             await axios.post('/api/transcribe', {
                 filename: completeRes.data.filename,
                 custom_title: customTitle,
@@ -583,6 +599,7 @@ function App() {
         } finally {
             setLoading(false);
             setUploadProgress(0);
+            setUploadStatusText("");
         }
     };
 
@@ -1044,6 +1061,7 @@ function App() {
                     onClose={() => setIsUploadModalOpen(false)} 
                     onSubmit={handleModalSubmit}
                     uploadProgress={uploadProgress}
+                    uploadStatusText={uploadStatusText}
                     isUploading={loading}
                 />
 
