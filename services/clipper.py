@@ -42,6 +42,23 @@ class VideoClipper:
         except Exception:
             return False
 
+    def _is_cuda_hwaccel_available(self):
+        """
+        NVIDIA CUDA 디코딩 가속(-hwaccel cuda)이 지원되는지 확인합니다.
+        """
+        if not self._is_nvenc_available():
+            return False
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hwaccels"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True
+            )
+            return "cuda" in result.stdout
+        except Exception:
+            return False
+
     def _seconds_to_time_str(self, seconds, separator=","):
         """
         초(float)를 SRT/VTT 시간 포맷(HH:MM:SS,mmm)으로 변환
@@ -89,32 +106,33 @@ class VideoClipper:
         audio_filter = f"afade=t=in:st=0:d={fade_duration_in},afade=t=out:st={duration - fade_duration_out}:d={fade_duration_out}"
 
         # [FFmpeg Encoder & Quality Configuration]
-        # OS 및 그래픽 카드 가속 여부에 따른 인코더 설정
-        if self._is_nvenc_available():
-            # NVIDIA NVENC 가속 사용 (Windows / Linux 공용)
+        input_opts = []
+        if self._is_cuda_hwaccel_available():
+            input_opts = ["-hwaccel", "cuda"]
             encoder = "h264_nvenc"
-            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
+        elif self._is_nvenc_available():
+            encoder = "h264_nvenc"
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
         elif sys.platform == 'darwin':
-            # macOS: Apple Silicon 가속 사용
             encoder = "h264_videotoolbox"
             quality_opts = ["-q:v", "65"]
         else:
-            # Linux 및 기타 OS: CPU 기반 범용 libx264 사용
             encoder = "libx264"
-            quality_opts = ["-crf", "23", "-preset", "medium"]
+            quality_opts = ["-crf", "23", "-preset", "superfast"]
 
         # [FFmpeg Command Configuration]
-        cmd = [
-            "ffmpeg", 
-            "-nostdin",
+        cmd = ["ffmpeg", "-nostdin"]
+        cmd.extend(input_opts)
+        cmd.extend([
             "-ss", str(start_sec),
             "-t", str(duration),
             "-i", input_path,
-            "-filter_complex", f"[0:a]{audio_filter}[af]", # 오디오 필터 적용
-            "-map", "0:v", "-map", "[af]",                 # 비디오는 그대로, 오디오는 필터 거친 것 사용
-            "-c:v", encoder,                               # 자동 선택된 인코더
-        ]
-        cmd.extend(quality_opts)                           # 품질 옵션 추가
+            "-filter_complex", f"[0:a]{audio_filter}[af]",
+            "-map", "0:v", "-map", "[af]",
+            "-c:v", encoder,
+        ])
+        cmd.extend(quality_opts)
         
         # [Safari 호환성 유지]
         cmd.extend([
@@ -423,26 +441,31 @@ class VideoClipper:
         filter_complex_str = ";".join(filter_parts)
 
         # [FFmpeg Encoder & Quality Configuration]
-        if self._is_nvenc_available():
+        input_opts = []
+        if self._is_cuda_hwaccel_available():
+            input_opts = ["-hwaccel", "cuda"]
             encoder = "h264_nvenc"
-            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p4"]
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
+        elif self._is_nvenc_available():
+            encoder = "h264_nvenc"
+            quality_opts = ["-rc", "vbr", "-cq", "24", "-preset", "p2"]
         elif sys.platform == 'darwin':
             encoder = "h264_videotoolbox"
             quality_opts = ["-q:v", "65"]
         else:
             encoder = "libx264"
-            quality_opts = ["-crf", "23", "-preset", "medium"]
+            quality_opts = ["-crf", "23", "-preset", "superfast"]
 
         # [FFmpeg Command Configuration]
-        cmd = [
-            "ffmpeg", 
-            "-nostdin",
+        cmd = ["ffmpeg", "-nostdin"]
+        cmd.extend(input_opts)
+        cmd.extend([
             "-i", input_path,
             "-filter_complex", filter_complex_str,
             "-map", "[outv]", 
             "-map", "[outa]",
             "-c:v", encoder,
-        ]
+        ])
         cmd.extend(quality_opts)
         
         # [Safari 호환성 유지]
