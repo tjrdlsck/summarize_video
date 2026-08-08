@@ -296,15 +296,17 @@ class ShortsMaker:
         humor_weight=50,
         keep_original_tone=True,
         speaker_mode="pseudo",
+        map_notes=None,
     ):
         """
-        [Advanced] 챕터 메타데이터와 사용자 주제(Topic)를 활용하여 최적의 숏츠 후보를 생성합니다.
+        [Advanced] 챕터 메타데이터, Stage 1 정밀 노트, 사용자 주제(Topic)를 활용하여 최적의 숏츠 후보를 생성합니다.
         
         Args:
             transcripts: 전체 자막 데이터 리스트
             video_title: 영상 제목
             chapters: 분석된 챕터 정보 (Filtering용)
             focus_topic: 사용자가 요청한 주제/키워드 (Optional)
+            map_notes: Stage 1 (Map Phase)에서 추출된 정밀 노트 리스트 (Optional)
         """
         if not self.api_key:
             print("[ShortsMaker] Error: API Key missing")

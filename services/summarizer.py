@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 from typing import Any
 from dotenv import load_dotenv
 from google import genai
@@ -88,6 +89,46 @@ class ChapterHealer:
             current_start = final_end + 1
             
         return healed
+
+def build_smart_chunks(segments: list[dict], target_chars: int = 2000, overlap_chars: int = 250) -> list[list[dict]]:
+    """
+    Whisper 세그먼트 배열을 기반으로 문맥 오버랩 및 무음 타임스탬프 경계를 적용한 Chunk 생성기
+    """
+    if not segments:
+        return []
+
+    chunks = []
+    current_chunk = []
+    current_length = 0
+
+    for i, seg in enumerate(segments):
+        current_chunk.append(seg)
+        current_length += len(seg.get("text", ""))
+
+        if current_length >= target_chars - overlap_chars:
+            next_seg = segments[i + 1] if i + 1 < len(segments) else None
+            gap_to_next = (float(next_seg["start"]) - float(seg["end"])) if next_seg else 999.0
+            is_sentence_end = str(seg.get("text", "")).strip().endswith((".", "?", "!"))
+
+            if gap_to_next >= 1.5 or is_sentence_end or not next_seg:
+                chunks.append(current_chunk)
+                
+                # Overlap 추출 (뒤에서부터 overlap_chars 만큼 보존)
+                overlap_buffer = []
+                overlap_len = 0
+                for prev_seg in reversed(current_chunk):
+                    overlap_buffer.insert(0, prev_seg)
+                    overlap_len += len(prev_seg.get("text", ""))
+                    if overlap_len >= overlap_chars:
+                        break
+                
+                current_chunk = overlap_buffer
+                current_length = overlap_len
+
+    if current_chunk and current_chunk not in chunks:
+        chunks.append(current_chunk)
+
+    return chunks
 
 from services.system_manager import ConfigManager
 
@@ -676,129 +717,162 @@ class VideoSummarizer:
             raise e # retry 전파
 
     @retry(
-        stop=stop_after_attempt(3), 
-        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(multiplier=2, min=4, max=20),
         reraise=True
     )
-    def summarize(
-        self, 
-        segments: list[dict], 
-        video_filename: str, 
-        custom_title: str = None, 
+    def _call_gemini_with_retry(self, client, model, contents, config):
+        """개별 API 호출 레벨의 재시도 유틸리티 (429 Rate Limit 대비)"""
+        return client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config
+        )
+
+    def summarize_map_reduce(
+        self,
+        segments: list[dict],
+        video_filename: str,
+        custom_title: str = None,
         status_callback: callable = None,
         content_type: str = "sermon",
     ) -> dict:
-        """Gemini API의 JSON Mode를 사용하여 자막을 분석하고 챕터 정보를 생성합니다. (Retry 적용)
-
-        Args:
-            segments: 분석된 자막 세그먼트 리스트.
-            video_filename: 원본 영상 파일명.
-            custom_title: 사용자가 지정한 영상 제목 (선택 사항).
-            status_callback: 진행 상태를 보고할 콜백 함수 (선택 사항).
-
-        Returns:
-            요약 결과, 챕터 리스트, 토큰 사용량 등이 포함된 결과 딕셔너리.
+        """
+        Gemini 3.1 Flash-Lite (Map) -> Gemini 3.5 Flash-Lite (Reduce) 기반 3단계 Map-Reduce 파이프라인.
+        RPM 15 (4초/요청), TPM 250k 한도에 걸리지 않도록 Chunk 통합(6000자) 및 Rate-Limit Throttling 적용.
         """
         if not self.api_key:
             return {"error": "GOOGLE_API_KEY is missing in .env"}
         
         total_lines = len(segments)
-        if total_lines == 0: return {"error": "Empty segments"}
+        if total_lines == 0:
+            return {"error": "Empty segments"}
 
-        print(f"--- [Summarizer] Analyzing {total_lines} lines with Gemini (JSON Mode) ---")
-        if status_callback: status_callback("Gemini가 내용을 정밀 분석 중 (JSON Mode)...")
-
+        print(f"--- [Summarizer] Running Map-Reduce Pipeline for {total_lines} lines ({video_filename}) ---")
         profile = get_content_profile(content_type)
         tracker = UsageTracker()
 
-        use_coarse = self.coarse_enabled and total_lines >= self.coarse_trigger_lines
-        analysis_segments: list[dict[str, Any]] = segments
-        coarse_segments: list[dict[str, Any]] = []
-        compression_meta = {
-            "mode": "direct",
-            "original_segments": total_lines,
-            "analysis_segments": total_lines,
-            "compression_ratio": 1.0,
-        }
-
-        if use_coarse:
-            coarse_segments = self._build_coarse_segments(segments)
-            if len(coarse_segments) >= 2:
-                analysis_segments = coarse_segments
-                compression_meta = {
-                    "mode": "coarse",
-                    "original_segments": total_lines,
-                    "analysis_segments": len(coarse_segments),
-                    "compression_ratio": round(total_lines / max(1, len(coarse_segments)), 3),
-                }
-
-        # 프롬프트 구성 (direct 또는 coarse)
-        lines = [f"{seg['id']} | {seg['text']}" for seg in analysis_segments]
-        script_text = "\n".join(lines)
+        # 1. Smart Chunking Engine 실행 (RPM 15 준수를 위해 target_chars를 6,000자로 상향 통합)
+        if status_callback:
+            status_callback("지능형 칭킹 엔진(Smart Chunking Engine) 실행 중...")
+        chunks = build_smart_chunks(segments, target_chars=6000, overlap_chars=300)
+        print(f"[Summarizer] Total segments: {total_lines} -> Smart Chunks created: {len(chunks)}")
         
-        # JSON 스키마 정의
-        response_schema = {
-            "type": "ARRAY",
-            "items": {
-                "type": "OBJECT",
-                "properties": {
-                    "title": {"type": "STRING", "description": "내용을 직관적으로 알 수 있는 챕터 제목 (예: '예화: 탕자의 비유')"},
-                    "type": {
-                        "type": "STRING", 
-                        "enum": profile.summary_type_enum,
-                        "description": "편집 작업을 위한 구간 성격 분류"
-                    },
-                    "summary": {"type": "STRING", "description": "편집자가 내용을 파악할 수 있는 핵심 내용 요약"},
-                    "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
-                    "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"}
-                },
-                "required": ["title", "type", "summary", "start_id", "end_id"]
-            }
-        }
+        # 2. Stage 1: Map Phase (gemini-3.1-flash-lite) - Chunk별 정밀 노트 추출
+        map_notes = []
+        map_model = self._get_model("summarizer_map")
+        client = genai.Client(api_key=self.api_key)
+        
+        for idx, chunk in enumerate(chunks, 1):
+            if idx > 1:
+                # RPM 15 제한 (60s / 15 = 4.0s) 준수를 위한 4.1초 슬롯 간격 보장
+                time.sleep(4.1)
 
-        system_instruction = profile.summary_system_instruction
-
-        try:
-            client = genai.Client(api_key=self.api_key)
+            if status_callback:
+                status_callback(f"Stage 1 (Map): Chunk {idx}/{len(chunks)} 정밀 노트 추출 중... ({map_model})")
             
-            response = client.models.generate_content(
-                model=self._get_model("summarizer"),
-                contents=f"{system_instruction}\n\n[Script]:\n{script_text}",
+            chunk_lines = [f"{seg['id']} | [{self._format_time(seg['start'])} - {self._format_time(seg['end'])}] | {seg['text']}" for seg in chunk]
+            chunk_script = "\n".join(chunk_lines)
+            
+            map_prompt = (
+                f"당신은 영상 콘텐츠 정밀 분석가입니다. 아래 영상 자막 구간({idx}/{len(chunks)})을 분석하여 핵심 노트를 정리하세요.\n"
+                f"[콘텐츠 분류]: {profile.content_type}\n\n"
+                "**[작성 규칙]**\n"
+                "1. 해당 구간에서 언급된 핵심 사실, 구체적 정보, 데이터/숫자, 핵심 발언/예화/인용구를 추출하세요.\n"
+                "2. 서론/결론의 인사말이나 불필요한 감탄사는 완전히 배제하고, 마크다운 불릿 포인트(- ) 형태로 작성하세요.\n"
+                "3. 반드시 주요 내용 옆에 해당 세그먼트 ID 또는 타임스탬프를 함께 언급하세요.\n\n"
+                f"[Script Segment]:\n{chunk_script}"
+            )
+            
+            response = self._call_gemini_with_retry(
+                client=client,
+                model=map_model,
+                contents=map_prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.2,
-                    response_mime_type="application/json", 
-                    response_schema=response_schema       
+                    temperature=0.1
                 )
             )
             tracker.update(response)
-            
-            # JSON 파싱
-            parsed_chapters = json.loads(response.text)
-            final_chapters = self._normalize_chapter_ranges(parsed_chapters, len(analysis_segments))
-            if use_coarse and analysis_segments is coarse_segments:
-                final_chapters = self._map_coarse_chapters_to_original(final_chapters, coarse_segments, total_lines)
+            map_notes.append(f"### [Chunk {idx} (ID: {chunk[0]['id']}~{chunk[-1]['id']}) Note]\n{response.text.strip()}")
 
+        fused_notes_text = "\n\n".join(map_notes)
+
+        # 3. Stage 2: Reduce Phase (gemini-3.5-flash-lite) - 전체 챕터 분할 및 완성형 블로그 포스팅 집필
+        reduce_model = self._get_model("summarizer_reduce")
+        time.sleep(4.1) # Reduce 호출 전에도 RPM 슬롯 보장
+
+        if status_callback:
+            status_callback(f"Stage 2 (Reduce): 전체 챕터 및 블로그 집필 중... ({reduce_model})")
+
+        response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "blog_title": {"type": "STRING", "description": "영상의 전체 흐름을 관통하는 대표 제목"},
+                "chapters": {
+                    "type": "ARRAY",
+                    "items": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "title": {"type": "STRING", "description": "챕터 제목"},
+                            "type": {"type": "STRING", "enum": profile.summary_type_enum, "description": "구간 성격 분류"},
+                            "summary": {"type": "STRING", "description": "해당 챕터의 상세 핵심 요약"},
+                            "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID (1부터 total_lines)"},
+                            "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID (1부터 total_lines)"}
+                        },
+                        "required": ["title", "type", "summary", "start_id", "end_id"]
+                    }
+                }
+            },
+            "required": ["blog_title", "chapters"]
+        }
+
+        reduce_prompt = (
+            f"당신은 최고 권위의 미디어 에디터이자 콘텐츠 기획자입니다.\n"
+            f"Stage 1에서 자막 구간별로 정밀 추출된 아래 노트들을 바탕으로, 중복 문장을 제거(Deduplication)하고 영상 전체 타임라인 챕터 및 핵심 요약을 JSON으로 작성하세요.\n\n"
+            f"[콘텐츠 타입]: {profile.content_type}\n"
+            f"[챕터 분류 타입 목록]: {profile.summary_type_enum}\n"
+            f"[전체 세그먼트 수]: 1 ~ {total_lines}\n\n"
+            f"**[Reduce 지시사항]**\n"
+            f"1. **chapters**: 영상을 1부터 {total_lines}까지 빈틈없이 타임라인 챕터로 구분하세요. {profile.summary_system_instruction}\n"
+            f"2. **summary**: 각 챕터별 핵심 내용, 구체적 예화, 데이터 포인트를 알차게 요약하세요.\n\n"
+            f"[Fused Map Notes]:\n{fused_notes_text}"
+        )
+
+        try:
+            response = self._call_gemini_with_retry(
+                client=client,
+                model=reduce_model,
+                contents=reduce_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    response_mime_type="application/json",
+                    response_schema=response_schema
+                )
+            )
+            tracker.update(response)
+
+            reduce_result = json.loads(response.text)
+            parsed_chapters = reduce_result.get("chapters", [])
+            final_chapters = self._normalize_chapter_ranges(parsed_chapters, total_lines)
+
+            # 챕터 경계 보정 (Refinement)
             refined_count = 0
             final_chapters, refined_count = self._run_boundary_refinement(
                 final_chapters,
                 segments,
                 profile,
                 tracker,
-                status_callback=status_callback,
+                status_callback=status_callback
             )
-            
-            # ID -> Time 매핑 & 챕터 제목 정제
+
             mapped_result = []
             for chap in final_chapters:
                 s_idx = max(0, min(chap['start_id'] - 1, total_lines - 1))
                 e_idx = max(0, min(chap['end_id'] - 1, total_lines - 1))
-                
                 start_time = segments[s_idx]['start']
                 end_time = segments[e_idx]['end']
-                
-                # 챕터 제목 내 불필요한 마크다운(**, __) 제거
                 clean_chapter_title = re.sub(r'\*\*|__', '', chap['title']).strip()
-                
+
                 mapped_result.append({
                     "title": clean_chapter_title,
                     "type": chap['type'],
@@ -816,13 +890,17 @@ class VideoSummarizer:
             result_data = {
                 "video_source": video_filename,
                 "video_title": display_title,
+                "blog_title": reduce_result.get("blog_title", display_title),
+                "blog_post": reduce_result.get("blog_post", ""),
                 "content_type": profile.content_type,
                 "profile_version": profile.profile_version,
                 "analysis_meta": {
-                    **compression_meta,
+                    "mode": "map_reduce",
+                    "chunks_count": len(chunks),
                     "boundary_refined_count": refined_count,
                 },
                 "total_chapters": len(mapped_result),
+                "map_notes": map_notes,
                 "token_usage": tracker.get_report(),
                 "chapters": mapped_result
             }
@@ -830,20 +908,38 @@ class VideoSummarizer:
             # 저장
             base_name = os.path.splitext(video_filename)[0]
             output_path = os.path.join(self.output_dir, f"{base_name}_summary.json")
-            
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(result_data, f, ensure_ascii=False, indent=2)
-                
+
             return result_data
 
         except Exception as e:
             logger = get_logger("summarizer")
-            if task_id:
-                log_task_error(task_id, "summarize", e)
-            else:
-                log_error_with_traceback(logger, "Summarization failed", e)
-            print(f"[Error] Summarization failed: {e}")
-            raise e # retry 전파
+            log_error_with_traceback(logger, "Map-Reduce Summarization failed", e)
+            print(f"[Error] Map-Reduce Summarization failed: {e}")
+            raise e
+
+    @retry(
+        stop=stop_after_attempt(3), 
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        reraise=True
+    )
+    def summarize(
+        self, 
+        segments: list[dict], 
+        video_filename: str, 
+        custom_title: str = None, 
+        status_callback: callable = None,
+        content_type: str = "sermon",
+    ) -> dict:
+        """Gemini 3.1 Map -> Gemini 3.5 Reduce 3단계 파이프라인으로 자막을 분석하고 챕터 및 블로그를 생성합니다."""
+        return self.summarize_map_reduce(
+            segments=segments,
+            video_filename=video_filename,
+            custom_title=custom_title,
+            status_callback=status_callback,
+            content_type=content_type
+        )
         
     def _format_time(self, seconds: float) -> str:
         """초(seconds)를 HH:MM:SS 형식의 문자열로 변환합니다.

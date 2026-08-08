@@ -13,10 +13,12 @@ class ConfigManager:
     CONFIG_PATH = "data/config.json"
     DEFAULT_CONFIG = {
         "models": {
-            "summarizer": "gemini-2.5-flash",
+            "summarizer_map": "gemini-3.1-flash-lite",
+            "summarizer_reduce": "gemini-3.5-flash-lite",
+            "summarizer": "gemini-3.5-flash-lite",
             "planner": "gemini-3.1-flash-lite",
-            "refiner": "gemma-4-26b-a4b-it",
-            "shorts": "gemini-3.1-flash-lite",
+            "shorts": "gemini-3.5-flash-lite",
+            "refiner": "gemini-3.1-flash-lite",
             "whisper": "mlx-community/whisper-large-v3-turbo-q4"
         }
     }

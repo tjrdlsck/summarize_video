@@ -287,8 +287,8 @@ class PipelineRunner:
         output_path = os.path.join(RESULTS_DIR, f"{base_name}_blog_view.json")
 
         try:
-            planner_model = ConfigManager.get_model("planner")
-            task_manager.update_progress(task_id, 0, f"블로그 구조 설계 중 ({planner_model})...")
+            refiner_model = ConfigManager.get_model("refiner")
+            task_manager.update_progress(task_id, 0, f"블로그 작성 준비 중 ({refiner_model})...")
 
             if not os.path.exists(transcript_path):
                 raise FileNotFoundError("자막 데이터가 없습니다.")
@@ -298,23 +298,52 @@ class PipelineRunner:
 
             loop = asyncio.get_running_loop()
 
-            blog_plan = await loop.run_in_executor(
-                None,
-                partial(
-                    summarizer.plan_blog_structure,
-                    segments,
-                    req.filename,
-                    status_callback=lambda msg: loop.call_soon_threadsafe(task_manager.update_progress, task_id, 10, msg),
-                ),
-            )
+            summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
+            blog_title = "Untitled Blog Post"
+            temp_chapters = []
 
-            if "error" in blog_plan:
-                raise Exception(blog_plan["error"])
+            if os.path.exists(summary_path):
+                with open(summary_path, "r", encoding="utf-8") as file:
+                    summary_data = json.load(file)
+                    blog_title = summary_data.get("blog_title") or summary_data.get("video_title") or "Untitled Blog Post"
+                    raw_chaps = summary_data.get("chapters", [])
+                    for chap in raw_chaps:
+                        s_time = chap.get("time", {}).get("start", 0.0)
+                        e_time = chap.get("time", {}).get("end", 0.0)
+                        # Find start_id and end_id from segments matching timestamps
+                        s_id = 1
+                        e_id = len(segments)
+                        for seg in segments:
+                            if seg["start"] <= s_time <= seg["end"]:
+                                s_id = seg["id"]
+                            if seg["start"] <= e_time <= seg["end"]:
+                                e_id = seg["id"]
+                        temp_chapters.append({
+                            "title": chap["title"],
+                            "start_id": s_id,
+                            "end_id": e_id,
+                            "focus_point": chap.get("summary", "")
+                        })
 
-            blog_title = blog_plan.get("blog_title", "Untitled Blog Post")
-            temp_chapters = blog_plan.get("chapters", [])
+            if not temp_chapters:
+                planner_model = ConfigManager.get_model("planner")
+                task_manager.update_progress(task_id, 5, f"블로그 구조 설계 중 ({planner_model})...")
+                blog_plan = await loop.run_in_executor(
+                    None,
+                    partial(
+                        summarizer.plan_blog_structure,
+                        segments,
+                        req.filename,
+                        status_callback=lambda msg: loop.call_soon_threadsafe(task_manager.update_progress, task_id, 10, msg),
+                    ),
+                )
+                if "error" in blog_plan:
+                    raise Exception(blog_plan["error"])
+
+                blog_title = blog_plan.get("blog_title", "Untitled Blog Post")
+                temp_chapters = blog_plan.get("chapters", [])
+
             total_chaps = len(temp_chapters)
-
             if not temp_chapters:
                 raise ValueError("생성된 블로그 구조가 없습니다.")
 
@@ -523,12 +552,14 @@ class PipelineRunner:
 
             video_title = req.filename
             chapters = None
+            map_notes = None
             effective_content_type = req.content_type
             if os.path.exists(summary_path):
                 with open(summary_path, "r", encoding="utf-8") as file:
                     summary_data = json.load(file)
                     video_title = summary_data.get("video_title", req.filename)
                     chapters = summary_data.get("chapters")
+                    map_notes = summary_data.get("map_notes")
                     effective_content_type = summary_data.get("content_type", effective_content_type)
 
             if task_manager.is_cancelled(task_id):
@@ -551,6 +582,7 @@ class PipelineRunner:
                     humor_weight=req.humor_weight,
                     keep_original_tone=req.keep_original_tone,
                     speaker_mode=req.speaker_mode,
+                    map_notes=map_notes,
                 ),
             )
 

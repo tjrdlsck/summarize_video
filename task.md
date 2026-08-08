@@ -1,7 +1,8 @@
-# 📌 Task: Gemini 3.6 Flash Vibe Coding 맞춤형 컨벤션 재정립
+# Task List: Gemma 탈피 & Gemini 3.1 Flash-Lite 기반 블로그 전담 파이프라인 정돈
 
-- [x] 구버전 분석/기획 마크다운 문서 `docs/archive/` 이동 (`PRD.md`, `PROJECT_ANALYSIS.md` 등)
-- [x] AI 탐색 지식 노이즈 차단을 위한 `.ignore` 갱신 (`docs/archive/` 등록)
-- [x] [`CONVENTION.md`](file:///home/radi/cli/summarize_video/CONVENTION.md) 토큰 슬림화 및 Gemini 3.6 Flash 에이전틱 수칙 (코드 생략 금지, 로그 우선 실증 진단, pytest 테스트 기반 완결성 등) 신설
-- [x] 컨벤션 검증 단위 테스트 작성 (`tests/test_convention_and_architecture.py`) 및 통과 (2/2 PASSED)
-- [x] Git 커밋 & 원격 푸시 완료 (현재 브랜치 `feat/#114`, 병합 보류 유지)
+- [x] 구현 계획서 수립 및 사용자 승인 (`implementation_plan.md`) <!-- id: 0 -->
+- [x] `services/system_manager.py`: refiner 및 planner 모델을 `gemini-3.1-flash-lite`로 교체 <!-- id: 1 -->
+- [x] `services/summarizer.py`: 요약노트 Stage 2 (Reduce)에서 중복 `blog_post` 키 제거 및 챕터 요약에 경량화 집중 <!-- id: 2 -->
+- [x] `services/refiner.py`: Gemma 의존성 완전 제거 및 `gemini-3.1-flash-lite` 윤문 엔진 최적화 <!-- id: 3 -->
+- [x] `app/application/pipeline_runner.py`: 요약노트 챕터 재활용 고속 블로그 생성 로직 연결 <!-- id: 4 -->
+- [x] 단위/통합 테스트 작성 및 실행 (`tests/test_refiner_gemini.py` 및 전체 pytest 45/45 Passed 통과 검증) <!-- id: 5 -->

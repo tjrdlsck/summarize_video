@@ -8,7 +8,7 @@ from services.system_manager import ConfigManager
 
 class TextRefiner:
     """
-    Gemma 모델을 사용하여 Raw Transcript를 읽기 좋은 블로그 포스트 형태(Markdown)로 윤문하는 클래스
+    Gemini 3.1 Flash-Lite 모델을 사용하여 Raw Transcript 또는 챕터를 읽기 좋은 블로그 포스트 형태(Markdown)로 윤문하는 클래스
     """
     def __init__(self):
         load_dotenv()
@@ -28,22 +28,26 @@ class TextRefiner:
         return f"{h:02}:{m:02}:{s:02}"
 
     @retry(
-        stop=stop_after_attempt(3), 
-        wait=wait_exponential(multiplier=1, min=4, max=10),
+        stop=stop_after_attempt(5), 
+        wait=wait_exponential(multiplier=2, min=4, max=20),
         reraise=True
     )
+    def _call_gemini_with_retry(self, client, model, contents, config):
+        """개별 API 호출 레벨의 재시도 유틸리티"""
+        return client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config
+        )
+
     def refine_chapter(self, raw_text: str, chapter_title: str, segments: list[dict] = None) -> str:
-        """챕터별 텍스트를 입력받아 가독성이 극대화된 Markdown 형식으로 윤문합니다. (Retry 적용)"""
+        """챕터별 텍스트를 입력받아 가독성이 극대화된 Markdown 형식으로 윤문합니다."""
         if not self.client:
             return "API Key missing."
 
-        # 세그먼트 데이터가 없으면 기존 방식(Legacy)으로 처리하거나 텍스트 기반으로 진행
-        # 하지만 인용 기능을 위해선 segments가 필수적임.
         if not segments:
-             # Fallback to simple text (기존 로직과 유사하게 처리하거나 에러 메시지)
              return f"### {chapter_title}\n\n(상세 세그먼트 데이터가 없어 인용 모드를 실행할 수 없습니다.)\n\n{raw_text}"
 
-        # 프롬프트용 스크립트 텍스트 생성 (ID | Text 형식)
         lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
         script_block = "\n".join(lines)
 
@@ -74,12 +78,13 @@ class TextRefiner:
         """
 
         try:
-            # Gemma 모델 호출
-            response = self.client.models.generate_content(
-                model=self._get_model(),
+            model_name = self._get_model()
+            response = self._call_gemini_with_retry(
+                client=self.client,
+                model=model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.3, 
+                    temperature=0.2, 
                     top_p=0.95,
                 )
             )
@@ -87,9 +92,6 @@ class TextRefiner:
             refined_text = response.text.strip()
             
             # --- [Post-Processing: ID -> Timestamp] ---
-            # [[ID:123]] -> (05:32) 형태로 변환
-            
-            # 빠른 조회를 위한 ID 맵
             id_map = {seg['id']: seg['start'] for seg in segments}
 
             def replace_match(match):
@@ -102,18 +104,12 @@ class TextRefiner:
                     pass
                 return ""
 
-            # 1. 표준 및 변형된 ID 패턴 치환 (ID:숫자 형태를 모두 찾아 타임스탬프로 변경)
             inter_text = re.sub(r'\[*ID:\s*(\d+)\s*\]*', replace_match, refined_text)
-            
-            # 2. 잔여 오물 제거 (Heuristic Cleanup)
-            # LLM이 [[ID:68, 69]] 처럼 쉼표로 연결했을 경우 남게 되는 ", 69]]" 등을 청소합니다.
             final_text = re.sub(r'[, \d]*\]+', '', inter_text)
-            
-            # 3. 혹시 모를 빈 괄호나 깨진 인용구 최종 정리
             final_text = final_text.replace("[[", "").replace("]]", "").strip()
 
             return final_text
 
         except Exception as e:
             print(f"[Refiner Error] {e}")
-            raise e # retry 전파 로직을 위해 예외를 다시 던짐
+            raise e
