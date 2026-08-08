@@ -6,6 +6,7 @@ import shutil
 import json
 import sys
 import subprocess
+import asyncio
 from urllib.request import urlopen
 import anyio # [Add] 비동기 파일 I/O를 위해 추가
 from yt_dlp.utils import DownloadError
@@ -169,7 +170,7 @@ class VideoDownloader:
             await f.write(chunk_data)
         return True
 
-    async def finalize_upload(self, identifier: str, original_filename: str):
+    def _sync_finalize_upload(self, identifier: str, original_filename: str):
         """모든 청크 전송 완료 후 임시 파일을 최종 파일로 변환합니다."""
         temp_path = os.path.join(self.download_dir, f"{identifier}.part")
         if not os.path.exists(temp_path):
@@ -195,6 +196,16 @@ class VideoDownloader:
             "filename": final_filename,
             "original_filename": original_filename
         }
+
+    async def finalize_upload(self, identifier: str, original_filename: str):
+        """모든 청크 전송 완료 후 비동기 스레드 풀에서 임시 파일을 최종 파일로 안전하게 변환합니다."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self._sync_finalize_upload,
+            identifier,
+            original_filename
+        )
 
     def download_from_url(self, url, progress_callback=None, task_manager=None, task_id=None):
         """
