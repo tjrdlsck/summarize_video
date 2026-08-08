@@ -390,6 +390,7 @@ class PipelineRunner:
                         raw_text="",
                         chapter_title=chapter["title"],
                         segments=chapter_segments,
+                        content_type=req.content_type,
                     ),
                 )
 

@@ -29,3 +29,21 @@ def test_text_refiner_no_segments_fallback():
 
     result = refiner.refine_chapter("raw_text", "테스트 챕터", segments=[])
     assert "상세 세그먼트 데이터가 없어" in result
+
+
+def test_text_refiner_genre_prompt_injection():
+    refiner = TextRefiner()
+    refiner.api_key = "fake_key"
+    refiner.client = MagicMock()
+
+    mock_response = MagicMock()
+    mock_response.text = "### 스트리밍 요약 [[ID:1]]"
+    
+    with patch.object(refiner, "_call_gemini_with_retry", return_value=mock_response) as mock_call:
+        segments = [{"id": 1, "start": 0.0, "end": 5.0, "text": "안녕"}]
+        refiner.refine_chapter("raw_text", "스트리밍 챕터", segments=segments, content_type="streaming")
+        
+        # _call_gemini_with_retry에 전달된 contents 프롬프트에 스트리밍 지침이 들어갔는지 검증
+        called_contents = mock_call.call_args[1]["contents"]
+        assert "스트리밍 윤문 지침" in called_contents
+        assert "[[ID:12]][[ID:13]] (쉼표 사용 절대 금지)" in called_contents

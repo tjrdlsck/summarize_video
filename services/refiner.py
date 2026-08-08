@@ -5,6 +5,7 @@ from google import genai
 from google.genai import types
 from tenacity import retry, stop_after_attempt, wait_exponential # [Add] 재시도 로직 추가
 from services.system_manager import ConfigManager
+from services.content_profiles import get_content_profile
 
 class TextRefiner:
     """
@@ -40,7 +41,13 @@ class TextRefiner:
             config=config
         )
 
-    def refine_chapter(self, raw_text: str, chapter_title: str, segments: list[dict] = None) -> str:
+    def refine_chapter(
+        self, 
+        raw_text: str, 
+        chapter_title: str, 
+        segments: list[dict] = None, 
+        content_type: str = None
+    ) -> str:
         """챕터별 텍스트를 입력받아 가독성이 극대화된 Markdown 형식으로 윤문합니다."""
         if not self.client:
             return "API Key missing."
@@ -48,16 +55,18 @@ class TextRefiner:
         if not segments:
              return f"### {chapter_title}\n\n(상세 세그먼트 데이터가 없어 인용 모드를 실행할 수 없습니다.)\n\n{raw_text}"
 
+        profile = get_content_profile(content_type)
         lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
         script_block = "\n".join(lines)
 
         prompt = f"""
-        당신은 전문 지식을 독자에게 친절하고 논리적으로 가르치는 **세계 최고의 블로그 에디터**입니다.
+        {profile.refine_system_instruction}
+
         제공된 스크립트를 바탕으로 "{chapter_title}" 챕터에 대한 상세하고 몰입감 있는 블로그 섹션을 작성하세요.
 
-        ### [작성 규칙]
+        ### [필수 작성 및 강조 규칙 (Technical Guardrails)]
         1. **정형화된 서사 구조**: 반드시 아래 순서로 작성하세요.
-           - **도입부 (Introduction)**: 단순 요약이 아닌, 독자의 호기심을 자극하고 본문에서 다룰 핵심 질문을 던지는 문장으로 시작하세요.
+           - **도입부 (Introduction)**: 단순 요약이나 나열이 아닌, 독자의 호기심을 자극하고 본문에서 다룰 핵심 질문을 던지는 문장으로 시작하세요.
            - **본문 (Body)**: 내용을 논리적인 흐름에 따라 상세히 설명하세요. 필요시 소제목을 활용하세요.
            - **맺음말 (Conclusion)**: 내용을 갈무리하며 독자에게 깊은 통찰이나 생각할 거리를 던지는 문장으로 마무리하세요.
         
@@ -67,9 +76,9 @@ class TextRefiner:
 
         3. **인용 규칙 (Citation)**: 사실, 의견, 인용구 뒤에는 반드시 출처 ID를 `[[ID:number]]` 형식으로 남기세요.
            - 예: 이 현상은 과학적으로 증명되었습니다 [[ID:12]].
-           - 여러 개 인용 시: [[ID:12]][[ID:13]] (쉼표 사용 금지)
+           - 여러 개 인용 시: [[ID:12]][[ID:13]] (쉼표 사용 절대 금지)
 
-        4. **문체 및 언어**: 한국어로 작성하며, 전문적이면서도 친절한 '해요체'를 사용하세요.
+        4. **근거 준수 (Grounding)**: 제공된 스크립트 데이터에 근거하여 작성하되, 없는 사실을 자의적으로 왜곡하거나 지어내지 마세요.
 
         ### [입력 스크립트 데이터]
         {script_block}

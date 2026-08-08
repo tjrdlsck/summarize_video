@@ -17,6 +17,7 @@ def test_get_content_profile_loads_streaming_profile():
     assert "Banter" in profile.shorts_target_types
     assert "40초~90초" in profile.shorts_system_instruction
     assert "50%" in profile.shorts_system_instruction
+    assert "스트리밍 윤문 지침" in profile.refine_system_instruction
 
 
 def test_get_content_profile_preserves_sermon_defaults():
@@ -32,6 +33,7 @@ def test_get_content_profile_preserves_sermon_defaults():
         "Prayer",
     ]
     assert profile.shorts_target_types == ["Illustration", "Preaching_Main", "Application"]
+    assert "설교 윤문 지침" in profile.refine_system_instruction
 
 
 def test_request_models_use_sermon_as_default_content_type():
