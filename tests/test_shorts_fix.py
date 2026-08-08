@@ -101,3 +101,13 @@ def test_clipper_dynamic_audio_fade():
     assert effective_f_in == 0.075
     assert effective_f_out == 0.075
     assert fade_out_st == 0.075
+
+
+def test_pipeline_runner_defines_transcript_path():
+    """run_shorts_pipeline 내부에서 transcript_path 변수가 정상 정의되어 있는지 검증."""
+    import inspect
+    from app.application.pipeline_runner import PipelineRunner
+
+    source = inspect.getsource(PipelineRunner.run_shorts_pipeline)
+    assert "transcript_path =" in source
+    assert "effective_sub_path =" in source

@@ -540,6 +540,7 @@ class PipelineRunner:
         try:
             task_manager.update_progress(task_id, 0, "AI 숏츠 기획 시작...")
 
+            transcript_path = os.path.join(RESULTS_DIR, f"{base_name}_transcript.json")
             srt_path = os.path.join(RESULTS_DIR, f"{base_name}.srt")
             vtt_path = os.path.join(RESULTS_DIR, f"{base_name}.vtt")
             effective_sub_path = srt_path if os.path.exists(srt_path) else (vtt_path if os.path.exists(vtt_path) else None)
