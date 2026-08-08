@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import asyncio  # [Add] 비동기 이벤트 처리를 위해 추가
 import threading # [Add] 데이터 무결성을 위한 락 도입
 
@@ -94,7 +95,8 @@ class TaskManager:
         with self._lock:
             if task_id in self.tasks:
                 self.tasks[task_id]["status"] = "canceled"
-                self.tasks[task_id]["message"] = "취소 요청됨..."
+                self.tasks[task_id]["message"] = "취소됨"
+                self.tasks[task_id]["finished_at"] = time.time()
             
         if task_id in self.cancel_events:
             self.cancel_events[task_id].set()
@@ -133,6 +135,7 @@ class TaskManager:
             self.tasks[task_id]["progress"] = 100
             self.tasks[task_id]["message"] = "완료!"
             self.tasks[task_id]["result"] = result
+            self.tasks[task_id]["finished_at"] = time.time()
             
         self._save_tasks()
 
@@ -148,6 +151,7 @@ class TaskManager:
                 self.tasks[task_id]["message"] = "오류 발생"
                 self.tasks[task_id]["error"] = error_message
                 self.tasks[task_id]["log_file"] = f"/static/logs/{log_filename}"
+                self.tasks[task_id]["finished_at"] = time.time()
         self._save_tasks()
 
         # 예외(exception) 객체 자동 캡처
@@ -169,14 +173,21 @@ class TaskManager:
         with self._lock:
             return self.tasks.get(task_id)
 
-    def get_active_tasks(self):
+    def get_active_tasks(self, ttl_seconds: float = 10.0):
         active_list = []
+        now = time.time()
         with self._lock:
             for tid, info in self.tasks.items():
-                if info["status"] in ["queued", "pending", "processing", "canceling", "failed", "canceled"]:
+                status = info.get("status")
+                finished_at = info.get("finished_at", 0.0)
+
+                if status in ["queued", "pending", "processing", "canceling"]:
                     active_list.append(info)
-                elif info["status"] == "completed" and info.get("type") == "clip_export":
-                    active_list.append(info)
+                elif status in ["failed", "canceled", "completed"]:
+                    if info.get("type") == "clip_export" and status == "completed":
+                        active_list.append(info)
+                    elif finished_at > 0 and (now - finished_at) < ttl_seconds:
+                        active_list.append(info)
         
         return sorted(active_list, key=lambda x: x['progress'], reverse=True)
 

@@ -296,15 +296,17 @@ class ShortsMaker:
         humor_weight=50,
         keep_original_tone=True,
         speaker_mode="pseudo",
+        map_notes=None,
     ):
         """
-        [Advanced] 챕터 메타데이터와 사용자 주제(Topic)를 활용하여 최적의 숏츠 후보를 생성합니다.
+        [Advanced] 챕터 메타데이터, Stage 1 정밀 노트, 사용자 주제(Topic)를 활용하여 최적의 숏츠 후보를 생성합니다.
         
         Args:
             transcripts: 전체 자막 데이터 리스트
             video_title: 영상 제목
             chapters: 분석된 챕터 정보 (Filtering용)
             focus_topic: 사용자가 요청한 주제/키워드 (Optional)
+            map_notes: Stage 1 (Map Phase)에서 추출된 정밀 노트 리스트 (Optional)
         """
         if not self.api_key:
             print("[ShortsMaker] Error: API Key missing")
@@ -329,36 +331,36 @@ class ShortsMaker:
 
         # 1. 챕터 기반 데이터 필터링 (Whitelist 방식)
         filtered_script = ""
-        # 숏츠로 쓰기에 적합한 챕터 타입
         TARGET_TYPES = profile.shorts_target_types
-        
+        total_filtered_duration = 0.0
+
         if chapters:
             print(f"[ShortsMaker] Filtering chapters... (Target: {TARGET_TYPES})")
             for chap in chapters:
-                # 챕터 타입이 타겟에 포함되는 경우만 추출
                 if chap.get("type") in TARGET_TYPES:
                     start_t = chap["time"]["start"]
                     end_t = chap["time"]["end"]
                     
-                    # 챕터 정보를 헤더로 넣어 문맥 파악 도움
                     filtered_script += f"\n\n## Section: {chap['title']} ({chap.get('type')})\n"
                     
-                    # 시간 범위에 맞는 세그먼트 추출
                     in_range_segments = [
                         s for s in transcripts 
                         if s['start'] >= start_t and s['start'] < end_t
                     ]
                     for seg in in_range_segments:
                         filtered_script += f"[{seg['id']}] {seg['start']:.2f}~{seg['end']:.2f}: {seg['text']}\n"
+                        total_filtered_duration += (seg['end'] - seg['start'])
         else:
-            # 챕터 정보가 없으면 전체 사용 (Fallback)
             print("[ShortsMaker] No chapters provided. Using full script.")
-            for seg in transcripts:
-                filtered_script += f"[{seg['id']}] {seg['start']:.2f}~{seg['end']:.2f}: {seg['text']}\n"
 
-        if not filtered_script.strip():
-            print("[ShortsMaker] Warning: No chapters matched target types. Falling back to FULL script.")
-            # 필터링된 게 없으면 전체 스크립트를 다 넣음 (구버전 데이터 호환성 or 챕터가 제대로 안 잡힌 경우 대비)
+        # 챕터 매칭된 스크립트가 없거나, 총 세그먼트 합산 기간이 min_duration보다 작은 경우 스마트 Fallback
+        if not filtered_script.strip() or total_filtered_duration < min_duration:
+            if filtered_script.strip():
+                print(f"[ShortsMaker] Warning: Filtered chapters total duration ({total_filtered_duration:.1f}s) < min_duration ({min_duration:.1f}s). Falling back to FULL script.")
+            else:
+                print("[ShortsMaker] Warning: No chapters matched target types. Falling back to FULL script.")
+            
+            filtered_script = ""
             for seg in transcripts:
                 filtered_script += f"[{seg['id']}] {seg['start']:.2f}~{seg['end']:.2f}: {seg['text']}\n"
 
@@ -437,7 +439,10 @@ class ShortsMaker:
                 current_total_duration = 0.0
 
                 for seg in refined_segments:
-                    s, e = float(seg['start']), float(seg['end'])
+                    try:
+                        s, e = float(seg['start']), float(seg['end'])
+                    except (ValueError, TypeError, KeyError):
+                        continue
                     s = self._deduplicate_stuttering(s, e, transcripts)
 
                     if e <= s or (e - s) < 0.5:
@@ -458,7 +463,9 @@ class ShortsMaker:
                     continue
 
                 validated_segments = sorted(validated_segments, key=lambda x: x["start"])
-                if current_total_duration < min_duration:
+                # 15초 이상이면 숏츠로서 유효하도록 하한선 완화 (최소 15초)
+                effective_min = max(15.0, min_duration * 0.5)
+                if current_total_duration < effective_min:
                     continue
 
                 overlap_segments = self._collect_candidate_transcripts(annotated_transcripts, validated_segments)

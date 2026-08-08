@@ -1,84 +1,90 @@
 # 📜 AI Video Analyst Project Coding Convention
 
-본 문서는 프로젝트의 유지보수성, 가독성 및 확장성을 극대화하기 위해 Google과 Meta의 엔지니어링 표준을 바탕으로 작성된 코드 규칙입니다. 모든 기여자는 본 규칙을 엄격히 준수해야 합니다.
+본 문서는 프로젝트의 유지보수성, 가독성, 확장성 및 **Gemini 3.6 Flash / LLM 에이전트 바이브 코딩(Vibe Coding) 시 발생 가능한 환각(Hallucination) 방지**를 위해 작성된 표준 아키텍처 및 개발 수칙입니다. 모든 기여자와 AI 에이전트는 본 규칙을 엄격히 준수해야 합니다.
 
 ---
 
-## 1. Python Style Guide (PEP 8 & Google Style)
+## 0. Development & Target Environment (개발 및 타깃 환경)
 
-Python 코드는 가독성이 최우선입니다. $O(1)$의 가독성을 목표로 합니다.
+본 프로젝트의 개발 및 배포 표준 타깃 환경은 다음과 같습니다. OS 관련 구문 및 셸 명령어 작성 시 호환성과 Windows 환경에 각별히 유의해야 합니다.
 
-### 1.1 명명 규칙 (Naming Convention)
-- **Classes**: `PascalCase` (예: `VideoSummarizer`)
-- **Functions & Variables**: `snake_case` (예: `run_analysis_pipeline`, `video_path`)
-- **Constants**: `UPPER_SNAKE_CASE` (예: `MAX_RETRIES`, `DEFAULT_MODEL_NAME`)
-- **Private Members**: Leading underscore 사용 (예: `_internal_process`)
+- **Primary OS**: **Windows (Win32 / PowerShell)** (Linux / macOS cross-platform compatible)
+- **Python Version**: Python 3.12+
+- **Encoding**: 파일 생성 및 읽기/쓰기 시 항상 `UTF-8` 인코딩을 명시합니다. (PowerShell 사용 시 `Get-Content -Encoding UTF8` / `Out-File -Encoding UTF8` 사용)
+- **Path Separation**: Python 코드 내 파일 경로 처리 시 항상 `pathlib.Path` 또는 `os.path.join`을 사용합니다. (하드코딩 경로 구분자 지양)
+- **Shell & Commands (PowerShell)**:
+  - 파일 삭제 시 `rm -rf` 대신 `Remove-Item -Recurse -Force` 사용
+  - 환경변수 설정 시 `export VAR=value` 대신 `$env:VAR='value'` 사용
+  - 백그라운드 작업 시 `&` 대신 `Start-Process -NoNewWindow` 또는 `Start-Job` 사용
+- **Multiprocessing**: Windows 환경에서는 `spawn` 프로세스 시작 모드가 기본 적용되므로 `if __name__ == '__main__':` 모듈 엔트리포인트 가드가 필수적이며, CUDA context 생성 및 sub-process 관리에 유의해야 합니다.
 
-### 1.2 타입 힌팅 (Type Hinting)
-모든 함수 정의에는 반드시 Python 3.9+의 Type Hinting을 적용합니다. 이는 정적 분석을 통해 버그를 사전에 방지하기 위함입니다.
-```python
-def process_data(input_path: str, threshold: float = 0.5) -> dict[str, Any]:
-    ...
+---
+
+## 0.1 Directory Structure & Architectural Blueprint (디렉터리 구조 및 아키텍처 명세)
+
+프로젝트 내 코드와 모듈은 아래 계층 분리 원칙(Separation of Concerns, SoC)을 반드시 준수하여 배치해야 합니다.
+
+```
+summarize_video/
+├── app/                      # [Core App] FastAPI 웹 애플리케이션 및 계층형 아키텍처
+│   ├── api/routers/          # HTTP REST API 엔드포인트 라우터 (Media, Tasks, History 등)
+│   ├── application/          # 비즈니스 오케스트레이션 및 파이프라인 (pipeline_runner.py, worker.py 등)
+│   └── core/                 # 의존성 주입(DI Container), 경로 설정(paths.py), 시스템 바인딩
+├── services/                 # [Domain Services] 순수 비즈니스 로직 / 단일 기능 수행 전용 모듈
+│   ├── transcriber.py        # STT (Whisper) 자막 추출 로직
+│   ├── summarizer.py         # LLM (Gemini/Claude) 요약 로직
+│   ├── clipper.py            # FFmpeg 하이라이트 영상 클리핑 로직
+│   └── ...
+├── tests/                    # [Testing Protocol] Pytest 기반 자동화 테스트 코드 (Git 수록 필수)
+├── docs/archive/             # [Archived Docs] 아카이빙된 레거시 분석/기획 마크다운 문서
+└── static/                   # [Static Assets] 정적 파일 및 로그/결과 산출물 (Git 추적 제외)
 ```
 
-### 1.3 문서화 (Docstrings)
-함수와 클래스에는 **Google Style Docstring**을 작성합니다.
-```python
-def summarize(self, segments: list[dict], video_filename: str) -> dict:
-    """Gemini API를 사용하여 영상 자막을 요약합니다.
-
-    Args:
-        segments: 분석된 자막 세그먼트 리스트.
-        video_filename: 원본 영상 파일명.
-
-    Returns:
-        요약 결과와 챕터 정보가 담긴 딕셔너리.
-    """
-```
+### 계층별 개발 규칙:
+1. **API 계층 (`app/api/routers/`)**: HTTP 요청 처리 및 입력 검증(`app/schemas/`)만 담당하며, 직접 비즈니스 로직을 구현하지 않고 Application/Service 계층을 호출합니다.
+2. **파이프라인 계층 (`app/application/`)**: 여러 Domain Service들을 순차적/비동기적으로 연결하여 전체 영상 요약 작업을 실행하고 진행 상황(`progress.py`)을 추적합니다.
+3. **도메인 서비스 계층 (`services/`)**: 외부에 의존하지 않는 독립적인 단일 비즈니스 로직(STT, 요약, 클리핑 등)을 제공합니다.
+4. **아카이브 문서 (`docs/archive/`)**: 레거시 PRD, 기획서, 호환성 분석 문서는 이 폴더에 격리하여 LLM 탐색 시 지식 오염을 방지합니다.
 
 ---
 
-## 2. JavaScript & Frontend Convention
+## 0.2 Branch Scope & Execution Workflow (브랜치 스코프 및 작업 수칙)
 
-웹 프론트엔드는 모던 ES6+ 문법을 따르며, 선언적인(Declarative) 코드 작성을 지향합니다.
+개발자 및 AI 에이전트는 코드 수정 및 작업 진행 시 아래 수칙을 엄격히 준수해야 합니다.
 
-- **Variable Declarations**: `var` 사용 금지. `const`를 기본으로 하되, 재할당이 필요한 경우에만 `let` 사용.
-- **Arrow Functions**: 익명 함수나 콜백에서는 화살표 함수(`=>`) 사용 권장.
-- **DOM Access**: Direct DOM 조작을 최소화하고, 데이터 중심의 렌더링을 지향.
-- **Naming**: `camelCase` 사용 (예: `videoPlayer`, `handleButtonClick`).
-
----
-
-## 3. Asynchronous Programming (Async/Await)
-
-FastAPI와 현대적 JS의 핵심은 비동기 처리입니다.
-- **Non-blocking**: I/O 바운드 작업(API 호출, 파일 읽기/쓰기)은 반드시 `async`와 `await`를 사용합니다.
-- **Error Handling**: 모든 비동기 호출은 `try...except` (Python) 또는 `try...catch` (JS) 블록으로 감싸서 예외 상황에 대비합니다.
+- **현재 브랜치 작업 원칙 (Current Branch Only)**: 사용자의 별도 명시적 요청이 없는 한, 모든 기능 개발, 문서 수정 및 리팩토링은 **현재 활성화된 Feature 브랜치 내에서만** 수행합니다.
+- **임의 병합 금지 (No Autonomous Merging)**: 작업이 완료되더라도 상위 브랜치(`develop`, `main`)로의 **Merge(병합) 작업을 임의로 진행하지 않습니다.**
+- **작업 완료 기준 (Completion Criteria)**: 
+  1. 현재 브랜치 상에서 로컬 테스트(`pytest`) 통과 검증
+  2. 규격에 맞는 **Commit** 작성
+  3. 원격 리포지토리로 **Push** 및 PR 등록까지만 완료하고 최종 병합은 사용자의 지시를 기다립니다.
 
 ---
 
-## 4. Git Commit Message (Conventional Commits)
+## 0.3 Gemini 3.6 Agentic Vibe Coding Rules (LLM 에이전트 바이브 코딩 전용 수칙)
 
-커밋 메시지는 작업의 의도를 명확히 전달해야 합니다. 아래의 형식을 따릅니다.
+Gemini 3.6 Flash 모델 및 AI 에이전트가 코드를 작성하거나 리팩토링할 때 필수 적용되는 강력한 실행 제약 조건(Strict Guardrails)입니다.
 
-`type: description`
-
-- **feat**: 새로운 기능 추가
-- **fix**: 버그 수정
-- **docs**: 문서 수정 (CONVENTION.md, README.md 등)
-- **style**: 코드 포맷팅, 세미콜론 누락 등 (로직 변경 없음)
-- **refactor**: 코드 리팩토링
-- **test**: 테스트 코드 추가
-- **chore**: 빌드 업무, 패키지 매니저 설정 등
-
----
-
-## 5. Software Engineering Principles
-
-1.  **DRY (Don't Repeat Yourself)**: 중복되는 로직은 반드시 함수나 클래스로 추상화합니다.
-2.  **KISS (Keep It Simple, Stupid)**: 복잡한 로직보다는 명확하고 단순한 로직을 선호합니다.
-3.  **Separation of Concerns (SoC)**: 비즈니스 로직(Services), 데이터 접근(Models), 인터페이스(API/UI)를 엄격히 분리합니다.
+1. **축약 및 생략 전면 금지 (Anti-Lazy Coding Directive)**:
+   - 코드 생성 시 `...`, `# rest of code`, `# 기존 코드와 동일` 등 임의의 줄임표나 생략 코드를 반환하는 것을 엄격히 금지합니다. 항상 실행 가능한 전체 코드(Full Code)를 제공해야 합니다.
+2. **로그 기반 실증 진단 (Log-First Empirical Protocol)**:
+   - 오류 발생 시 짐작이나 추측으로 코드를 수정하지 않습니다. 반드시 런타임 로그 및 스택 트레이스(Stack Trace)를 전량 조회하고 근본 원인(Root Cause)을 분석한 후 수정을 진행합니다.
+   - 예외 상황을 은폐하는 소극적 처리(Silent `try...except`, Dummy 0-byte/Fallback 데이터 반환)를 금지합니다.
+3. **실증적 테스트 기반 완결성 (Empirical Test-Driven Verification)**:
+   - 파일 수정 후 반드시 `pytest` 테스트 또는 빌드 검증 명령어를 로컬에서 직접 실행하여 $100\%$ 성공을 확인하기 전까지는 작업을 완료(Done)라 선언할 수 없습니다.
+4. **엄격한 타입 안전성 (Strict Type Safety & Pydantic v2)**:
+   - Python 3.12+ 명시적 Type Hinting과 Pydantic v2 기반 스키마 검증을 적용하여 런타임 타입 오류 및 JSON 파싱 에러를 사전에 방지합니다.
+5. **문자 단위 정확한 매칭 (Verbatim Exact Matching)**:
+   - 기존 코드 수정 시 3줄 이상의 변경되지 않는 선/후 맥락을 유지하여 비동기 변경 충돌 및 구문 파괴를 방지합니다.
 
 ---
-**최종 업데이트**: 2025-12-26
-**작성자**: AI Video Analyst Team (Gemini CLI)
+
+## 1. Core Engineering Principles
+
+1. **비동기 기본 원칙 (Async-First I/O)**: FastAPI 및 I/O 바운드 작업(네트워크 API 호출, 소켓, 파일 IO)은 반드시 `async/await` non-blocking 패턴으로 작성합니다.
+2. **단일 책임 원칙 (Separation of Concerns)**: 비즈니스 로직(`services/`), 데이터 스키마 (`app/schemas/`), 라우터 엔드포인트(`app/api/`)의 책임을 엄격히 구분합니다.
+3. **Conventional Commits**: 커밋 메시지는 한국어로 `[feat]`, `[fix]`, `[docs]`, `[refactor]`, `[test]`, `[chore]` 커밋 타입을 준수하여 작성합니다.
+
+---
+**최종 업데이트**: 2026-08-07
+**작성자**: AI Video Analyst Team (Gemini 3.6 Flash Optimization)
