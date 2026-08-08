@@ -1,8 +1,7 @@
-# Task List: Gemma 탈피 & Gemini 3.1 Flash-Lite 기반 블로그 전담 파이프라인 정돈
+# Task List: 실패/취소 작업 자동 정돈(Auto-dismiss) 및 상태 관리 버그 수정
 
 - [x] 구현 계획서 수립 및 사용자 승인 (`implementation_plan.md`) <!-- id: 0 -->
-- [x] `services/system_manager.py`: refiner 및 planner 모델을 `gemini-3.1-flash-lite`로 교체 <!-- id: 1 -->
-- [x] `services/summarizer.py`: 요약노트 Stage 2 (Reduce)에서 중복 `blog_post` 키 제거 및 챕터 요약에 경량화 집중 <!-- id: 2 -->
-- [x] `services/refiner.py`: Gemma 의존성 완전 제거 및 `gemini-3.1-flash-lite` 윤문 엔진 최적화 <!-- id: 3 -->
-- [x] `app/application/pipeline_runner.py`: 요약노트 챕터 재활용 고속 블로그 생성 로직 연결 <!-- id: 4 -->
-- [x] 단위/통합 테스트 작성 및 실행 (`tests/test_refiner_gemini.py` 및 전체 pytest 45/45 Passed 통과 검증) <!-- id: 5 -->
+- [x] `services/task_manager.py`: 완료/실패/취소 태스크의 TTL(10초) 기반 `get_active_tasks()` 자동 제외 구현 <!-- id: 1 -->
+- [x] `app/application/pipeline_runner.py`: 사용자 작업 취소 시 `failed` 상태로 덮어쓰이는 현상 방지 (`canceled` 상태 유지) <!-- id: 2 -->
+- [x] `static/js/components.js`: `TaskMonitor` 프론트엔드 10초 자동 닫기(Auto-dismiss) 타이머 추가 <!-- id: 3 -->
+- [x] 테스트 케이스 작성 및 전체 검증 (`tests/test_task_auto_cleanup.py` 및 pytest 50/50 Passed 통과) <!-- id: 4 -->

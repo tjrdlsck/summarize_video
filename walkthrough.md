@@ -1,51 +1,40 @@
-# 🏆 [Walkthrough] Gemma 탈피 & Gemini 3.1 Flash-Lite 기반 블로그 전담 파이프라인 정돈 완수 보고서
+# 🚀 Walkthrough: 실패/취소 작업 자동 정돈(Auto-dismiss) 및 상태 관리 버그 수정
 
-## 💡 문제 정의 및 해결 메커니즘 (Problem & Solution Mechanics)
-
-### 1. 근본 원인 분석 (Root Cause Analysis)
-- 기존 시스템은 **요약노트(`summarize_map_reduce`)**와 **블로그 뷰(`refine_chapter`)**가 각각 스토리텔링 블로그 포스팅 원고를 중복으로 집필하는 구조적 낭비가 있었습니다.
-- 또한 레거시 소형 오픈소스 모델인 `gemma-4-26b-a4b-it`가 일부 남아있어 챕터 윤문 시 응답 레이턴시가 30초~1분 이상 소요되고 인용구/HTML 강조 태그 지침 오차가 발생하는 문제가 있었습니다.
-
-### 2. 구체적 해결 메커니즘 (Fix Mechanics)
-- **Gemma 모델 탈피 및 `gemini-3.1-flash-lite` 전담 배치**:
-  - `TextRefiner` 윤문 모델을 `gemini-3.1-flash-lite`로 완전히 전환하였습니다.
-  - 지침 준수율`(Instruction Following)`이 $99\%$ 이상으로 상승하여 <mark>핵심 문장</mark> HTML 태그 및 `[[ID:숫자]]` 타임스탬프 치환 오차가 0%로 소멸했습니다.
-- **역할 분담 및 블로그 원고 중복 생성 제거**:
-  - **요약노트 (`summary.json`)**: 영상 타임라인 챕터 구분 및 챕터별 핵심 요약(`"summary"`)에 집중하도록 스키마를 경량화하여 챕터 생성 속도를 2배 향상시켰습니다.
-  - **블로그 뷰 (`blog_view.json`)**: `gemini-3.1-flash-lite`가 마크다운 포스팅 원고 작성을 **단독 전담**하도록 정돈했습니다.
-- **챕터 재활용 고속 파이프라인 (`pipeline_runner.py`)**:
-  - 이미 요약노트에서 추출된 챕터 구조가 있는 경우 중복 플래닝(`plan_blog_structure`)을 생략하고 곧바로 `refine_chapter` 고속 윤문만 수행하여 **블로그 생성 속도를 5배 이상 단축**시켰습니다.
-- **Daily Free Quota ($500 \text{ RPD}$) 5:5 최적 분산**:
-  - `gemini-3.5-flash-lite`: Stage 2 Reduce 챕터 생성 & 숏폼 선별 랭킹 전담
-  - `gemini-3.1-flash-lite`: Stage 1 Map 정밀 노트 추출 & Refine 블로그 윤문 전담
+오류가 발생하거나 취소된 작업이 서버를 재시작하기 전까지 작업 대기열 모니터 화면에서 영구히 사라지지 않던 버그를 분석 및 해결하고, 전체 회귀 테스트를 완료한 보고서입니다.
 
 ---
 
-## 🛠️ 주요 변경 사항 (Changes Made)
+## 💡 변경 사항 요약 (Changes Made)
 
-### 1. [`services/system_manager.py`](file:///home/radi/cli/summarize_video/services/system_manager.py) & [`data/config.json`](file:///home/radi/cli/summarize_video/data/config.json)
-- `DEFAULT_CONFIG` 내 `"refiner"` 및 `"planner"` 모델 매핑을 `"gemma-4-26b-a4b-it"`에서 **`"gemini-3.1-flash-lite"`**로 교체.
+### 1. `TaskManager` TTL 타임스탬프 기반 자동 스크리닝
+* **파일**: [`services/task_manager.py`](file:///home/radi/cli/summarize_video/services/task_manager.py)
+* **내용**:
+  * `request_cancel`, `complete_task`, `fail_task` 호출 시 작업 완료/종료 시점의 UNIX 타임스탬프(`finished_at`)를 기록합니다.
+  * `get_active_tasks(ttl_seconds=10.0)` 메서드에서 실패(`failed`), 취소(`canceled`), 완료(`completed`, 클립 생성을 제외한 일반 태스크) 건이 10초(TTL) 경과 시 `active_list` 반환 결과에서 **자동 제외**되도록 조치했습니다.
 
-### 2. [`services/summarizer.py`](file:///home/radi/cli/summarize_video/services/summarizer.py)
-- `summarize_map_reduce()` 내 Stage 2 Reduce의 `response_schema` 및 프롬프트에서 `blog_post` 항목을 제거하여 요약노트를 챕터 및 요약 생성에 집중하도록 경량화.
+### 2. 파이프라인 취소 시 상태 덮어쓰기 방지
+* **파일**: [`app/application/pipeline_runner.py`](file:///home/radi/cli/summarize_video/app/application/pipeline_runner.py)
+* **내용**:
+  * 사용자가 작업을 취소하여 `TaskCancelledError` 예외가 발생했을 때, `fail_task(...)` 대신 `request_cancel(...)`을 부르도록 교체하여 작업 상태가 `"failed"`(오류 발생)로 덮어씌워지는 버그를 차단하고 `"canceled"`(취소됨) 상태를 보존했습니다.
 
-### 3. [`services/refiner.py`](file:///home/radi/cli/summarize_video/services/refiner.py)
-- `TextRefiner` 내 Gemma 잔재 제거 및 `gemini-3.1-flash-lite` 호출 헬퍼(`_call_gemini_with_retry`) 도입.
-
-### 4. [`app/application/pipeline_runner.py`](file:///home/radi/cli/summarize_video/app/application/pipeline_runner.py)
-- `run_blog_pipeline()` 실행 시 `summary.json` 내 챕터 정보를 재활용하여 중복 플래닝을 건너뛰고 고속 윤문만 수행하도록 단축.
-
-### 5. 테스트 스크립트 작성 (`tests/`)
-- [`tests/test_refiner_gemini.py`](file:///home/radi/cli/summarize_video/tests/test_refiner_gemini.py): `TextRefiner`의 `gemini-3.1-flash-lite` 라우팅 및 타임스탬프 변환 단위 테스트 추가.
+### 3. 프론트엔드 작업 모니터 위젯 10초 자동 닫기 (Auto-dismiss)
+* **파일**: [`static/js/components.js`](file:///home/radi/cli/summarize_video/static/js/components.js)
+* **내용**:
+  * `TaskMonitor` 컴포넌트 내부 `React.useEffect` 훅을 이용하여 실패 또는 취소된 태스크가 존재할 때, 10초 후 프론트엔드에서 자동으로 `onCancel(t.task_id, true)` (즉 `DELETE /api/tasks/{task_id}`)를 호출하여 화면 우측 하단에서 매끄럽게 자동 퇴장(Auto-dismiss) 처리되도록 보완했습니다.
 
 ---
 
-## 🧪 검증 및 테스트 결과 (Validation & Test Results)
+## 🧪 테스트 및 검증 결과 (Validation Results)
 
-- **pytest 실행 결과**: **총 45개 테스트 전체 통과 (45/45 Passed, 100%)**
-
+### 1. 신규 단위 테스트 (`tests/test_task_auto_cleanup.py`)
 ```bash
-======================== 45 passed, 2 warnings in 12.19s ========================
+./venv/bin/pytest tests/test_task_auto_cleanup.py -v
 ```
+* `test_task_manager_ttl_cleanup` **PASSED**: 10초(TTL) 경과 시 `get_active_tasks()`에서 실패/취소 태스크 자동 제외 검증 완료
+* `test_pipeline_cancel_preserves_canceled_status` **PASSED**: 사용자 취소 시 상태가 `failed`가 아닌 `canceled`로 보존됨을 검증 완료
 
-- **실행 로그 저장 위치**: `test_results/test_execution.log` (.gitignore 처리됨)
+### 2. 전체 회귀 테스트 (Full Test Suite)
+```bash
+./venv/bin/pytest tests/ -v
+```
+* **결과**: `50 passed, 2 warnings in 12.34s` (전체 50개 테스트 100% PASSED 통과)

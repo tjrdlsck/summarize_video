@@ -217,7 +217,7 @@ class PipelineRunner:
         except TaskCancelledError:
             print(f"[{task_id}] Task Cancelled by User.")
             cleanup_files(str(video_filename) if video_filename else None)
-            task_manager.fail_task(task_id, "취소됨")
+            task_manager.request_cancel(task_id)
 
         except Exception as error:
             print(f"[{task_id}] Transcription Failed: {error}")
@@ -270,7 +270,7 @@ class PipelineRunner:
 
         except TaskCancelledError:
             print(f"[{task_id}] Summary Task Cancelled.")
-            task_manager.fail_task(task_id, "취소됨")
+            task_manager.request_cancel(task_id)
         except Exception as error:
             print(f"[{task_id}] Summary Failed: {error}")
             task_manager.fail_task(task_id, str(error), exception=error)
@@ -406,7 +406,7 @@ class PipelineRunner:
 
         except TaskCancelledError:
             print(f"[{task_id}] Blog Task Cancelled.")
-            task_manager.fail_task(task_id, "취소됨")
+            task_manager.request_cancel(task_id)
         except Exception as error:
             print(f"[{task_id}] Blog Generation Failed: {error}")
             task_manager.fail_task(task_id, str(error), exception=error)
@@ -540,8 +540,9 @@ class PipelineRunner:
         try:
             task_manager.update_progress(task_id, 0, "AI 숏츠 기획 시작...")
 
-            transcript_path = os.path.join(RESULTS_DIR, f"{base_name}_transcript.json")
             srt_path = os.path.join(RESULTS_DIR, f"{base_name}.srt")
+            vtt_path = os.path.join(RESULTS_DIR, f"{base_name}.vtt")
+            effective_sub_path = srt_path if os.path.exists(srt_path) else (vtt_path if os.path.exists(vtt_path) else None)
             summary_path = os.path.join(RESULTS_DIR, f"{base_name}_summary.json")
 
             if not os.path.exists(transcript_path):
@@ -612,7 +613,7 @@ class PipelineRunner:
                     video_path,
                     candidate["segments"],
                     output_filename=video_filename,
-                    sub_input_path=srt_path,
+                    sub_input_path=effective_sub_path,
                     progress_callback=ffmpeg_callback,
                     task_manager=task_manager,
                     task_id=task_id,
