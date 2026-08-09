@@ -347,7 +347,8 @@ function App() {
     const fetchHistory = async () => {
         try {
             const res = await axios.get(`/api/history?t=${Date.now()}`);
-            setHistoryList(res.data.history || []);
+            const list = Array.isArray(res.data) ? res.data : (res.data.history || []);
+            setHistoryList(list);
         } catch (e) {
             console.error("Failed to fetch history", e);
         }
@@ -520,11 +521,12 @@ function App() {
     };
 
     const handleSelectHistoryItem = async (item) => {
+        const fn = item.filename || item.video_filename || item.result_data?.video_filename;
         setLoading(true);
         setViewMode('player');
         setActiveTab('chapters');
         setIsClipMode(false);
-        setEditTitleText(item.title || item.video_filename);
+        setEditTitleText(item.title || fn);
         setIsEditingTitle(false);
 
         let transcriptData = null;
@@ -536,7 +538,7 @@ function App() {
         }
 
         let blogResData = null;
-        const baseName = item.video_filename.substring(0, item.video_filename.lastIndexOf('.')) || item.video_filename;
+        const baseName = fn ? (fn.substring(0, fn.lastIndexOf('.')) || fn) : '';
         try {
             const bRes = await axios.get(`/static/results/${baseName}_blog_view.json?t=${Date.now()}`).catch(() => null);
             if (bRes) blogResData = bRes.data;
@@ -544,6 +546,8 @@ function App() {
 
         const mergedData = {
             ...item,
+            video_filename: fn,
+            video_title: item.title || item.video_title || fn,
             chapters: item.result_data?.chapters || [],
             total_chapters: item.result_data?.total_chapters || 0,
             summary_title: item.result_data?.summary_title || item.title,
@@ -555,7 +559,7 @@ function App() {
         setPlayerData(mergedData);
         setBlogData(blogResData);
         setLoading(false);
-        fetchClipsList(item.video_filename);
+        if (fn) fetchClipsList(fn);
     };
 
     const handleTimeUpdate = () => {
@@ -819,31 +823,6 @@ function App() {
                             {/* Main Video Cards Grid */}
                             <section className="flex-1 p-6 overflow-y-auto custom-scrollbar">
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-                                    {filteredHistoryList.map((item, idx) => (
-                                        <div 
-                                            key={item.video_filename}
-                                            onClick={() => handleSelectHistoryItem(item)}
-                                            className="group bg-slate-900 rounded-2xl border border-slate-800 hover:border-brand-500/60 overflow-hidden shadow-lg hover:shadow-brand-500/10 transition-all duration-300 flex flex-col cursor-pointer"
-                                        >
-                                            {/* Thumbnail Container */}
-                                            <div className="aspect-video bg-slate-950 relative overflow-hidden flex items-center justify-center border-b border-slate-800/60">
-                                                <div className="text-3xl text-slate-700 group-hover:scale-110 transition-transform duration-300">▶</div>
-                                                <div className="absolute top-3 right-3 px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-black/60 backdrop-blur-md text-slate-300">
-                                                    {item.result_data?.chapters ? `${item.result_data.chapters.length} 챕터` : '자막'}
-                                                </div>
-                                            </div>
-
-                                            {/* Card Content */}
-                                            <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
-                                                <div>
-                                                    <h3 className="font-bold text-sm text-slate-100 line-clamp-2 leading-snug group-hover:text-brand-400 transition">
-                                                        {item.title || item.video_filename}
-                                                    </h3>
-                                                    <p className="text-[11px] text-slate-500 mt-1 font-mono">{new Date(item.timestamp * 1000).toLocaleDateString()}</p>
-                                                </div>
-
-                                                <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 text-xs">
-                                                    <button onClick={(e) => handleStartAnalysis(e, item.video_filename, item.title)} className="text-[11px] text-slate-400 hover:text-brand-400 font-bold transition">🤖 AI 분석</button>
                                                     <button onClick={(e) => { e.stopPropagation(); setRegenerateTarget(item); setIsRegenerateModalOpen(true); }} className="text-[11px] text-slate-400 hover:text-white font-bold transition">🔄 재생성</button>
                                                     <button onClick={(e) => handleDelete(e, item.video_filename)} className="text-[11px] text-slate-500 hover:text-rose-400 font-bold transition">삭제</button>
                                                 </div>
