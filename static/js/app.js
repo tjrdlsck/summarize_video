@@ -133,6 +133,34 @@ function App() {
         }
     };
 
+    const renderTypeBadge = (type) => {
+        if (!type) return null;
+        const badges = {
+            'Illustration': { label: '✨ 예화', cls: 'bg-yellow-100 text-yellow-800 border-yellow-200' },
+            'Scripture': { label: '📖 성경', cls: 'bg-blue-100 text-blue-800 border-blue-200' },
+            'Announcement': { label: '📢 광고', cls: 'bg-red-50 text-red-600 border-red-200' },
+            'Intro_Icebreak': { label: '🧊 인트로', cls: 'bg-gray-100 text-gray-600 border-gray-200' },
+            'Application': { label: '🎯 적용', cls: 'bg-green-100 text-green-800 border-green-200' },
+            'Prayer': { label: '🙏 기도', cls: 'bg-purple-100 text-purple-800 border-purple-200' },
+            'Preaching_Main': { label: '✝️ 설교 메인', cls: 'bg-indigo-100 text-indigo-800 border-indigo-200' },
+            'Opening': { label: '🎬 오프닝', cls: 'bg-cyan-100 text-cyan-800 border-cyan-200' },
+            'Banter': { label: '💬 티키타카', cls: 'bg-orange-100 text-orange-800 border-orange-200' },
+            'Main_Content': { label: '🎮 메인', cls: 'bg-indigo-100 text-indigo-800 border-indigo-200' },
+            'Reaction_Highlight': { label: '🤣 폭소 리액션', cls: 'bg-rose-100 text-rose-800 border-rose-200' },
+            'QnA': { label: '❓ QnA', cls: 'bg-emerald-100 text-emerald-800 border-emerald-200' },
+            'Ad_Promo': { label: '📢 광고', cls: 'bg-red-50 text-red-600 border-red-200' },
+            'Closing': { label: '👋 클로징', cls: 'bg-gray-100 text-gray-600 border-gray-200' },
+            'Intro': { label: '💡 인트로', cls: 'bg-sky-100 text-sky-800 border-sky-200' },
+            'Problem_Definition': { label: '⚠️ 문제 정의', cls: 'bg-amber-100 text-amber-800 border-amber-200' },
+            'Core_Explanation': { label: '⚙️ 핵심 원리', cls: 'bg-violet-100 text-violet-800 border-violet-200' },
+            'Example_Case': { label: '📊 실전 사례', cls: 'bg-teal-100 text-teal-800 border-teal-200' },
+            'Key_Takeaway': { label: '💡 핵심 꿀팁', cls: 'bg-lime-100 text-lime-800 border-lime-200' },
+            'CTA': { label: '🔗 안내', cls: 'bg-fuchsia-100 text-fuchsia-800 border-fuchsia-200' }
+        };
+        const badge = badges[type] || { label: `📌 ${type}`, cls: 'bg-indigo-50 text-indigo-700 border-indigo-200' };
+        return <span className={`text-[11px] font-bold px-2 py-0.5 rounded border ${badge.cls}`}>{badge.label}</span>;
+    };
+
     const handleDownloadOriginalVideo = () => {
         const isYoutubeSource = !/^[0-9a-fA-F]{8}_/.test(playerData.video_filename);
         let downloadName = playerData.video_filename;
@@ -813,10 +841,44 @@ function App() {
     };
 
     const [currentShortsSubtitle, setCurrentShortsSubtitle] = useState("");
+    const [disabledSkips, setDisabledSkips] = useState({});
 
-    const handleShortsTimeUpdate = (e, segments, clipId) => {
+    const toggleSkip = (shortsKey, skipIdx) => {
+        const key = `${shortsKey}_${skipIdx}`;
+        setDisabledSkips(prev => ({
+            ...prev,
+            [key]: !prev[key]
+        }));
+    };
+
+    const handleShortsTimeUpdate = (e, segments, clipId, recommendedSkips = []) => {
         if (!playerData.transcripts) return;
-        const currentTime = e.target.currentTime;
+        const video = e.target;
+        // 비디오가 이미 탐색(Seeking) 중인 경우 중복 점프 방지 (버퍼링/플리커링 차단)
+        if (video.seeking) return;
+
+        const currentTime = video.currentTime;
+        const clipStartOffset = (segments && segments.length > 0) ? segments[0].start : 0;
+
+        // 스마트 스킵 처리 (활성화된 스킵 구간 진입 시 jump)
+        if (recommendedSkips && recommendedSkips.length > 0) {
+            for (let idx = 0; idx < recommendedSkips.length; idx++) {
+                const skipKey = `${clipId}_${idx}`;
+                const isDisabled = !!disabledSkips[skipKey];
+                if (!isDisabled) {
+                    const skip = recommendedSkips[idx];
+                    // 0.35초 음성 완충 버퍼(Speech Buffer) 적용하여 말 끊김 방지
+                    const relSkipStart = (skip.start - clipStartOffset) + 0.35;
+                    const relSkipEnd = skip.end - clipStartOffset;
+                    if (currentTime >= relSkipStart && currentTime < relSkipEnd) {
+                        // 스킵 끝 지점 + 0.05초로 단 1회 깨끗하게 이동
+                        video.currentTime = relSkipEnd + 0.05;
+                        return;
+                    }
+                }
+            }
+        }
+
         const originalTime = getOriginalTimeFromShorts(currentTime, segments);
         const activeItem = playerData.transcripts.find(
             item => originalTime >= item.start && originalTime <= item.end
@@ -1650,7 +1712,7 @@ function App() {
                                                             <details key={uniqueKey} className="group/item bg-white border border-gray-200 rounded-xl shadow-sm open:border-indigo-300 open:shadow-md transition overflow-hidden">
                                                                 <summary className="p-5 flex justify-between items-start cursor-pointer list-none select-none bg-white hover:bg-gray-50 transition">
                                                                     <div className="flex-1">
-                                                                        <div className="flex items-center gap-2 mb-2"><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-600 border border-purple-200">AI SHORTS</span><span className="text-xs text-gray-400">{createdDate}</span></div>
+                                                                        <div className="flex items-center gap-2 mb-2"><span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-600 border border-purple-200">AI SHORTS</span>{renderTypeBadge(clip.chapter_type)}<span className="text-xs text-gray-400">{createdDate}</span></div>
                                                                         <h4 className="font-bold text-gray-900 text-lg group-open/item:text-indigo-600 transition flex items-center gap-2">{clip.title}<svg className="w-4 h-4 text-gray-400 transform group-open/item:rotate-180 transition" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg></h4>
                                                                         <div className="flex flex-wrap gap-2 mt-2">{clip.segments && clip.segments.map((seg, sIdx) => (<span key={sIdx} className="text-xs font-mono bg-gray-100 text-gray-600 px-2 py-0.5 rounded border border-gray-200">{formatTimeSimple(seg.start)}~{formatTimeSimple(seg.end)}</span>))}<span className="text-xs font-bold text-indigo-500 self-center">총 {clip.duration ? clip.duration.toFixed(1) : 0}초</span></div>
                                                                     </div>
@@ -1666,7 +1728,7 @@ function App() {
                                                                     <div className="w-full bg-black rounded-xl overflow-hidden shadow-lg relative flex justify-center bg-zinc-900 group">
                                                                         {clip.preview_url ? (
                                                                             <>
-                                                                                <video id={videoElementId} controls crossOrigin="anonymous" className="w-full max-h-[500px] object-contain" onTimeUpdate={(e) => handleShortsTimeUpdate(e, clip.segments, uniqueKey)} onPlay={() => { setCurrentShortsSubtitle(""); setActiveShortsId(uniqueKey); }}>
+                                                                                <video id={videoElementId} controls crossOrigin="anonymous" className="w-full max-h-[500px] object-contain" onTimeUpdate={(e) => handleShortsTimeUpdate(e, clip.segments, uniqueKey, clip.recommended_skips)} onPlay={() => { setCurrentShortsSubtitle(""); setActiveShortsId(uniqueKey); }}>
                                                                                     <source src={clip.preview_url} type="video/mp4" />
                                                                                     {clip.filename_vtt && <track kind="subtitles" src={`/static/clips/${clip.filename_vtt}`} srcLang="ko" label="한국어" />}
                                                                                 </video>
@@ -1674,6 +1736,35 @@ function App() {
                                                                             </>
                                                                         ) : (<div className="flex items-center justify-center h-64 w-full text-gray-500 text-sm">미리보기 파일 없음</div>)}
                                                                     </div>
+
+                                                                        <div className="bg-amber-50/80 border border-amber-200/80 rounded-xl p-4 flex flex-col gap-2">
+                                                                            <div className="flex items-center justify-between">
+                                                                                <span className="font-bold text-amber-900 text-xs flex items-center gap-1.5">
+                                                                                    ✂️ 스마트 스킵 제안 (딴소리/정적 제거)
+                                                                                    <span className="bg-amber-200/60 text-amber-900 text-[10px] px-1.5 py-0.5 rounded-full font-mono">{clip.recommended_skips ? clip.recommended_skips.length : 0}개 구간</span>
+                                                                                </span>
+                                                                                <span className="text-[11px] text-amber-700">클릭하여 스킵 적용/해제 (ON/OFF)</span>
+                                                                            </div>
+                                                                            <div className="flex flex-wrap gap-2 mt-1">
+                                                                                {(clip.recommended_skips || []).map((skip, skIdx) => {
+                                                                                    const sKey = `${uniqueKey}_${skIdx}`;
+                                                                                    const isOff = !!disabledSkips[sKey];
+                                                                                    const dur = (skip.end - skip.start).toFixed(1);
+                                                                                    return (
+                                                                                        <button
+                                                                                            key={skIdx}
+                                                                                            onClick={(e) => { e.preventDefault(); toggleSkip(uniqueKey, skIdx); }}
+                                                                                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 shadow-sm ${!isOff ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-gray-200 text-gray-500 hover:bg-gray-300 line-through'}`}
+                                                                                            title={skip.reason || "스킵 추천 구간"}
+                                                                                        >
+                                                                                            <span>{formatTimeSimple(skip.start)}~{formatTimeSimple(skip.end)} ({dur}s 스킵)</span>
+                                                                                            <span className={`text-[10px] font-bold px-1.5 py-0.25 rounded ${!isOff ? 'bg-amber-700/40 text-amber-100' : 'bg-gray-400 text-white'}`}>{!isOff ? 'ON' : 'OFF'}</span>
+                                                                                        </button>
+                                                                                    );
+                                                                                })}
+                                                                            </div>
+                                                                        </div>
+
                                                                     <div className="flex flex-col lg:flex-row gap-6">
                                                                         <div className="w-full lg:w-1/2 flex flex-col">
                                                                             <h5 className="font-bold text-indigo-800 mb-2 flex items-center gap-1 text-sm">💡 AI 선정 이유</h5>
@@ -1719,12 +1810,8 @@ function App() {
                                                             <div className="flex-1">
                                                                 <div className="flex justify-between items-center gap-4">
                                                                     <h3 className={`text-base font-bold transition leading-relaxed flex items-center gap-2 ${isExpanded ? 'text-indigo-700' : 'text-gray-700'}`}>
-                                                                        {chap.type === 'Illustration' && <span className="text-[10px] bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded border border-yellow-200">✨ 예화</span>}
-                                                                        {chap.type === 'Scripture' && <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200">📖 성경</span>}
-                                                                        {chap.type === 'Announcement' && <span className="text-[10px] bg-red-50 text-red-500 px-1.5 py-0.5 rounded border border-red-100">📢 광고</span>}
-                                                                        {chap.type === 'Intro_Icebreak' && <span className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded border border-gray-200">🧊 인트로</span>}
-                                                                        {chap.type === 'Application' && <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded border border-green-200">🎯 적용</span>}
-                                                                        {chap.type === 'Prayer' && <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200">🙏 기도</span>}
+                                                                        {renderTypeBadge(chap.type)}
+
                                                                         {chap.title}
                                                                     </h3>
                                                                     <svg className={`w-5 h-5 text-gray-400 transform transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
@@ -1732,7 +1819,30 @@ function App() {
                                                                 {!isExpanded && <p className="text-xs text-gray-400 mt-1 line-clamp-1">{chap.summary.replace(/\n/g, ' ')}</p>}
                                                             </div>
                                                         </div>
-                                                        {isExpanded && <div className="px-4 pb-4 pl-[4.5rem] animate-fade-in border-t border-gray-50"><div className="text-gray-600 text-sm leading-7 mt-2">{chap.summary.split('\n').map((line, i) => (<p key={i} className="mb-1">{line}</p>))}</div></div>}
+                                                        {isExpanded && (
+                                                            <div className="px-4 pb-4 pl-[4.5rem] animate-fade-in border-t border-gray-50">
+                                                                {chap.focus_point && (
+                                                                    <div className="mt-2.5 text-xs bg-indigo-50/70 text-indigo-900 p-2.5 rounded-lg border border-indigo-100 font-medium flex items-center gap-1.5">
+                                                                        <span>💡 **AI 추천 몰입 포인트**:</span> {chap.focus_point}
+                                                                    </div>
+                                                                )}
+                                                                {chap.key_segment_ids && chap.key_segment_ids.length > 0 && playerData.transcripts && (
+                                                                    <div className="mt-2 flex flex-wrap gap-1.5 items-center">
+                                                                        <span className="text-xs font-bold text-gray-500">🎯 핵심 자막 이동:</span>
+                                                                        {chap.key_segment_ids.map((kId) => {
+                                                                            const seg = playerData.transcripts.find(s => s.id === kId);
+                                                                            if (!seg) return null;
+                                                                            return (
+                                                                                <button key={kId} onClick={(e) => { e.stopPropagation(); seekVideo(seg.start); }} className="text-xs font-mono bg-white text-indigo-600 border border-indigo-200 px-2 py-0.5 rounded hover:bg-indigo-600 hover:text-white transition shadow-xs">
+                                                                                    ▶ ID #{kId} ({formatTimeSimple(seg.start)})
+                                                                                </button>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                )}
+                                                                <div className="text-gray-600 text-sm leading-7 mt-3">{chap.summary.split('\n').map((line, i) => (<p key={i} className="mb-1">{line}</p>))}</div>
+                                                            </div>
+                                                        )}
                                                     </div>
                                                 );
                                             })

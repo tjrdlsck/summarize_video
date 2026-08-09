@@ -226,7 +226,7 @@ class PipelineRunner:
 
             if run_blog:
                 task_manager.update_progress(task_id, 80, "2단계 완료. 3단계 블로그 초안 작성으로 이동...")
-                blog_req = BlogGenerationRequest(filename=str(video_filename))
+                blog_req = BlogGenerationRequest(filename=str(video_filename), content_type=req.content_type)
                 blog_wrapper = TaskProgressWrapper(task_manager, task_id, start_offset=80, scale_factor=0.2)
                 await self.run_blog_pipeline(task_id, blog_req, task_manager=blog_wrapper)
 
@@ -696,6 +696,7 @@ class PipelineRunner:
                             "filename_vtt": final_vtt_filename,
                             "duration": candidate["total_duration"],
                             "segments": candidate["segments"],
+                            "recommended_skips": candidate.get("recommended_skips", []),
                             "created_at": datetime.now().isoformat(),
                             "download_url": f"/static/clips/{zip_filename}",
                             "preview_url": f"/static/clips/{video_filename}",

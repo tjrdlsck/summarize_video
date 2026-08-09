@@ -327,6 +327,60 @@ class ShortsMaker:
                 humor_weight = 50
 
         weights = self._build_weights(humor_weight)
+    def _build_chapter_hints_context(self, chapters, profile):
+        """1단계 챕터 메타데이터에서 숏츠 타깃 챕터의 힌트를 조립합니다."""
+        if not chapters:
+            return "챕터 힌트 없음 (전체 대본 사용)"
+
+        target_types = profile.shorts_target_types
+        hints = []
+        for chap in chapters:
+            chap_type = chap.get("type", "")
+            if chap_type in target_types:
+                title = chap.get("title", "")
+                key_ids = chap.get("key_segment_ids", [])
+                focus = chap.get("focus_point", "")
+                hints.append(
+                    f"- [챕터]: {title} (성격: {chap_type})\n"
+                    f"  * 핵심 자막 ID: {key_ids}\n"
+                    f"  * 몰입 포인트 힌트: {focus}"
+                )
+
+        if not hints:
+            return "기본 타깃 챕터 힌트"
+        return "\n".join(hints)
+
+    def make_shorts_candidates(
+        self,
+        transcripts,
+        video_title,
+        chapters=None,
+        focus_topic=None,
+        content_type="sermon",
+        style="funny",
+        min_duration=40.0,
+        max_duration=90.0,
+        humor_weight=50,
+        keep_original_tone=True,
+        speaker_mode="pseudo",
+        map_notes=None,
+    ):
+        """
+        1단계 챕터 분석 힌트(key_segment_ids, focus_point, type)를 수용하여 최적의 숏츠 후보를 생성합니다.
+        
+        Args:
+            transcripts: 전체 자막 데이터 리스트
+            video_title: 영상 제목
+            chapters: 1단계 분석 챕터 메타데이터
+            focus_topic: 사용자가 요청한 주제/키워드 (Optional)
+            map_notes: Stage 1 (Map Phase)에서 추출된 정밀 노트 리스트 (Optional)
+        """
+        if not self.api_key:
+            print("[ShortsMaker] Error: API Key missing")
+            return []
+
+        profile = get_content_profile(content_type)
+        min_duration, max_duration = self._resolve_duration_bounds(min_duration, max_duration)
         annotated_transcripts = self._attach_turn_ids(transcripts, speaker_mode=speaker_mode)
 
         # 1. 챕터 기반 데이터 필터링 (Whitelist 방식)
@@ -353,13 +407,7 @@ class ShortsMaker:
         else:
             print("[ShortsMaker] No chapters provided. Using full script.")
 
-        # 챕터 매칭된 스크립트가 없거나, 총 세그먼트 합산 기간이 min_duration보다 작은 경우 스마트 Fallback
         if not filtered_script.strip() or total_filtered_duration < min_duration:
-            if filtered_script.strip():
-                print(f"[ShortsMaker] Warning: Filtered chapters total duration ({total_filtered_duration:.1f}s) < min_duration ({min_duration:.1f}s). Falling back to FULL script.")
-            else:
-                print("[ShortsMaker] Warning: No chapters matched target types. Falling back to FULL script.")
-            
             filtered_script = ""
             for seg in transcripts:
                 filtered_script += f"[{seg['id']}] {seg['start']:.2f}~{seg['end']:.2f}: {seg['text']}\n"
@@ -368,23 +416,23 @@ class ShortsMaker:
             print("[ShortsMaker] No valid script found even after fallback.")
             return []
 
-        # 2. 프롬프트 구성
-        user_intent_guide = ""
-        if focus_topic:
-            user_intent_guide = (
-                f"\n**[사용자 특별 요청]**\n"
-                f"사용자는 **'{focus_topic}'**에 관한 내용을 원합니다.\n"
-                f"제공된 스크립트에서 이 주제와 관련된 에피소드나 메시지를 **최우선**으로 찾으세요.\n"
-                f"만약 주제와 정확히 일치하는 내용이 없다면, 가장 유사하거나 흥미로운 대안을 제시하세요.\n"
-            )
+        # 2. 챕터 힌트 조립
+        chapter_hints_text = self._build_chapter_hints_context(chapters, profile)
 
+        # 3. JSON 스키마 구성 (chapter_type Enum 강제 포함)
+        default_type = profile.summary_type_enum[0] if profile.summary_type_enum else "Preaching_Main"
         candidates_schema = {
             "type": "ARRAY",
             "items": {
                 "type": "OBJECT",
                 "properties": {
                     "title": {"type": "STRING", "description": "시선을 끄는 숏츠 제목"},
-                    "reason": {"type": "STRING", "description": "선정 이유 및 사용자 주제와의 연관성"},
+                    "reason": {"type": "STRING", "description": "선정 이유 및 문맥적 가치"},
+                    "chapter_type": {
+                        "type": "STRING",
+                        "enum": profile.summary_type_enum,
+                        "description": "이 숏츠가 추출된 1단계 챕터의 성격 분류"
+                    },
                     "segments": {
                         "type": "ARRAY",
                         "items": {
@@ -395,40 +443,72 @@ class ShortsMaker:
                             },
                             "required": ["start", "end"]
                         }
+                    },
+                    "recommended_skips": {
+                        "type": "ARRAY",
+                        "description": "구간 내 텐션을 해치는 불필요 딴소리/정적 스킵 추천 목록",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "start": {"type": "NUMBER"},
+                                "end": {"type": "NUMBER"},
+                                "reason": {"type": "STRING"}
+                            },
+                            "required": ["start", "end"]
+                        }
                     }
                 },
-                "required": ["title", "reason", "segments"]
+                "required": ["title", "reason", "chapter_type", "segments", "recommended_skips"]
             }
         }
 
-        tone_guide = (
-            "원문 말투/감탄/밈을 유지하세요."
-            if keep_original_tone
-            else "욕설/비속어는 과도하지 않게 완화하세요."
-        )
-        runtime_rules = (
-            f"- 길이는 반드시 {int(min_duration)}초~{int(max_duration)}초 사이로 맞추세요.\n"
-            f"- 웃긴 장면 우선순위를 {int(humor_weight)}%로 두고 후보를 제안하세요.\n"
-            f"- {tone_guide}"
-        )
-        system_instruction = f"{profile.shorts_system_instruction}\n{runtime_rules}\n{user_intent_guide}\n"
+        user_intent_guide = f"사용자 관심 주제: '{focus_topic}'" if focus_topic else "전체 몰입 하이라이트"
 
-        prompt = f"{system_instruction}\n\n[Selected Script Data]:\n{filtered_script}"
+        prompt = (
+            f"<system_instructions>\n"
+            f"<persona>\n"
+            f"{profile.shorts_system_instruction}\n"
+            f"</persona>\n\n"
+            f"<task>\n"
+            f"<chapter_hints>를 참고하여 [Selected Script Data]에서 체류 시간을 최대화할 수 있는 핵심 하이라이트 맥락 구간을 선별하세요.\n"
+            f"주제 지침: {user_intent_guide}\n"
+            f"</task>\n\n"
+            f"<rules>\n"
+            f"- 길이는 반드시 {int(min_duration)}초 ~ {int(max_duration)}초 사이로 맞추세요.\n"
+            f"- 문장 중간 잘림 및 접속사/대명사 시작 절대 금지.\n"
+            f"- <chapter_hints>의 key_segment_ids 및 focus_point 부근 자막을 우선 고려하세요.\n"
+            f"- 챕터 성격별 편집 지침:\n"
+            f"  * Reaction_Highlight / Banter: [인과적 대화 서사 & 스킵 발굴 지침]\n"
+            f"    1) Setup (사건의 계기/원인): 왜 대화나 시비가 시작되었는지 시청자가 맥락을 이해할 수 있는 계기/원인 문장에서 시작하세요. (첫 3초에 억울함이 꼭 위치할 필요 없음)\n"
+            f"    2) Development (통대화 맥락 포용): 재생 시간 숫자에 연연하여 중간에 말을 자르지 마세요. 대화 중간에 딴소리나 정적이 섞여 있더라도 시작 드립부터 결말 펀치라인까지 오간 전체 대화 턴(Dialogue Chain)을 통째로 넉넉하게 포함하세요.\n"
+            f"    3) Peak Moment (피크 하이라이트): 클립 내부(중반부~후반부)에 출연진의 유쾌한 억울함, 폭소, 남탓, 팩트 폭격 등의 피크 리액션 순간이 반드시 명확하게 포함되어 있어야 합니다.\n"
+            f"    4) Recommended Skips (스킵 지점 발굴 필수): Setup과 Peak Moment 사이에서 텐션을 해치는 불필요 딴소리, 정적, 추임새, 주제 이탈 멘트를 정밀 탐지하여 recommended_skips에 무조건 1개 이상 발굴하여 기록하세요. (매우 중요한 필수 과업)\n"
+            f"    5) Punchline (결말 마무리): 대화가 한쪽의 팩트 폭격, 당황한 침묵, 또는 폭소로 유쾌하게 종결되는 턴(Turn)까지 포함하세요. 대화 상대방의 발언 시작 직후나 문장 중간 자르기 절대 금지.\n"
+            f"  * Illustration / Application: 감동적인 묵직한 문장 및 은혜 결단을 중심으로 선별하세요.\n"
+            f"  * Core_Explanation / Key_Takeaway: 핵심 수치/꿀팁이 명확히 전개되는 구간을 선별하세요.\n"
+            f"</rules>\n"
+            f"</system_instructions>\n\n"
+            f"<chapter_hints>\n"
+            f"{chapter_hints_text}\n"
+            f"</chapter_hints>\n\n"
+            f"[Selected Script Data]:\n"
+            f"{filtered_script}"
+        )
 
         try:
-            print(f"[ShortsMaker] Requesting AI Plan... (Topic: {focus_topic})")
+            print(f"[ShortsMaker] Requesting AI Plan with XML prompt... (Topic: {focus_topic})")
             client = genai.Client(api_key=self.api_key)
             response = client.models.generate_content(
                 model=self._get_model(),
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    temperature=0.4,
+                    temperature=0.3,
                     response_mime_type="application/json",
                     response_schema=candidates_schema
                 )
             )
             candidates = json.loads(response.text)
-            scored_candidates = []
+            processed_candidates = []
 
             for item in candidates:
                 if not item.get('segments'):
@@ -463,51 +543,22 @@ class ShortsMaker:
                     continue
 
                 validated_segments = sorted(validated_segments, key=lambda x: x["start"])
-                # 15초 이상이면 숏츠로서 유효하도록 하한선 완화 (최소 15초)
                 effective_min = max(15.0, min_duration * 0.5)
                 if current_total_duration < effective_min:
                     continue
 
-                overlap_segments = self._collect_candidate_transcripts(annotated_transcripts, validated_segments)
-                funniness = self._estimate_funniness_score(
-                    item.get("title", ""),
-                    item.get("reason", ""),
-                    overlap_segments,
-                )
-                tikkitaka, turn_switch_count = self._estimate_tikkitaka_score(overlap_segments, current_total_duration)
-                hook = self._estimate_hook_score(overlap_segments, validated_segments[0]["start"])
-                context = self._estimate_context_score(validated_segments, overlap_segments, current_total_duration)
-                topic = self._estimate_topic_match(focus_topic, item.get("title", ""), item.get("reason", ""), overlap_segments)
+                chap_type = str(item.get("chapter_type", default_type)).strip()
+                if chap_type not in profile.summary_type_enum:
+                    chap_type = default_type
 
-                score_base = (
-                    (weights["funniness"] * funniness)
-                    + (weights["tikkitaka"] * tikkitaka)
-                    + (weights["hook"] * hook)
-                    + (weights["context"] * context)
-                    + (weights["topic"] * topic)
-                )
-
+                item["chapter_type"] = chap_type
                 item["segments"] = validated_segments
                 item["total_duration"] = round(current_total_duration, 3)
-                item["score_base"] = round(score_base, 3)
-                item["score_breakdown"] = {
-                    "funniness": round(funniness, 3),
-                    "tikkitaka": round(tikkitaka, 3),
-                    "hook": round(hook, 3),
-                    "context": round(context, 3),
-                    "topic_match": round(topic, 3),
-                }
-                item["diagnostics"] = {
-                    "duration_sec": round(current_total_duration, 3),
-                    "turn_switch_count": int(turn_switch_count),
-                    "speaker_mode": speaker_mode,
-                }
-                scored_candidates.append(item)
+                processed_candidates.append(item)
 
-            scored_candidates.sort(key=lambda x: x.get("score_base", 0.0), reverse=True)
-
+            # 타임라인 중복 감점 및 배제 알고리즘 (기존 물리 엔진)
             selected = []
-            for item in scored_candidates:
+            for item in processed_candidates:
                 overlap_penalty = 0.0
                 for existing in selected:
                     overlap_penalty = max(
@@ -515,17 +566,13 @@ class ShortsMaker:
                         self._span_overlap_ratio(item["segments"], existing["segments"]),
                     )
 
-                final_score = self._clamp(float(item.get("score_base", 0.0)) - (0.2 * overlap_penalty))
-                item["score_breakdown"]["overlap_penalty"] = round(overlap_penalty, 3)
-                item["score_total"] = round(final_score, 3)
-
                 if overlap_penalty >= 0.65:
                     continue
 
+                item["score_total"] = round(1.0 - (0.2 * overlap_penalty), 3)
                 selected.append(item)
 
-            selected.sort(key=lambda x: x.get("score_total", 0.0), reverse=True)
-            print(f"[ShortsMaker] Generated {len(selected)} candidates.")
+            print(f"[ShortsMaker] Generated {len(selected)} valid candidates.")
             return selected
 
         except Exception as e:
