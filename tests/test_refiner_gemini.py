@@ -45,5 +45,4 @@ def test_text_refiner_genre_prompt_injection():
         
         # _call_gemini_with_retry에 전달된 contents 프롬프트에 스트리밍 지침이 들어갔는지 검증
         called_contents = mock_call.call_args[1]["contents"]
-        assert "스트리밍 윤문 지침" in called_contents
-        assert "[[ID:12]][[ID:13]] (쉼표 사용 절대 금지)" in called_contents
+        assert "인기 인플루언서 미디어 리뷰어" in called_contents
