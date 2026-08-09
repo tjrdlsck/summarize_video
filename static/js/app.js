@@ -854,6 +854,7 @@ function App() {
     const handleShortsTimeUpdate = (e, segments, clipId, recommendedSkips = []) => {
         if (!playerData.transcripts) return;
         const currentTime = e.target.currentTime;
+        const clipStartOffset = (segments && segments.length > 0) ? segments[0].start : 0;
 
         // 스마트 스킵 처리 (활성화된 스킵 구간 진입 시 jump)
         if (recommendedSkips && recommendedSkips.length > 0) {
@@ -862,8 +863,10 @@ function App() {
                 const isDisabled = !!disabledSkips[skipKey];
                 if (!isDisabled) {
                     const skip = recommendedSkips[idx];
-                    if (currentTime >= skip.start && currentTime < skip.end) {
-                        e.target.currentTime = skip.end;
+                    const relSkipStart = skip.start - clipStartOffset;
+                    const relSkipEnd = skip.end - clipStartOffset;
+                    if (currentTime >= relSkipStart && currentTime < relSkipEnd) {
+                        e.target.currentTime = relSkipEnd;
                         return;
                     }
                 }
