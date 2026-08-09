@@ -1732,12 +1732,12 @@ function App() {
                                                                             <div className="flex items-center justify-between">
                                                                                 <span className="font-bold text-amber-900 text-xs flex items-center gap-1.5">
                                                                                     ✂️ 스마트 스킵 제안 (딴소리/정적 제거)
-                                                                                    <span className="bg-amber-200/60 text-amber-900 text-[10px] px-1.5 py-0.5 rounded-full font-mono">{clip.recommended_skips.length}개 구간</span>
+                                                                                    <span className="bg-amber-200/60 text-amber-900 text-[10px] px-1.5 py-0.5 rounded-full font-mono">{clip.recommended_skips ? clip.recommended_skips.length : 0}개 구간</span>
                                                                                 </span>
                                                                                 <span className="text-[11px] text-amber-700">클릭하여 스킵 적용/해제 (ON/OFF)</span>
                                                                             </div>
                                                                             <div className="flex flex-wrap gap-2 mt-1">
-                                                                                {clip.recommended_skips.map((skip, skIdx) => {
+                                                                                {(clip.recommended_skips || []).map((skip, skIdx) => {
                                                                                     const sKey = `${uniqueKey}_${skIdx}`;
                                                                                     const isOff = !!disabledSkips[sKey];
                                                                                     const dur = (skip.end - skip.start).toFixed(1);
