@@ -4,7 +4,10 @@
 
 ## 1. 📌 현상 및 문제 정의 (Problem Definition)
 
-티키타카(`Banter`) 및 리액션 하이라이트(`Reaction_Highlight`) 장르의 쇼츠 생성 시, 초반 훅과 대화 내용은 흥미로우나 **마무리 끝맺음(Punchline/Resolution)이 어색하고 뚝 끊기는 현상**이 발생함.
+티키타카(`Banter`) 및 리액션 하이라이트(`Reaction_Highlight`) 장르의 쇼츠 생성 시 다음과 같은 한계가 존재함:
+1. 초반 훅과 대화 내용은 흥미로우나 **마무리 끝맺음(Punchline/Resolution)이 어색하고 뚝 끊기는 현상** 발생.
+2. "쇼츠"라는 키워드 편향(Semantic Bias)으로 인해 모델이 라이브 방송의 맥락을 고려하지 않고 **단순히 매우 짧은 연속 클립으로 강제 세그먼팅**함.
+3. 대화 중간에 껴있는 딴소리/정적을 쳐내려고 LLM에 비연속 점프컷(Jump Cut) 계산까지 일괄 전임시킬 경우, 타임스탬프 계산 오류 및 환각(Hallucination) 위험이 증가함.
 
 ---
 
@@ -12,77 +15,88 @@
 
 ### ① 프롬프트 지침의 '오프닝(Hook)' 편향과 '펀치라인' 지침 부재
 - 기존 프롬프트(`shorts_maker.py`)는 오프닝의 시선 끌기(`첫 3초 억울함/폭소/티키타카 순간을 훅으로 잡으세요`)에만 가이드가 집중되어 있음.
-- 대화의 최종 결말(Punchline / Resolution / Final Reaction)을 잡으라는 명시적 지침이 없어, 설정된 시간 범위($T_{\min} \le T \le T_{\max}$) 임계값 부근에서 무작위로 대화가 잘림.
+- 대화의 최종 결말(Punchline / Resolution / Final Reaction)을 잡으라는 명시적 지침이 없어, 설정된 시간 범위 임계값 부근에서 무작위로 대화가 잘림.
 
 ### ② 대화 인접 쌍(Adjacency Pair) 및 턴(Turn-taking) 완결성 누락
 - 티키타카는 2인 이상의 대화 인접 쌍(질문-답변, 드립-받아치기, 시비-팩폭 등) 구조를 가짐.
 - 대화의 턴(Turn)이 완결되는 지점까지 자르도록 하는 프롬프트 조건이 부재하여, 상대방이 말을 받아치거나 반박하는 중간 문장에서 자막 및 영상 구간이 끊김.
 
-### ③ 후처리 평가 로직의 단순 형태소/문장부호 의존
-- `shorts_maker.py`의 `_evaluate_candidate` 내 결말 점수($S_{\text{ending}}$) 계산 시, 단순 문장 부호(`.`, `!`, `?`) 및 종결 어미(`다`, `요`) 유무만 판별함.
-- 대화형 쇼츠에 필수적인 감정적/서사적 마무리(Emotional Resolution, 최종 팩폭, 당황한 침묵, 폭소 등)를 정밀히 측정하지 못함.
+### ③ LLM 단일 단계 점프컷의 한계와 시맨틱 편향
+- '쇼츠'라는 어휘는 사전 학습 데이터 특성상 **"1개의 짧은 연속 클립(Single Continuous Block)"**을 고르도록 모델을 편향시킴.
+- 또한 중간 대화를 잘라내어 이어 붙이는 과업을 LLM 혼자 처리하게 하면 탐색 복잡도가 $O(N^2)$로 급증하여 불확실성이 커짐.
 
 ---
 
-## 3. 💡 프롬프트 및 시스템 개선 방안 (Optimization Strategy)
+## 3. 💡 하이브리드 인터랙티브 편집 아키텍처 (Hybrid Interactive Architecture)
 
-### ① `Hook - Development - Punchline` 3단계 서사 구조 지침 도입
-- 오프닝(Hook)뿐만 아니라 대화 전개(Development)와 최종 마무리 펀치라인(Punchline)을 반드시 포함하도록 프롬프트 지침 구조화.
+이 문제를 근본적으로 해결하기 위해 **"AI의 통맥락 범위 선별" + "UI 스마트 스킵 제안(Human-in-the-Loop)"** 2단계 아키텍처를 도입함.
 
-### ② 대화 턴(Conversational Turn) 종결 조건 명시
-- 대화 상대방의 발언 시작 직후나 문장 중간에서 cut이 일어나지 않도록 strict rule 적용.
+```
+[ 1단계: AI 통맥락 추출 ]
+  - 앞부분(Hook/드립)과 뒷부분(Punchline/팩폭)을 이어 붙였을 때 유쾌함이 완성되는 전체 범위(Parent Window)를 통째로 선별.
+  - 중간에 3~10초간 관련 없는 딴소리가 포함되어 있더라도 서사의 완결성을 우선하여 통째 구간으로 1차 확정.
+        │
+        ▼
+[ 2단계: AI 내부 스킵(Skip) 지점 추천 ]
+  - 통째 구간 내부에서 텐션을 해치는 불필요 구간(정적, 세팅 멘트, 딴소리)을 탐지하여 recommended_skips 목록 생성.
+        │
+        ▼
+[ 3단계: 사용자 UI 인터랙티브 조작 ]
+  - 타임라인 상에 "✂️ 15s ~ 18s 스킵 추천 (3초 절약)" 뱃지를 토글(ON/OFF) 가능하도록 제시.
+  - AI 환각 위험 제로화 및 사용자 편집 자율성 보장.
+```
 
 ---
 
-## 4. 📝 세부 수정 내용 (Implementation Details)
+## 4. 📝 세부 수정 및 데이터 스키마 가이드 (Implementation Details)
 
 ### 4.1. `services/shorts_maker.py` 프롬프트 지침 수정
 
 ```python
 # [services/shorts_maker.py 수정안]
 "- 챕터 성격별 편집 지침:\n"
-"  * Reaction_Highlight / Banter: [Hook-Development-Punchline 3단계 구조 준수]\n"
+"  * Reaction_Highlight / Banter: [Hook-Development-Punchline 3단계 통맥락 준수]\n"
 "    1) Hook(첫 3초): 강한 억울함/폭소/티키타카 시작 지점으로 시선 집중.\n"
-"    2) Development: 출연진 간 티키타카 대화 턴(Turn)이 끊기지 않고 자연스럽게 오가는 구간 유지.\n"
+"    2) Development: 중간에 불필요 대화가 일부 섞이더라도 앞뒤 맥락이 이어질 수 있도록 대화 턴(Turn)을 통째로 포함.\n"
 "    3) Punchline(마무리): 반드시 한쪽의 확실한 팩트 폭격, 당황한 침묵, 최종 인정, 혹은 함박웃음으로 대화가 유쾌하게 완결되는 턴(Turn)까지 포함하세요. 대화 상대방의 발언 시작 직후나 문장 중간 자르기 절대 금지.\n"
 ```
 
-### 4.2. `services/content_profiles.py` 시스템 지침 보강
+### 4.2. Response Schema 확장 (추천 스킵 데이터 추가)
+
+AI가 통맥락 구간과 내부 추천 스킵 지점을 동시에 반환할 수 있도록 JSON Schema 확장:
+
+```json
+{
+  "title": "서버 렉 핑계 대는 스트리머",
+  "reason": "보스전 패배 후 게스트와의 남탓 티키타카 하이라이트",
+  "overall_segment": {
+    "start": 102.5,
+    "end": 148.0
+  },
+  "recommended_skips": [
+    {
+      "start": 115.0,
+      "end": 120.2,
+      "reason": "✂️ 음료수 마시는 정적 및 딴소리 구간 (스킵 추천)"
+    }
+  ]
+}
+```
+
+### 4.3. `services/content_profiles.py` 시스템 지침 보강
 
 ```python
 # [services/content_profiles.py 수정안]
 shorts_system_instruction=(
     "당신은 조회수를 만드는 스트리밍 숏폼 전문 편집자입니다.\n"
-    "제공된 스트리밍 스크립트에서 반응이 강하고, 대화의 시작부터 final punchline(결말 리액션)까지 맥락이 완결된 구간을 선별하세요."
+    "제공된 스트리밍 스크립트에서 반응이 강하고, 대화의 시작부터 final punchline(결말 리액션)까지 맥락이 완결된 구간을 통째로 선별하세요."
 )
 ```
 
 ---
 
-## 5. ⚡ Gemini Flash-Lite 모델 편향 대응 및 비연속 점프컷(Jump Cut) 기획 방안
+## 5. 🎯 기대 효과 (Expected Outcomes)
 
-### ① '쇼츠(Shorts)' 키워드의 시맨틱 편향 (Semantic Bias)
-- 프롬프트에 '쇼츠'라는 어휘가 강하게 지정되면 사전 학습 데이터 특성상 **1개의 짧은 연속된 클립(Single Continuous Block)**을 선택하려는 편향이 나타남.
-- 해결: 단순 "쇼츠 자르기" 지침 대신 **"비연속 다중 타임스탬프 몽타주(Non-contiguous Segment Chain)"** 개념으로 프레이밍 보강.
-
-### ② 라이브 대화의 불필요 구간 생략(Skip / Jump Cut) 지침 보강
-- 라이브 방송 특성상 [드립 시작] $\rightarrow$ (중간 잡담/세팅/정적) $\rightarrow$ [결말 팩폭] 구조가 자주 발생함.
-- 모델이 중간 불필요 대화를 적극적으로 쳐내고 비연속 타임스탬프 조각들을 연결할 수 있도록 rule 보강.
-
-```python
-# [services/shorts_maker.py - rules 추가안]
-"- [점프 컷(Jump Cut) 적극 활용]: 라이브 대화 특성상 중간의 몰입을 해치는 정적, 세팅 멘트, 불필요한 잡담 구간은 적극적으로 제외(Skip)하세요.\n"
-"- 하나의 후보는 연속된 1개의 클립일 필요가 없으며, 2~4개의 비연속 타임스탬프 조각(Segments)을 이어 붙여 서사를 완성할 수 있습니다.\n"
-"- [구조 예시]: Hook -> (중간 잡담 생략) -> Counter-punch 형태의 다중 segments 구성 권장.\n"
-```
-
-### ③ Response Schema 다중 Segment 조각 허용
-- Gemini API의 `response_schema`에 1개 후보(candidate) 내 다중 `segments` 배열(`[{"start": s1, "end": e1}, {"start": s2, "end": e2}]`) 생성을 보장하여 유연한 점프컷 조합 지원.
-
----
-
-## 6. 🎯 기대 효과 (Expected Outcomes)
-
-1. **서사적 완결성 증대**: `Hook` $\rightarrow$ `Development` $\rightarrow$ `Punchline` 서사 구조 확보로 쇼츠 끝맺음 몰입감 극대화.
-2. **비연속 점프 컷 활성화**: 군더더기 대화 생략으로 전개 속도감 증대 및 몰입 유지.
-3. **시청자 체류 시간 향상**: 대화 끊김 현상이 해소되어 시청자 이탈률 감소 및 재생 완수율(Completion Rate) 증가.
+1. **AI 추론 신뢰성 극대화**: LLM의 타임스탬프 환각 오류 및 무작위 자르기 현상 완전 방지.
+2. **서사적 완결성 확보**: 앞(드립)-뒤(팩폭) 대화 연계성이 파괴되지 않고 유쾌한 결과물 도출.
+3. **편집 자율성 및 UX 향상**: 사용자가 UI 상에서 1클릭 토글만으로 군더더기 구간을 선택적으로 제외 가능.
