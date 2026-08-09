@@ -863,10 +863,16 @@ function App() {
                 const isDisabled = !!disabledSkips[skipKey];
                 if (!isDisabled) {
                     const skip = recommendedSkips[idx];
-                    const relSkipStart = skip.start - clipStartOffset;
+                    // 0.35초 음성 완충 버퍼(Speech Buffer) 적용하여 말 끊김 방지
+                    const relSkipStart = (skip.start - clipStartOffset) + 0.35;
                     const relSkipEnd = skip.end - clipStartOffset;
                     if (currentTime >= relSkipStart && currentTime < relSkipEnd) {
-                        e.target.currentTime = relSkipEnd;
+                        const video = e.target;
+                        video.currentTime = relSkipEnd;
+                        // 점프 시 비디오 일시정지 현상 방지 및 연속 재생 보장
+                        if (!video.paused) {
+                            video.play().catch(() => {});
+                        }
                         return;
                     }
                 }
