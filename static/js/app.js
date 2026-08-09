@@ -823,12 +823,40 @@ function App() {
                             {/* Main Video Cards Grid */}
                             <section className="flex-1 p-6 overflow-y-auto custom-scrollbar">
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
-                                                    <button onClick={(e) => { e.stopPropagation(); setRegenerateTarget(item); setIsRegenerateModalOpen(true); }} className="text-[11px] text-slate-400 hover:text-white font-bold transition">🔄 재생성</button>
-                                                    <button onClick={(e) => handleDelete(e, item.video_filename)} className="text-[11px] text-slate-500 hover:text-rose-400 font-bold transition">삭제</button>
+                                    {filteredHistoryList.map((item, idx) => {
+                                        const itemFilename = item.filename || item.video_filename || (item.result_data && item.result_data.video_filename);
+                                        return (
+                                            <div 
+                                                key={itemFilename || idx}
+                                                onClick={() => handleSelectHistoryItem(item)}
+                                                className="group bg-slate-900 rounded-2xl border border-slate-800 hover:border-brand-500/60 overflow-hidden shadow-lg hover:shadow-brand-500/10 transition-all duration-300 flex flex-col cursor-pointer"
+                                            >
+                                                {/* Thumbnail Container */}
+                                                <div className="aspect-video bg-slate-950 relative overflow-hidden flex items-center justify-center border-b border-slate-800/60">
+                                                    <div className="text-3xl text-slate-700 group-hover:scale-110 transition-transform duration-300">▶</div>
+                                                    <div className="absolute top-3 right-3 px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-black/60 backdrop-blur-md text-slate-300">
+                                                        {item.result_data?.chapters ? `${item.result_data.chapters.length} 챕터` : '자막'}
+                                                    </div>
+                                                </div>
+
+                                                {/* Card Content */}
+                                                <div className="p-4 flex-1 flex flex-col justify-between space-y-3">
+                                                    <div>
+                                                        <h3 className="font-bold text-sm text-slate-100 line-clamp-2 leading-snug group-hover:text-brand-400 transition">
+                                                            {item.title || itemFilename}
+                                                        </h3>
+                                                        <p className="text-[11px] text-slate-500 mt-1 font-mono">{item.timestamp ? new Date(item.timestamp * 1000).toLocaleDateString() : ''}</p>
+                                                    </div>
+
+                                                    <div className="flex items-center justify-between pt-2 border-t border-slate-800/60 text-xs">
+                                                        <button onClick={(e) => handleStartAnalysis(e, itemFilename, item.title)} className="text-[11px] text-slate-400 hover:text-brand-400 font-bold transition">🤖 AI 분석</button>
+                                                        <button onClick={(e) => { e.stopPropagation(); setRegenerateTarget(item); setIsRegenerateModalOpen(true); }} className="text-[11px] text-slate-400 hover:text-white font-bold transition">🔄 재생성</button>
+                                                        <button onClick={(e) => handleDelete(e, itemFilename)} className="text-[11px] text-slate-500 hover:text-rose-400 font-bold transition">삭제</button>
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             </section>
                         </div>
