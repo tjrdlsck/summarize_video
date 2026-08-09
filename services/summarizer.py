@@ -227,6 +227,8 @@ class VideoSummarizer:
                     "summary": "자동 생성 챕터가 없어 전체를 하나의 구간으로 설정했습니다.",
                     "start_id": 1,
                     "end_id": total_lines,
+                    "key_segment_ids": [1],
+                    "focus_point": "전체 요약 구간",
                 }
             ]
 
@@ -246,6 +248,19 @@ class VideoSummarizer:
                 final_end = current_start
             final_end = min(final_end, total_lines)
 
+            raw_key_ids = chapter.get("key_segment_ids", [])
+            valid_key_ids = []
+            if isinstance(raw_key_ids, list):
+                for k_id in raw_key_ids:
+                    try:
+                        ik_id = int(k_id)
+                        if 1 <= ik_id <= total_lines:
+                            valid_key_ids.append(ik_id)
+                    except (ValueError, TypeError):
+                        pass
+            if not valid_key_ids:
+                valid_key_ids = [current_start]
+
             normalized.append(
                 {
                     "title": str(chapter.get("title", "")).strip() or f"챕터 {index + 1}",
@@ -253,6 +268,8 @@ class VideoSummarizer:
                     "summary": str(chapter.get("summary", "")).strip() or "요약 정보 없음",
                     "start_id": current_start,
                     "end_id": final_end,
+                    "key_segment_ids": valid_key_ids,
+                    "focus_point": str(chapter.get("focus_point", "")).strip(),
                 }
             )
 
@@ -503,35 +520,49 @@ class VideoSummarizer:
         )
         return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
-    def _create_blog_prompt(self, segments: list[dict]) -> str:
-        """블로그 포스트 생성을 위한 프롬프트를 생성합니다.
+    def _create_blog_prompt(self, segments: list[dict], content_type: str = "sermon") -> str:
+        """PTCF + XML 구조를 적용하여 블로그 포스트 생성을 위한 전용 템플릿 프롬프트를 생성합니다.
 
         Args:
             segments: 분석된 자막 세그먼트 리스트.
+            content_type: 콘텐츠 타입 프로필 (sermon, streaming, informational).
 
         Returns:
-            블로그 작성 지시사항과 스크립트 데이터가 포함된 프롬프트 문자열.
+            XML 구조 지시사항과 스크립트 데이터가 포함된 프롬프트 문자열.
         """
+        profile = get_content_profile(content_type)
         lines = [f"{seg['id']} | {seg['text']}" for seg in segments]
         script_text = "\n".join(lines)
-        
-        system_instruction = (
-            "당신은 전문 지식을 독자에게 친절하고 논리적으로 가르치는 **세계 최고의 블로그 에디터**입니다.\n"
-            "제공된 스크립트를 바탕으로 독자가 몰입할 수 있는 **스토리텔링형 블로그 포스트**를 작성하세요.\n"
-            "**절대 시간 순서대로 단순히 나열하지 마세요.** 주제별로 내용을 재구성하여 독자의 지적 호기심을 충족시켜야 합니다.\n\n"
-            "**[필수 작성 및 강조 규칙]**\n"
-            "1. **정형화된 서사 구조**: 모든 주제 섹션은 아래 구성을 따라야 합니다.\n"
-            "   - **도입부 (Introduction)**: 독자의 호기심을 자극하고 본문에서 다룰 핵심 질문을 던지는 문장으로 시작.\n"
-            "   - **본문 (Body)**: 매력적인 소제목과 함께 내용을 논리적으로 상세히 설명.\n"
-            "   - **맺음말 (Conclusion)**: 내용을 갈무리하며 독자에게 깊은 통찰이나 제언을 던지는 문장으로 마무리.\n"
-            "2. **시각적 강조 (Highlighting)**:\n"
-            "   - **핵심 키워드**: 문맥상 중요한 단어나 고유 명사는 반드시 `**굵게**` 표시하세요. (섹션당 5개 이상)\n"
-            "   - **핵심 메시지**: 각 챕터나 섹션의 결론이 담긴 가장 중요한 문장 1~2개는 반드시 <mark>핵심 문장</mark> 처럼 순수 HTML 태그로 감싸세요. (절대로 태그 앞뒤에 백틱(`) 기호를 붙이지 마세요)\n"
-            "3. **인용(Citation)**: 본문의 내용이 스크립트의 특정 부분에 기반할 때, 문장 끝에 반드시 `[[ID:숫자]]` 형식으로 출처를 남기세요.\n"
-            "   - **주의**: 여러 개의 출처를 인용할 경우 반드시 `[[ID:1]][[ID:2]]`와 같이 개별적으로 작성하세요. `[[ID:1, 2]]`와 같이 쉼표로 연결하지 마세요.\n"
-            "4. **어조**: 친절하고 전문적인 블로거의 말투(해요체)를 사용하세요."
+
+        return (
+            f"<system_instructions>\n"
+            f"<persona>\n"
+            f"{profile.refine_system_instruction}\n"
+            f"</persona>\n\n"
+            f"<task>\n"
+            f"제공된 대본(<script_data>)을 기반으로 독자의 몰입도를 극대화하는 블로그 포스트를 작성하세요.\n"
+            f"</task>\n\n"
+            f"<reasoning_process>\n"
+            f"<thinking>\n"
+            f"최종 포스트 작성 전, 본 장르({profile.content_type})에 최적화된 아래 3단계를 거치세요:\n"
+            f"{profile.cot_thinking_guide}\n"
+            f"</thinking>\n"
+            f"</reasoning_process>\n\n"
+            f"<rules>\n"
+            f"1. 시간 순서대로 나열하지 말고 주제별로 재구성하세요.\n"
+            f"2. 모든 주요 주장 및 문단 끝에는 대본의 출처 ID를 반드시 [[ID:숫자]] 형식으로 표기하세요.\n"
+            f"   - 주의: 여러 개를 인용할 경우 [[ID:1]][[ID:2]]와 같이 개별 표기하세요.\n"
+            f"3. 최종 출력물에는 HTML/XML 태그를 포함하지 말고, 순수 마크다운(Markdown) 문법만 사용하세요. (핵심 키워드는 **굵게**, 인용구는 > 사용)\n"
+            f"</rules>\n\n"
+            f"{profile.blog_few_shot_example}\n"
+            f"</system_instructions>\n\n"
+            f"<script_data>\n"
+            f"{script_text}\n"
+            f"</script_data>\n\n"
+            f"<final_instruction>\n"
+            f"<script_data>를 바탕으로 <system_instructions>의 규칙을 준수하여 작성하세요.\n"
+            f"</final_instruction>"
         )
-        return f"{system_instruction}\n\n[Script Data]:\n{script_text}"
 
     @retry(
         stop=stop_after_attempt(3), 
@@ -542,7 +573,8 @@ class VideoSummarizer:
         self, 
         segments: list[dict], 
         video_filename: str, 
-        status_callback: callable = None
+        status_callback: callable = None,
+        content_type: str = "sermon",
     ) -> dict:
         """Gemini를 사용하여 주제 중심의 블로그 포스트를 생성합니다. (Retry 적용)
 
@@ -552,6 +584,7 @@ class VideoSummarizer:
             segments: 분석된 자막 세그먼트 리스트.
             video_filename: 원본 영상 파일명.
             status_callback: 진행 상태 콜백.
+            content_type: 콘텐츠 타입 프로필 (sermon, streaming, informational).
 
         Returns:
             블로그 포스트 내용과 메타데이터가 포함된 딕셔너리.
@@ -562,11 +595,11 @@ class VideoSummarizer:
         if not segments:
             return {"error": "Empty segments"}
 
-        print(f"--- [Summarizer] Generating Blog Post for {video_filename} ---")
+        print(f"--- [Summarizer] Generating Blog Post for {video_filename} ({content_type}) ---")
         if status_callback: status_callback("Gemini가 블로그 포스트를 작성 중입니다...")
 
         tracker = UsageTracker()
-        prompt = self._create_blog_prompt(segments)
+        prompt = self._create_blog_prompt(segments, content_type=content_type)
 
         try:
             client = genai.Client(api_key=self.api_key)
@@ -673,11 +706,17 @@ class VideoSummarizer:
                         "type": "OBJECT",
                         "properties": {
                             "title": {"type": "STRING", "description": "해당 섹션의 소제목"},
+                            "type": {"type": "STRING", "description": "구간 성격 분류"},
                             "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID"},
                             "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID"},
-                            "focus_point": {"type": "STRING", "description": "이 섹션에서 강조해야 할 핵심 논거 및 스토리텔링 포인트"}
+                            "key_segment_ids": {
+                                "type": "ARRAY",
+                                "items": {"type": "INTEGER"},
+                                "description": "이 챕터에서 가장 임팩트가 강한 핵심 자막 ID 목록 (최대 3개)"
+                            },
+                            "focus_point": {"type": "STRING", "description": "이 섹션에서 강조해야 할 핵심 논거 및 몰입 포인트 힌트"}
                         },
-                        "required": ["title", "start_id", "end_id", "focus_point"]
+                        "required": ["title", "start_id", "end_id", "key_segment_ids", "focus_point"]
                     }
                 }
             },
@@ -817,9 +856,15 @@ class VideoSummarizer:
                             "type": {"type": "STRING", "enum": profile.summary_type_enum, "description": "구간 성격 분류"},
                             "summary": {"type": "STRING", "description": "해당 챕터의 상세 핵심 요약"},
                             "start_id": {"type": "INTEGER", "description": "시작 세그먼트 ID (1부터 total_lines)"},
-                            "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID (1부터 total_lines)"}
+                            "end_id": {"type": "INTEGER", "description": "종료 세그먼트 ID (1부터 total_lines)"},
+                            "key_segment_ids": {
+                                "type": "ARRAY",
+                                "items": {"type": "INTEGER"},
+                                "description": f"이 챕터에서 임팩트 판단 기준({profile.impact_criteria})에 부합하는 가장 강력한 핵심 자막 ID (최대 3개)"
+                            },
+                            "focus_point": {"type": "STRING", "description": "이 챕터의 하이라이트 및 몰입 포인트 힌트"}
                         },
-                        "required": ["title", "type", "summary", "start_id", "end_id"]
+                        "required": ["title", "type", "summary", "start_id", "end_id", "key_segment_ids", "focus_point"]
                     }
                 }
             },
@@ -831,10 +876,13 @@ class VideoSummarizer:
             f"Stage 1에서 자막 구간별로 정밀 추출된 아래 노트들을 바탕으로, 중복 문장을 제거(Deduplication)하고 영상 전체 타임라인 챕터 및 핵심 요약을 JSON으로 작성하세요.\n\n"
             f"[콘텐츠 타입]: {profile.content_type}\n"
             f"[챕터 분류 타입 목록]: {profile.summary_type_enum}\n"
+            f"[임팩트 판단 기준]: {profile.impact_criteria}\n"
             f"[전체 세그먼트 수]: 1 ~ {total_lines}\n\n"
             f"**[Reduce 지시사항]**\n"
             f"1. **chapters**: 영상을 1부터 {total_lines}까지 빈틈없이 타임라인 챕터로 구분하세요. {profile.summary_system_instruction}\n"
-            f"2. **summary**: 각 챕터별 핵심 내용, 구체적 예화, 데이터 포인트를 알차게 요약하세요.\n\n"
+            f"2. **type**: 반드시 사전 정의된 분류 타입 목록({profile.summary_type_enum}) 중에서만 선택하세요.\n"
+            f"3. **key_segment_ids**: 해당 챕터에서 가장 몰입도 높고 결정적인 핵심 자막 ID(1~{total_lines})를 최대 3개 선별하세요.\n"
+            f"4. **summary & focus_point**: 핵심 내용, 구체적 예화, 데이터 포인트를 알차게 요약하고 숏츠 기획용 힌트를 명시하세요.\n\n"
             f"[Fused Map Notes]:\n{fused_notes_text}"
         )
 
@@ -877,6 +925,8 @@ class VideoSummarizer:
                     "title": clean_chapter_title,
                     "type": chap['type'],
                     "summary": chap['summary'],
+                    "key_segment_ids": chap.get("key_segment_ids", [chap['start_id']]),
+                    "focus_point": chap.get("focus_point", ""),
                     "time": {
                         "start": start_time,
                         "end": end_time,

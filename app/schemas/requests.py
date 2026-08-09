@@ -43,6 +43,7 @@ class BlogGenerationRequest(BaseModel):
     """3단계: 블로그 생성 요청."""
 
     filename: str
+    content_type: Literal["sermon", "streaming", "informational"] = "sermon"
 
 
 class UpdateTitleRequest(BaseModel):
