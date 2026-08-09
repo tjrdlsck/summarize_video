@@ -1728,7 +1728,6 @@ function App() {
                                                                         ) : (<div className="flex items-center justify-center h-64 w-full text-gray-500 text-sm">미리보기 파일 없음</div>)}
                                                                     </div>
 
-                                                                    {clip.recommended_skips && clip.recommended_skips.length > 0 && (
                                                                         <div className="bg-amber-50/80 border border-amber-200/80 rounded-xl p-4 flex flex-col gap-2">
                                                                             <div className="flex items-center justify-between">
                                                                                 <span className="font-bold text-amber-900 text-xs flex items-center gap-1.5">
