@@ -47,7 +47,7 @@ window.normalizeLegacyTitle = (title) => {
 
 // --- Components (Direct Global Assignment) ---
 
-// [Sub Component] Task Monitor Widget (Upgraded v2 - Floating Glass Dock)
+// [Sub Component] Task Monitor Widget (Upgraded v2)
 window.TaskMonitor = function({ tasks, onCancel }) {
     React.useEffect(() => {
         if (!tasks || tasks.length === 0) return;
@@ -74,61 +74,58 @@ window.TaskMonitor = function({ tasks, onCancel }) {
     };
 
     return (
-        <div className="fixed bottom-6 right-6 w-96 glass-panel rounded-2xl shadow-2xl border border-indigo-200/60 overflow-hidden z-50 animate-slide-in-right flex flex-col max-h-[80vh]">
-            <div className="bg-slate-900/90 text-white px-4 py-3 flex justify-between items-center shrink-0 border-b border-slate-700/50">
-                <h3 className="font-bold text-xs tracking-wide flex items-center gap-2 text-indigo-300">
-                    <span className="relative flex h-2 w-2">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
-                    </span>
-                    AI 백그라운드 작업 대기열 ({tasks.length})
+        <div className="fixed bottom-6 right-6 w-96 bg-white rounded-xl shadow-2xl border border-indigo-100 overflow-hidden z-50 fade-in flex flex-col max-h-[80vh]">
+            <div className="bg-indigo-600 px-4 py-3 flex justify-between items-center shrink-0">
+                <h3 className="text-white font-bold text-sm flex items-center gap-2">
+                    <span className="animate-spin h-3 w-3 border-2 border-white border-t-transparent rounded-full"></span>
+                    작업 대기열 ({tasks.length})
                 </h3>
                 {dismissibleTasks.length > 0 && (
                     <button 
                         onClick={handleCloseAll} 
-                        className="text-[10px] font-bold bg-white/10 hover:bg-white/20 text-slate-300 px-2 py-1 rounded-lg transition"
+                        className="text-[10px] font-bold bg-white/20 hover:bg-white/30 text-white px-2 py-1 rounded transition"
                     >
                         모두 닫기
                     </button>
                 )}
             </div>
 
-            <div className="overflow-y-auto p-4 space-y-3 custom-scrollbar bg-slate-900/40 backdrop-blur-md">
+            <div className="overflow-y-auto p-4 space-y-4 custom-scrollbar">
                 {tasks.map((task, index) => {
                     let statusColor = "bg-indigo-500";
                     let statusText = `${task.progress}%`;
                     let isCancelable = true;
 
                     if (task.status === 'queued') {
-                        statusColor = "bg-slate-500";
+                        statusColor = "bg-gray-300";
                         statusText = "대기 중";
                     } else if (task.status === 'canceling') {
-                        statusColor = "bg-amber-500";
+                        statusColor = "bg-red-400";
                         statusText = "중단 중...";
                         isCancelable = false;
                     } else if (task.status === 'failed') {
-                        statusColor = "bg-rose-500";
+                        statusColor = "bg-red-500";
                         statusText = "오류/취소";
                         isCancelable = true;
                     } else if (task.status === 'completed') {
-                        statusColor = "bg-emerald-500";
+                        statusColor = "bg-green-500";
                         statusText = "완료";
                         isCancelable = true;
                     }
 
                     return (
-                        <div key={task.task_id} className="text-xs bg-white/80 dark:bg-slate-800/80 p-3 rounded-xl border border-slate-200/50 dark:border-slate-700/50 shadow-sm relative transition hover:border-indigo-300">
-                            <div className="flex justify-between items-start gap-2 mb-1.5">
-                                <div className="flex flex-col min-w-0 flex-1">
-                                    <span className="font-bold truncate text-slate-800 dark:text-slate-100" title={task.filename}>
+                        <div key={task.task_id} className="text-sm border-b border-gray-100 last:border-0 pb-3 last:pb-0 relative group">
+                            <div className="flex justify-between text-gray-700 mb-1 items-center">
+                                <div className="flex flex-col w-2/3">
+                                    <span className="font-bold truncate" title={task.filename}>
                                         {index + 1}. {normalizeLegacyTitle(task.filename)}
                                     </span>
-                                    <span className="text-[10px] text-slate-500 font-medium">
-                                        {task.type === 'clip_export' ? '✂️ 클립 내보내기' : 
-                                         task.type === 'shorts_generation' ? '⚡ AI 쇼츠 추출' :
-                                         task.type === 'blog_generation' ? '📝 블로그 포스트 작성' :
-                                         task.type === 'analysis' ? '🤖 AI 챕터 내용 분석' :
-                                         task.type === 'transcription' ? '🎙️ 자막 Whisper 음성인식' : '⚙️ 백그라운드 처리'}
+                                    <span className="text-xs text-gray-400">
+                                        {task.type === 'clip_export' ? '✂️ 클립 생성' : 
+                                         task.type === 'shorts_generation' ? '⚡ AI 숏츠 생성' :
+                                         task.type === 'blog_generation' ? '📝 블로그 생성' :
+                                         task.type === 'analysis' ? '🤖 AI 내용 분석' :
+                                         task.type === 'transcription' ? '🎙️ 자막 생성' : '⚙️ 작업 중'}
                                     </span>
                                 </div>
                                 {isCancelable && (
@@ -137,34 +134,34 @@ window.TaskMonitor = function({ tasks, onCancel }) {
                                             const isDismissible = task.status === 'failed' || task.status === 'completed' || task.status === 'canceled';
                                             onCancel(task.task_id, isDismissible);
                                         }}
-                                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-lg border transition shrink-0 ${(task.status === 'failed' || task.status === 'completed' || task.status === 'canceled') ? 'border-slate-200 text-slate-500 hover:bg-slate-100' : 'border-rose-200 text-rose-600 hover:bg-rose-50'}`}
+                                        className={`text-xs bg-white border px-2 py-0.5 rounded transition ${(task.status === 'failed' || task.status === 'completed' || task.status === 'canceled') ? 'border-gray-200 text-gray-500 hover:bg-gray-50' : 'border-red-200 text-red-500 hover:bg-red-50'}`}
                                     >
                                         {(task.status === 'failed' || task.status === 'completed' || task.status === 'canceled') ? '닫기' : '중단'}
                                     </button>
                                 )}
                             </div>
-                            <div className="w-full bg-slate-200 dark:bg-slate-700 rounded-full h-1.5 mb-1.5 overflow-hidden">
+                            <div className="w-full bg-gray-100 rounded-full h-2 mb-1.5 overflow-hidden">
                                 {task.status === 'queued' ? (
-                                    <div className="h-full w-full bg-slate-400 opacity-40 animate-pulse"></div>
+                                    <div className="h-full w-full bg-[url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAIklEQVQIW2NkQAKrVq36zwjjgzjwqgAA6gJwww==')] opacity-30"></div>
                                 ) : (
                                     <div
-                                        className={`h-1.5 rounded-full transition-all duration-300 ${statusColor}`}
+                                        className={`h-2 rounded-full transition-all duration-500 ${statusColor}`}
                                         style={{ width: `${task.progress}%` }}>
                                     </div>
                                 )}
                             </div>
-                            <div className="flex justify-between items-center text-[11px]">
-                                <p className="text-slate-500 truncate max-w-[70%]">
+                            <div className="flex justify-between items-center text-xs">
+                                <p className="text-gray-500 truncate w-3/4">
                                     {task.status === 'queued' ? `대기 순번: ${index + 1}번째` : task.message}
                                 </p>
-                                <span className={`font-mono font-bold ${task.status === 'failed' ? 'text-rose-500' : 'text-indigo-600 dark:text-indigo-400'}`}>
+                                <span className={`font-bold ${task.status === 'failed' ? 'text-red-500' : 'text-indigo-600'}`}>
                                     {statusText}
                                 </span>
                             </div>
                             {task.status === 'completed' && task.type === 'clip_export' && task.result && (
-                                <div className="mt-2 text-right border-t border-slate-100 pt-1.5">
-                                    <a href={task.result.download_url} className="inline-flex items-center gap-1 text-[11px] bg-emerald-600 text-white px-2.5 py-1 rounded-lg hover:bg-emerald-700 transition font-bold no-underline shadow-sm" download>
-                                        <span>⬇</span> 클립 다운로드
+                                <div className="mt-1 text-right">
+                                    <a href={task.result.download_url} className="inline-block text-xs bg-green-500 text-white px-2 py-1 rounded hover:bg-green-600 transition font-bold no-underline" download>
+                                        ⬇ 다운로드
                                     </a>
                                 </div>
                             )}
