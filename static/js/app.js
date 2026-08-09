@@ -1755,7 +1755,6 @@ function App() {
                                                                                 })}
                                                                             </div>
                                                                         </div>
-                                                                    )}
 
                                                                     <div className="flex flex-col lg:flex-row gap-6">
                                                                         <div className="w-full lg:w-1/2 flex flex-col">
