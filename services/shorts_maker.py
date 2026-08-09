@@ -458,7 +458,7 @@ class ShortsMaker:
                         }
                     }
                 },
-                "required": ["title", "reason", "chapter_type", "segments"]
+                "required": ["title", "reason", "chapter_type", "segments", "recommended_skips"]
             }
         }
 
@@ -482,7 +482,7 @@ class ShortsMaker:
             f"    1) Setup (사건의 계기/원인): 왜 대화나 시비가 시작되었는지 시청자가 맥락을 이해할 수 있는 계기/원인 문장에서 시작하세요. (첫 3초에 억울함이 꼭 위치할 필요 없음)\n"
             f"    2) Development (통대화 맥락 포용): 재생 시간 숫자에 연연하여 중간에 말을 자르지 마세요. 대화 중간에 딴소리나 정적이 섞여 있더라도 시작 드립부터 결말 펀치라인까지 오간 전체 대화 턴(Dialogue Chain)을 통째로 넉넉하게 포함하세요.\n"
             f"    3) Peak Moment (피크 하이라이트): 클립 내부(중반부~후반부)에 출연진의 유쾌한 억울함, 폭소, 남탓, 팩트 폭격 등의 피크 리액션 순간이 반드시 명확하게 포함되어 있어야 합니다.\n"
-            f"    4) Recommended Skips (스킵 지점 발굴): Setup과 Peak Moment 사이에서 텐션을 해치는 불필요 딴소리/정적 구간을 recommended_skips에 적극적으로 기록하세요.\n"
+            f"    4) Recommended Skips (스킵 지점 발굴 필수): Setup과 Peak Moment 사이에서 텐션을 해치는 불필요 딴소리, 정적, 추임새, 주제 이탈 멘트를 정밀 탐지하여 recommended_skips에 무조건 1개 이상 발굴하여 기록하세요. (매우 중요한 필수 과업)\n"
             f"    5) Punchline (결말 마무리): 대화가 한쪽의 팩트 폭격, 당황한 침묵, 또는 폭소로 유쾌하게 종결되는 턴(Turn)까지 포함하세요. 대화 상대방의 발언 시작 직후나 문장 중간 자르기 절대 금지.\n"
             f"  * Illustration / Application: 감동적인 묵직한 문장 및 은혜 결단을 중심으로 선별하세요.\n"
             f"  * Core_Explanation / Key_Takeaway: 핵심 수치/꿀팁이 명확히 전개되는 구간을 선별하세요.\n"
