@@ -841,10 +841,35 @@ function App() {
     };
 
     const [currentShortsSubtitle, setCurrentShortsSubtitle] = useState("");
+    const [disabledSkips, setDisabledSkips] = useState({});
 
-    const handleShortsTimeUpdate = (e, segments, clipId) => {
+    const toggleSkip = (shortsKey, skipIdx) => {
+        const key = `${shortsKey}_${skipIdx}`;
+        setDisabledSkips(prev => ({
+            ...prev,
+            [key]: !prev[key]
+        }));
+    };
+
+    const handleShortsTimeUpdate = (e, segments, clipId, recommendedSkips = []) => {
         if (!playerData.transcripts) return;
         const currentTime = e.target.currentTime;
+
+        // 스마트 스킵 처리 (활성화된 스킵 구간 진입 시 jump)
+        if (recommendedSkips && recommendedSkips.length > 0) {
+            for (let idx = 0; idx < recommendedSkips.length; idx++) {
+                const skipKey = `${clipId}_${idx}`;
+                const isDisabled = !!disabledSkips[skipKey];
+                if (!isDisabled) {
+                    const skip = recommendedSkips[idx];
+                    if (currentTime >= skip.start && currentTime < skip.end) {
+                        e.target.currentTime = skip.end;
+                        return;
+                    }
+                }
+            }
+        }
+
         const originalTime = getOriginalTimeFromShorts(currentTime, segments);
         const activeItem = playerData.transcripts.find(
             item => originalTime >= item.start && originalTime <= item.end
@@ -1694,7 +1719,7 @@ function App() {
                                                                     <div className="w-full bg-black rounded-xl overflow-hidden shadow-lg relative flex justify-center bg-zinc-900 group">
                                                                         {clip.preview_url ? (
                                                                             <>
-                                                                                <video id={videoElementId} controls crossOrigin="anonymous" className="w-full max-h-[500px] object-contain" onTimeUpdate={(e) => handleShortsTimeUpdate(e, clip.segments, uniqueKey)} onPlay={() => { setCurrentShortsSubtitle(""); setActiveShortsId(uniqueKey); }}>
+                                                                                <video id={videoElementId} controls crossOrigin="anonymous" className="w-full max-h-[500px] object-contain" onTimeUpdate={(e) => handleShortsTimeUpdate(e, clip.segments, uniqueKey, clip.recommended_skips)} onPlay={() => { setCurrentShortsSubtitle(""); setActiveShortsId(uniqueKey); }}>
                                                                                     <source src={clip.preview_url} type="video/mp4" />
                                                                                     {clip.filename_vtt && <track kind="subtitles" src={`/static/clips/${clip.filename_vtt}`} srcLang="ko" label="한국어" />}
                                                                                 </video>
@@ -1702,6 +1727,37 @@ function App() {
                                                                             </>
                                                                         ) : (<div className="flex items-center justify-center h-64 w-full text-gray-500 text-sm">미리보기 파일 없음</div>)}
                                                                     </div>
+
+                                                                    {clip.recommended_skips && clip.recommended_skips.length > 0 && (
+                                                                        <div className="bg-amber-50/80 border border-amber-200/80 rounded-xl p-4 flex flex-col gap-2">
+                                                                            <div className="flex items-center justify-between">
+                                                                                <span className="font-bold text-amber-900 text-xs flex items-center gap-1.5">
+                                                                                    ✂️ 스마트 스킵 제안 (딴소리/정적 제거)
+                                                                                    <span className="bg-amber-200/60 text-amber-900 text-[10px] px-1.5 py-0.5 rounded-full font-mono">{clip.recommended_skips.length}개 구간</span>
+                                                                                </span>
+                                                                                <span className="text-[11px] text-amber-700">클릭하여 스킵 적용/해제 (ON/OFF)</span>
+                                                                            </div>
+                                                                            <div className="flex flex-wrap gap-2 mt-1">
+                                                                                {clip.recommended_skips.map((skip, skIdx) => {
+                                                                                    const sKey = `${uniqueKey}_${skIdx}`;
+                                                                                    const isOff = !!disabledSkips[sKey];
+                                                                                    const dur = (skip.end - skip.start).toFixed(1);
+                                                                                    return (
+                                                                                        <button
+                                                                                            key={skIdx}
+                                                                                            onClick={(e) => { e.preventDefault(); toggleSkip(uniqueKey, skIdx); }}
+                                                                                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 shadow-sm ${!isOff ? 'bg-amber-500 text-white hover:bg-amber-600' : 'bg-gray-200 text-gray-500 hover:bg-gray-300 line-through'}`}
+                                                                                            title={skip.reason || "스킵 추천 구간"}
+                                                                                        >
+                                                                                            <span>{formatTimeSimple(skip.start)}~{formatTimeSimple(skip.end)} ({dur}s 스킵)</span>
+                                                                                            <span className={`text-[10px] font-bold px-1.5 py-0.25 rounded ${!isOff ? 'bg-amber-700/40 text-amber-100' : 'bg-gray-400 text-white'}`}>{!isOff ? 'ON' : 'OFF'}</span>
+                                                                                        </button>
+                                                                                    );
+                                                                                })}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+
                                                                     <div className="flex flex-col lg:flex-row gap-6">
                                                                         <div className="w-full lg:w-1/2 flex flex-col">
                                                                             <h5 className="font-bold text-indigo-800 mb-2 flex items-center gap-1 text-sm">💡 AI 선정 이유</h5>

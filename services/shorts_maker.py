@@ -443,6 +443,19 @@ class ShortsMaker:
                             },
                             "required": ["start", "end"]
                         }
+                    },
+                    "recommended_skips": {
+                        "type": "ARRAY",
+                        "description": "구간 내 텐션을 해치는 불필요 딴소리/정적 스킵 추천 목록",
+                        "items": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "start": {"type": "NUMBER"},
+                                "end": {"type": "NUMBER"},
+                                "reason": {"type": "STRING"}
+                            },
+                            "required": ["start", "end"]
+                        }
                     }
                 },
                 "required": ["title", "reason", "chapter_type", "segments"]
@@ -457,7 +470,7 @@ class ShortsMaker:
             f"{profile.shorts_system_instruction}\n"
             f"</persona>\n\n"
             f"<task>\n"
-            f"<chapter_hints>를 참고하여 [Selected Script Data]에서 체류 시간을 최대화할 수 있는 숏츠 하이라이트 구간을 선별하세요.\n"
+            f"<chapter_hints>를 참고하여 [Selected Script Data]에서 체류 시간을 최대화할 수 있는 핵심 하이라이트 맥락 구간을 선별하세요.\n"
             f"주제 지침: {user_intent_guide}\n"
             f"</task>\n\n"
             f"<rules>\n"
@@ -465,7 +478,10 @@ class ShortsMaker:
             f"- 문장 중간 잘림 및 접속사/대명사 시작 절대 금지.\n"
             f"- <chapter_hints>의 key_segment_ids 및 focus_point 부근 자막을 우선 고려하세요.\n"
             f"- 챕터 성격별 편집 지침:\n"
-            f"  * Reaction_Highlight / Banter: 첫 3초 억울함/폭소/티키타카 순간을 훅으로 잡으세요.\n"
+            f"  * Reaction_Highlight / Banter: [Hook-Development-Punchline 3단계 통맥락 준수]\n"
+            f"    1) Hook(첫 3초): 강한 억울함/폭소/티키타카 시작 지점으로 시선 집중.\n"
+            f"    2) Development: 중간에 불필요 대화가 일부 섞이더라도 앞뒤 맥락이 자연스럽게 연결되도록 대화 턴(Turn)을 통째로 포함.\n"
+            f"    3) Punchline(마무리): 반드시 한쪽의 확실한 팩트 폭격, 당황한 침묵, 최종 인정, 혹은 함박웃음으로 대화가 유쾌하게 완결되는 턴(Turn)까지 포함하세요. 대화 상대방의 발언 시작 직후나 문장 중간 자르기 절대 금지.\n"
             f"  * Illustration / Application: 감동적인 묵직한 문장 및 은혜 결단을 중심으로 선별하세요.\n"
             f"  * Core_Explanation / Key_Takeaway: 핵심 수치/꿀팁이 명확히 전개되는 구간을 선별하세요.\n"
             f"</rules>\n"

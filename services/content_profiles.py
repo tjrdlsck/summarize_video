@@ -128,8 +128,8 @@ STREAMING_PROFILE = ContentProfile(
     ),
     shorts_target_types=["Reaction_Highlight", "Banter", "Main_Content", "QnA"],
     shorts_system_instruction=(
-        "당신은 조회수를 만드는 스트리밍 숏폼 전문 편집자입니다.\n"
-        "제공된 스트리밍 스크립트에서 반응이 강하고 맥락이 완결된 구간을 선별하세요."
+        "당신은 시청자 몰입도를 극대화하는 스트리밍 하이라이트 전문 편집자입니다.\n"
+        "제공된 스트리밍 스크립트에서 반응이 강하고, 대화의 시작부터 결말 펀치라인(Punchline)까지 맥락이 유기적으로 연결된 통구간을 선별하세요."
     ),
     cot_thinking_guide=(
         "1. 방송 스크립트 중 가장 리액션이 컸거나, 유쾌한 디스/팩트폭격/억울함이 폭발한 핵심 밈 하이라이트 순간을 포착하세요.\n"
