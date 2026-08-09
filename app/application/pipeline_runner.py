@@ -696,6 +696,7 @@ class PipelineRunner:
                             "filename_vtt": final_vtt_filename,
                             "duration": candidate["total_duration"],
                             "segments": candidate["segments"],
+                            "recommended_skips": candidate.get("recommended_skips", []),
                             "created_at": datetime.now().isoformat(),
                             "download_url": f"/static/clips/{zip_filename}",
                             "preview_url": f"/static/clips/{video_filename}",
