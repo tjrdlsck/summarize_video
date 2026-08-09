@@ -853,7 +853,11 @@ function App() {
 
     const handleShortsTimeUpdate = (e, segments, clipId, recommendedSkips = []) => {
         if (!playerData.transcripts) return;
-        const currentTime = e.target.currentTime;
+        const video = e.target;
+        // 비디오가 이미 탐색(Seeking) 중인 경우 중복 점프 방지 (버퍼링/플리커링 차단)
+        if (video.seeking) return;
+
+        const currentTime = video.currentTime;
         const clipStartOffset = (segments && segments.length > 0) ? segments[0].start : 0;
 
         // 스마트 스킵 처리 (활성화된 스킵 구간 진입 시 jump)
@@ -867,12 +871,8 @@ function App() {
                     const relSkipStart = (skip.start - clipStartOffset) + 0.35;
                     const relSkipEnd = skip.end - clipStartOffset;
                     if (currentTime >= relSkipStart && currentTime < relSkipEnd) {
-                        const video = e.target;
-                        video.currentTime = relSkipEnd;
-                        // 점프 시 비디오 일시정지 현상 방지 및 연속 재생 보장
-                        if (!video.paused) {
-                            video.play().catch(() => {});
-                        }
+                        // 스킵 끝 지점 + 0.05초로 단 1회 깨끗하게 이동
+                        video.currentTime = relSkipEnd + 0.05;
                         return;
                     }
                 }
